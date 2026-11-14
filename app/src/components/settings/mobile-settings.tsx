@@ -16,7 +16,7 @@ import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, SCREEN_REMOTE_API, TAILSCA
 import { formatRelative, t, errorText } from "../../lib/i18n";
 import {
   approvalChoices, approveWithReplace, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
-  pairMethods, permissionChoices, permissionLabel, prunePhoneGroups, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, screenRemoteShown, screenUsageLine, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
+  pairMethods, permissionChoices, permissionLabel, prunePhoneGroups, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, screenRemoteShown, screenUsageLine, TURN_CAP_MAX, TURN_CAP_MIN, TURN_CAPS, turnUsageLine, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
   type PairMethodId, type PhoneGroup,
 } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
@@ -372,7 +372,7 @@ export function MobileSettings() {
   // What takes protection away asks the person, and is back to what holds now if they did not verify: the status did not change, so nothing else redraws it.
   const setLock = (patch: Partial<NonNullable<MobileStatus["lock"]>>) => run(() => mobileSecure("mobile.set_lock", patch));
   // The same for the screen without Tailscale: the daemon asks the person when it is turned on or a way is added, and nothing when it is turned off.
-  const setScreen = (patch: { remote?: boolean; methods?: Partial<NonNullable<MobileStatus["screen"]>["methods"]> }) => run(() => mobileSecure("mobile.set_screen", patch));
+  const setScreen = (patch: { remote?: boolean; methods?: Partial<NonNullable<MobileStatus["screen"]>["methods"]>; turn_session_mb?: number; turn_day_mb?: number; turn_month_mb?: number }) => run(() => mobileSecure("mobile.set_screen", patch));
   const relay = createRelayForm(run);
   // The phone just removed while the relay was on: a new room is offered, and nothing happens unless the person makes it.
   const [roomOffer, setRoomOffer] = createSignal<string | null>(null);
@@ -836,6 +836,25 @@ export function MobileSettings() {
               </For>
               <Show when={option("mobile-screen-remote").disabled}><div class="form-note warn-note" data-screen-ways-disabled>{option("mobile-screen-remote").disabled}</div></Show>
               <div class="muted-inline" data-screen-usage>{screenUsageLine(s()!.screen)}</div>
+              <Show when={turnUsageLine(s()!.screen)}>
+                <div class="muted-inline" data-turn-usage>{turnUsageLine(s()!.screen)}</div>
+                <div class="inline-fields" data-turn-caps>
+                  <For each={TURN_CAPS}>
+                    {(cap) => (
+                      <label class="inline-fields" style={{ "align-items": "center" }}>
+                        <span>{cap.label()}</span>
+                        <input class="field" type="number" min={TURN_CAP_MIN} max={TURN_CAP_MAX} style={{ width: "7em" }} value={s()?.screen?.[cap.key] ?? ""} disabled={busy()} onChange={(e) => {
+                          const box = e.currentTarget;
+                          const mb = Math.round(Number(box.value));
+                          // Back to what holds now when the number is out of bounds or the person did not verify a higher cap.
+                          if (!Number.isFinite(mb) || mb < TURN_CAP_MIN || mb > TURN_CAP_MAX) box.value = String(s()?.screen?.[cap.key] ?? "");
+                          else void setScreen({ [cap.key]: mb }).then(() => { box.value = String(s()?.screen?.[cap.key] ?? ""); });
+                        }} />
+                      </label>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <div class="muted-inline">{t("Turning a way on asks you to verify first.")}</div>
             </SettingRow>
           </Show>

@@ -20,6 +20,7 @@ import {
 } from "../src/room";
 import worker, { ADMISSION_REFUSALS, makeTicket, network, ROOMS_FULL, ROOMS_NETWORK, ROOMS_RATE, Strikes, TOO_MANY_REFUSED, type Env } from "../src/worker";
 import vectors from "./vectors.json";
+import { cleanServers, coturnMint, revokeStatement, TURN_FULL, TURN_MINTS_PER_HOUR, TURN_NETWORK, TURN_NO_PHONES, TURN_NOT_CONFIGURED, TURN_NOT_OFFERED, TURN_ROOM_LIMIT, TURN_TTL_S, TURN_UPSTREAM, turnMode, turnStatement } from "../src/turn";
 
 const relayEnv = env as unknown as Env;
 const REGISTRATION_KEY = "test-only-registration-key";
@@ -1106,5 +1107,165 @@ describe("hibernation", () => {
     expect(roomSource).toMatch(/setAlarm\(lastUsed \+ ROOM_TTL_MS\)/);
     expect(roomSource).toMatch(/acceptWebSocket\(/);
     expect(roomSource).toMatch(/setWebSocketAutoResponse\(/);
+  });
+});
+
+// ---------- TURN credentials ----------
+
+describe("TURN credentials for the room's desktop", () => {
+  const COTURN = { TURN_SECRET: "test-only-turn-secret", TURN_URLS: "turn:turn.example.test:3478?transport=udp,turns:turn.example.test:443?transport=tcp,turn:turn.example.test:53?transport=udp" };
+
+  async function signed(r: Registered, statement: string): Promise<string> {
+    const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, r.keys.privateKey, new TextEncoder().encode(statement));
+    return encodeBase64Url(new Uint8Array(sig));
+  }
+
+  function nextTs(): number {
+    return (lastTs = Math.max(Date.now(), lastTs + 1));
+  }
+
+  async function ask(relay: Env, r: Registered, path = "/v1/turn", body?: Record<string, unknown>, fetchFn?: typeof fetch, from = someNetwork()): Promise<Response> {
+    const ts = nextTs();
+    const payload = body ?? { ts, sig: await signed(r, turnStatement(r.room, ts)) };
+    const request = new Request(`https://relay.test${path}?t=${encodeURIComponent(r.ticket)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "cf-connecting-ip": from },
+      body: JSON.stringify(payload),
+    });
+    return (worker.fetch as (q: Request, e: Env, c?: unknown, f?: typeof fetch) => Promise<Response>)(request, relay, undefined, fetchFn);
+  }
+
+  async function withPhone(): Promise<Registered> {
+    const r = await register();
+    const d = await desktop(r, [token()]);
+    d.ws.close();
+    return r;
+  }
+
+  it("answers not configured without TURN secrets, before it looks at anything else", async () => {
+    const r = await register();
+    const answer = await ask(relayEnv, r, "/v1/turn", { ts: 1, sig: "x" });
+    expect([answer.status, answer.headers.get("x-kelpie-reason")]).toEqual([404, TURN_NOT_CONFIGURED]);
+    expect(turnMode({})).toBeNull();
+    expect(turnMode({ TURN_KEY_ID: "k", TURN_API_TOKEN: "t" })).toBe("cloudflare");
+    expect(turnMode(COTURN)).toBe("coturn");
+  });
+
+  it("mints coturn credentials for a signed request of a room with a phone, with no port-53 server, and never twice for one signature", async () => {
+    const r = await withPhone();
+    const relay = { ...relayEnv, ...COTURN };
+    const ts = nextTs();
+    const body = { ts, sig: await signed(r, turnStatement(r.room, ts)) };
+    const answer = await ask(relay, r, "/v1/turn", body);
+    expect(answer.status).toBe(200);
+    const minted = (await answer.json()) as { ice_servers: { urls: string[]; username: string; credential: string }[]; username: string; expires: number };
+    expect(minted.ice_servers[0].urls).toEqual(["turn:turn.example.test:3478?transport=udp", "turns:turn.example.test:443?transport=tcp"]);
+    expect(minted.username).toMatch(new RegExp(`^\\d+:${r.room}$`));
+    expect(minted.expires - Date.now()).toBeGreaterThan((TURN_TTL_S - 5) * 1000);
+    const again = await ask(relay, r, "/v1/turn", body);
+    expect(again.status, "the same signature again").toBe(403);
+  });
+
+  it("refuses a bad signature, one over another statement, a stale time and a room with no phone allowed", async () => {
+    const r = await register();
+    const relay = { ...relayEnv, ...COTURN };
+    const ts = nextTs();
+    expect((await ask(relay, r, "/v1/turn", { ts, sig: await signed(r, desktopStatement(r.room, ts)) })).status, "a socket's signature").toBe(403);
+    const old = Date.now() - 10 * 60 * 1000;
+    expect((await ask(relay, r, "/v1/turn", { ts: old, sig: await signed(r, turnStatement(r.room, old)) })).status, "ten minutes old").toBe(403);
+    const none = await ask(relay, r);
+    expect([none.status, none.headers.get("x-kelpie-reason")]).toEqual([409, TURN_NO_PHONES]);
+    const bogus = new Request("https://relay.test/v1/turn?t=00.bad", { method: "POST", body: "{}" });
+    expect((await worker.fetch(bogus, relay)).status).toBe(403);
+    const fromPage = new Request(`https://relay.test/v1/turn?t=${encodeURIComponent(r.ticket)}`, { method: "POST", headers: { origin: "https://evil.test" }, body: "{}" });
+    expect((await worker.fetch(fromPage, relay)).status, "never from a page").toBe(403);
+  });
+
+  it("holds a room to its credentials an hour, and the relay to its credentials a day", async () => {
+    const r = await withPhone();
+    const relay = { ...relayEnv, ...COTURN };
+    for (let i = 0; i < TURN_MINTS_PER_HOUR; i++) expect((await ask(relay, r)).status).toBe(200);
+    const over = await ask(relay, r);
+    expect([over.status, over.headers.get("x-kelpie-reason")]).toEqual([429, TURN_ROOM_LIMIT]);
+    const minted = await runInDurableObject(registrar(), (_o, state) => state.storage.sql.exec<{ count: number }>("SELECT count FROM turn_mints WHERE day = ? AND key = ?", utcDay(Date.now()), TOTAL).toArray()[0]?.count ?? 0);
+    const other = await withPhone();
+    const capped = { ...relay, TURN_MINTS_PER_DAY: String(minted + 1) };
+    expect((await ask(capped, other)).status).toBe(200);
+    const full = await ask(capped, other);
+    expect([full.status, full.headers.get("x-kelpie-reason")]).toEqual([503, TURN_FULL]);
+  });
+
+  it("checks the signature before anything about the room, and holds one network to its day", async () => {
+    const relay = { ...openEnv(COTURN) };
+    const made = await registerIn(relay, someNetwork());
+    expect(made.status).toBe(201);
+    const { room, ticket } = (await made.json()) as { room: string; ticket: string };
+    // The room's key is not this test's: its desktop signs with another. Admission looks at the room first, so a signature is checked as well.
+    const r = await withPhone();
+    const open: Registered = { ...r, room, ticket };
+    const refused = await ask(relay, open, "/v1/turn", { ts: nextTs(), sig: "x".repeat(86) });
+    expect(refused.status, "a bad signature is still a bad signature").toBe(403);
+    // A keyed room (this test's) on a relay that allows open rooms too: fine; then one network's day.
+    const net = someNetwork();
+    const perNetwork = { ...relayEnv, ...COTURN, TURN_MINTS_PER_NETWORK_DAY: "2" };
+    expect((await ask(perNetwork, r, "/v1/turn", undefined, undefined, net)).status).toBe(200);
+    expect((await ask(perNetwork, r, "/v1/turn", undefined, undefined, net)).status).toBe(200);
+    const over = await ask(perNetwork, r, "/v1/turn", undefined, undefined, net);
+    expect([over.status, over.headers.get("x-kelpie-reason")]).toEqual([429, TURN_NETWORK]);
+    expect((await ask(perNetwork, r, "/v1/turn", undefined, undefined, someNetwork())).status, "another network").toBe(200);
+  });
+
+  it("an open room's desktop, signing right, hears TURN is not offered unless TURN_OPEN_ROOMS is set", async () => {
+    const { keys, pk } = await roomKeys();
+    const relay = { ...openEnv(COTURN) };
+    const made = await worker.fetch(new Request("https://relay.test/v1/rooms", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": someNetwork() }, body: JSON.stringify({ pk }) }), relay);
+    const { room, ticket } = (await made.json()) as { room: string; ticket: string };
+    const r: Registered = { room, ticket, keys };
+    const d = await desktop(r, [token()]);
+    d.ws.close();
+    const refused = await ask(relay, r);
+    expect([refused.status, refused.headers.get("x-kelpie-reason")]).toEqual([404, TURN_NOT_OFFERED]);
+    expect((await ask({ ...relay, TURN_OPEN_ROOMS: "1" }, r)).status).toBe(200);
+  });
+
+  it("asks Cloudflare with the key's token, and passes on only what a phone needs; an upstream failure is said as one", async () => {
+    const r = await withPhone();
+    const relay = { ...relayEnv, TURN_KEY_ID: "key-1", TURN_API_TOKEN: "test-only-api-token" };
+    const calls: { url: string; auth: string | null; body: string }[] = [];
+    const cloudflare = (status: number, body: unknown) =>
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), auth: new Headers(init?.headers).get("authorization"), body: String(init?.body ?? "") });
+        return new Response(status === 204 ? null : JSON.stringify(body), { status });
+      }) as typeof fetch;
+    const servers = { iceServers: [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.cloudflare.com:53"] }, { urls: ["turn:turn.cloudflare.com:3478?transport=udp", "turn:turn.cloudflare.com:53?transport=udp", "turns:turn.cloudflare.com:443?transport=tcp"], username: "u-1", credential: "c-1" }] };
+    const answer = await ask(relay, r, "/v1/turn", undefined, cloudflare(201, servers));
+    expect(answer.status).toBe(200);
+    const minted = (await answer.json()) as { ice_servers: { urls: string[] }[]; username: string };
+    expect(minted.ice_servers.flatMap((s) => s.urls).some((u) => u.includes(":53"))).toBe(false);
+    expect(minted.username).toBe("u-1");
+    expect(calls[0]).toMatchObject({ url: "https://rtc.live.cloudflare.com/v1/turn/keys/key-1/credentials/generate-ice-servers", auth: "Bearer test-only-api-token" });
+    expect(JSON.parse(calls[0].body)).toEqual({ ttl: TURN_TTL_S });
+    for (const [status, body] of [[401, {}], [500, {}], [201, { iceServers: [] }]] as const) {
+      const failed = await ask(relay, r, "/v1/turn", undefined, cloudflare(status, body));
+      expect([failed.status, failed.headers.get("x-kelpie-reason")], `upstream ${status}`).toEqual([502, TURN_UPSTREAM]);
+    }
+    // A revoke is signed over the credential it ends.
+    const ts = nextTs();
+    const revoke = { ts, sig: await signed(r, revokeStatement(r.room, ts, "u-1")), username: "u-1" };
+    const ended = await ask(relay, r, "/v1/turn/revoke", revoke, cloudflare(204, {}));
+    expect(ended.status).toBe(204);
+    expect(calls.at(-1)?.url).toBe("https://rtc.live.cloudflare.com/v1/turn/keys/key-1/credentials/u-1/revoke");
+    const ts2 = nextTs();
+    const otherName = await ask(relay, r, "/v1/turn/revoke", { ts: ts2, sig: await signed(r, revokeStatement(r.room, ts2, "u-1")), username: "u-2" }, cloudflare(204, {}));
+    expect(otherName.status, "a signature over another credential").toBe(403);
+  });
+
+  it("matches the shared vectors: the statements the desktop signs and coturn's credential", async () => {
+    expect(turnStatement(vectors.room, vectors.ts)).toBe(vectors.turn_statement);
+    expect(revokeStatement(vectors.room, vectors.ts, vectors.revoke_username)).toBe(vectors.revoke_statement);
+    const [expiry] = vectors.revoke_username.split(":");
+    const out = await coturnMint({ TURN_SECRET: vectors.coturn_secret, TURN_URLS: "turn:x.test:3478" }, vectors.revoke_username.split(":")[1], Number(expiry) * 1000 - TURN_TTL_S * 1000);
+    expect(out.ok && out.minted.ice_servers[0].credential).toBe(vectors.coturn_credential);
+    expect(cleanServers([{ urls: "turn:a:53" }, { urls: ["javascript:x", "stun:b:3478"] }, null])).toEqual([{ urls: ["stun:b:3478"] }]);
   });
 });

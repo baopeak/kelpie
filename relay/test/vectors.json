@@ -10,5 +10,11 @@
   "pair_token": "uDEZD_0dITUDFSih13NOrPturhEd-8BfaqI2kq8cPAw",
   "pair_token_sha256": "48811535781dde30608b53e6d55759333fe17f09fb7a7d5cc91378766ef2b324",
   "device_token": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
-  "device_token_sha256": "425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c"
+  "device_token_sha256": "425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c",
+  "turn_statement": "kelpie-relay/1 turn 00112233445566778899aabbccddeeff 1762329600000",
+  "revoke_username": "1794700000:0123456789abcdef0123456789abcdef",
+  "revoke_statement": "kelpie-relay/1 turn_revoke 00112233445566778899aabbccddeeff 1762329600000 1794700000:0123456789abcdef0123456789abcdef",
+  "coturn_secret": "kelpie-turn-vector",
+  "coturn_credential": "GEk/j+659yYxfEJ/5jpct89/9Ck=",
+  "_coturn_about": "coturn use-auth-secret: base64(HMAC-SHA1(secret, revoke_username)), computed with Python hmac"
 }

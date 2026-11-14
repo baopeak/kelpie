@@ -247,6 +247,11 @@ pub struct Store {
     /// relay's allowance for itself, nothing more.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_relay_use: Option<MonthUse>,
+    /// What the screen sent through TURN this UTC day and calendar month (`turn_day_mb`, `turn_month_mb`); not sealed, as above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_turn_day: Option<MonthUse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_turn_month: Option<MonthUse>,
 }
 
 /// The ways the screen may go (Settings → Mobile → Advanced). The relay's are used only while `ScreenOptions::remote` is on.
@@ -291,6 +296,17 @@ pub struct ScreenOptions {
     /// turning the relay's way off then still means no screen through the relay.
     #[serde(default)]
     pub p2p_chosen: bool,
+    /// What one screen, this computer in a UTC day and in a calendar month may send through TURN (MB): the operator pays for TURN's traffic.
+    #[serde(default = "turn_session_mb")]
+    pub turn_session_mb: u32,
+    #[serde(default = "turn_day_mb")]
+    pub turn_day_mb: u32,
+    #[serde(default = "turn_month_mb")]
+    pub turn_month_mb: u32,
+    /// Saved by a build that offers TURN, so `methods.relay_turn` and the caps above are the person's choice (sealed in the third form);
+    /// before, the checkbox did nothing: read, it stays on only with the relay WebSocket's, and the caps are the defaults.
+    #[serde(default)]
+    pub turn_chosen: bool,
     /// HMAC-SHA256 (hex) over the fields above.
     #[serde(default)]
     pub mac: String,
@@ -298,6 +314,21 @@ pub struct ScreenOptions {
 
 pub const RELAY_WS_KBPS: u32 = 500;
 pub const RELAY_WS_MONTH_MB: u32 = 1024;
+pub const TURN_SESSION_MB: u32 = 1024;
+pub const TURN_DAY_MB: u32 = 3 * 1024;
+pub const TURN_MONTH_MB: u32 = 30 * 1024;
+
+fn turn_session_mb() -> u32 {
+    TURN_SESSION_MB
+}
+
+fn turn_day_mb() -> u32 {
+    TURN_DAY_MB
+}
+
+fn turn_month_mb() -> u32 {
+    TURN_MONTH_MB
+}
 
 fn relay_ws_kbps() -> u32 {
     RELAY_WS_KBPS
@@ -309,7 +340,7 @@ fn relay_ws_month_mb() -> u32 {
 
 impl Default for ScreenOptions {
     fn default() -> ScreenOptions {
-        ScreenOptions { remote: false, methods: ScreenMethods::default(), relay_ws_kbps: RELAY_WS_KBPS, relay_ws_month_mb: RELAY_WS_MONTH_MB, p2p_chosen: false, mac: String::new() }
+        ScreenOptions { remote: false, methods: ScreenMethods::default(), relay_ws_kbps: RELAY_WS_KBPS, relay_ws_month_mb: RELAY_WS_MONTH_MB, p2p_chosen: false, turn_session_mb: TURN_SESSION_MB, turn_day_mb: TURN_DAY_MB, turn_month_mb: TURN_MONTH_MB, turn_chosen: false, mac: String::new() }
     }
 }
 
@@ -320,13 +351,20 @@ impl ScreenOptions {
         if !self.p2p_chosen {
             self.methods.p2p = self.methods.p2p && self.methods.relay_ws;
         }
+        if !self.turn_chosen {
+            self.methods.relay_turn = self.methods.relay_turn && self.methods.relay_ws;
+            // The earlier forms' seals do not cover TURN's caps: the defaults apply.
+            self.turn_session_mb = TURN_SESSION_MB;
+            self.turn_day_mb = TURN_DAY_MB;
+            self.turn_month_mb = TURN_MONTH_MB;
+        }
         self
     }
 
     /// Whether going from `self` to `next` lets the screen go more ways than before: the person verifies that.
     pub fn widened_by(&self, next: &ScreenOptions) -> bool {
         let (a, b) = (self.methods, next.methods);
-        (next.remote && !self.remote) || (b.tailscale && !a.tailscale) || (b.p2p && !a.p2p) || (b.relay_turn && !a.relay_turn) || (b.relay_ws && !a.relay_ws) || next.relay_ws_kbps > self.relay_ws_kbps || next.relay_ws_month_mb > self.relay_ws_month_mb
+        (next.remote && !self.remote) || (b.tailscale && !a.tailscale) || (b.p2p && !a.p2p) || (b.relay_turn && !a.relay_turn) || (b.relay_ws && !a.relay_ws) || next.relay_ws_kbps > self.relay_ws_kbps || next.relay_ws_month_mb > self.relay_ws_month_mb || next.turn_session_mb > self.turn_session_mb || next.turn_day_mb > self.turn_day_mb || next.turn_month_mb > self.turn_month_mb
     }
 }
 
@@ -528,8 +566,11 @@ fn options_input(o: &LockOptions) -> Vec<u8> {
 fn screen_input(o: &ScreenOptions) -> Vec<u8> {
     let m = o.methods;
     let fields = format!("{}|{}|{}|{}|{}|{}|{}", o.remote, m.tailscale, m.p2p, m.relay_turn, m.relay_ws, o.relay_ws_kbps, o.relay_ws_month_mb);
-    // The second form says peer to peer was chosen: options sealed before verify as they were.
-    if o.p2p_chosen {
+    // Each later form says what was chosen in the build that brought it (the third: TURN and its caps, the second: peer to peer); options
+    // sealed in an earlier form verify as they were.
+    if o.turn_chosen {
+        format!("kelpie-screen-options/3|{fields}|{}|{}|{}|{}", o.p2p_chosen, o.turn_session_mb, o.turn_day_mb, o.turn_month_mb).into_bytes()
+    } else if o.p2p_chosen {
         format!("kelpie-screen-options/2|{fields}|p2p_chosen").into_bytes()
     } else {
         format!("kelpie-screen-options/1|{fields}").into_bytes()

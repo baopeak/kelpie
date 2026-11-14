@@ -332,6 +332,11 @@ fn rpc_answer(id: &Value, result: Result<Value>) -> Value {
 }
 
 impl Daemon {
+    /// This daemon, for work that outlives the call it starts from (a blocking request sent off the async threads).
+    pub(crate) fn this(&self) -> Option<Arc<Daemon>> {
+        self.me.upgrade()
+    }
+
     pub fn new(data_dir: PathBuf, exe: PathBuf) -> Arc<Daemon> {
         Self::with_secrets(data_dir, exe, Arc::new(notify::Keyring))
     }

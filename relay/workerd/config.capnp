@@ -5,6 +5,10 @@
 #   OPEN_REGISTRATION      "1": with no REGISTRATION_KEY, anyone may make rooms, within the limits below
 #   ROOMS_PER_NETWORK_DAY  rooms one network may make in a UTC day without a key (20 when unset)
 #   ROOMS_PER_DAY          rooms everyone together may make in a UTC day without a key (1000 when unset)
+#   TURN_SECRET, TURN_URLS your coturn server's shared secret (its use-auth-secret) and its URLs, comma-separated: the relay then mints
+#                          short-lived TURN credentials for its rooms' screens (or TURN_KEY_ID and TURN_API_TOKEN for Cloudflare's TURN)
+#   TURN_MINTS_PER_DAY     TURN credentials the relay mints in a UTC day (500 when unset); TURN_MINTS_PER_NETWORK_DAY per network (20)
+#   TURN_OPEN_ROOMS        "1": rooms made without the registration key get TURN too (off: strangers could spend your TURN traffic)
 # A network is the client's address as Cloudflare gives it (cf-connecting-ip); behind your own proxy every client is one network.
 # This relay serves no phone app: its computers' phones use Tailscale.
 # Run: workerd serve config.capnp   (rooms in ./rooms unless KELPIE_RELAY_DATA is mounted there; see docs/relay-self-host.md).
@@ -34,6 +38,13 @@ const relay :Workerd.Worker = (
     (name = "OPEN_REGISTRATION", fromEnvironment = "OPEN_REGISTRATION"),
     (name = "ROOMS_PER_NETWORK_DAY", fromEnvironment = "ROOMS_PER_NETWORK_DAY"),
     (name = "ROOMS_PER_DAY", fromEnvironment = "ROOMS_PER_DAY"),
+    (name = "TURN_SECRET", fromEnvironment = "TURN_SECRET"),
+    (name = "TURN_URLS", fromEnvironment = "TURN_URLS"),
+    (name = "TURN_KEY_ID", fromEnvironment = "TURN_KEY_ID"),
+    (name = "TURN_API_TOKEN", fromEnvironment = "TURN_API_TOKEN"),
+    (name = "TURN_MINTS_PER_DAY", fromEnvironment = "TURN_MINTS_PER_DAY"),
+    (name = "TURN_MINTS_PER_NETWORK_DAY", fromEnvironment = "TURN_MINTS_PER_NETWORK_DAY"),
+    (name = "TURN_OPEN_ROOMS", fromEnvironment = "TURN_OPEN_ROOMS"),
     (name = "RELAY_VERSION", text = "2"),
   ],
 );

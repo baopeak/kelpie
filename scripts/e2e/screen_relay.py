@@ -13,7 +13,8 @@ control, then reaches the computer through the relay with the relay token the co
 2. Turned on (`mobile.set_screen`, verified): `screens` lists the ways, the relay's available; a start with no Face ID is refused
    (`needs_face_id`); with the passkey's check over the screen's challenge it starts, `via` relay, frames come, the rate stays within the
    relay WebSocket's cap, and the same check used again is refused.
-3. The audit log says `via relay`; `mobile.status` counts the month's use.
+3. The audit log says `via relay`; `mobile.status` counts the month's use. The relay (given coturn secrets) mints TURN credentials for the screen
+   (`sc_rtc_servers`): the computer signs, the room checks, and no port-53 server is handed on.
 4. Turning it off ends the screen through the relay within a second.
 5. The same phone over Tailscale starts a screen with no Face ID, as before.
 """
@@ -41,6 +42,8 @@ import link_noise as ln  # noqa: E402
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 RELAY = os.path.join(ROOT, "relay")
 CAP_KBPS = 500
+# The relay mints coturn credentials (no TURN server answers here: what is checked is that the computer gets them, signed for its room).
+TURN_URLS = "turn:127.0.0.1:3478?transport=udp,turns:127.0.0.1:5349?transport=tcp,turn:127.0.0.1:53?transport=udp"
 
 
 def start_workerd(port):
@@ -59,7 +62,7 @@ def start_workerd(port):
     with open(bundle, "rb") as src, open(os.path.join(run, "dist", "entry.js"), "wb") as dst:
         dst.write(src.read())
     env = {k: v for k, v in os.environ.items() if k not in ("REGISTRATION_KEY", "OPEN_REGISTRATION", "TICKET_SECRET")}
-    proc = subprocess.Popen([found[0], "serve", "config.capnp"], cwd=run, env={**env, "TICKET_SECRET": secrets.token_urlsafe(32), "OPEN_REGISTRATION": "1"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen([found[0], "serve", "config.capnp"], cwd=run, env={**env, "TICKET_SECRET": secrets.token_urlsafe(32), "OPEN_REGISTRATION": "1", "TURN_SECRET": secrets.token_urlsafe(24), "TURN_URLS": TURN_URLS, "TURN_OPEN_ROOMS": "1"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     end = time.time() + 20
     while time.time() < end:
         try:
@@ -148,6 +151,12 @@ async def scenario(run, d, relay_port):
     check("the rate stays within the relay WebSocket's cap", bool(stats) and all(k <= CAP_KBPS * 1.1 for k in rates), rates)
     again = await via_relay.ask(type="sc_start", target=target, via="auto", recheck=proof, timeout=20)
     check("the same check used again is refused", (again or {}).get("code") == "needs_face_id", again)
+    check("the relay's TURN is listed as a way, available", paths.get("relay_turn", {}).get("ok") is True, paths.get("relay_turn"))
+    servers = await via_relay.ask(type="sc_rtc_servers", sc=via_relay.sc, timeout=20) or {}
+    urls = [u for s in servers.get("ice_servers", []) for u in (s["urls"] if isinstance(s["urls"], list) else [s["urls"]])]
+    check("TURN credentials are minted at the relay for this screen (signed by the computer, checked by the room), none on port 53",
+          servers.get("turn") is None and any(u.startswith("turn:") for u in urls) and not any(":53?" in u for u in urls), {"turn": servers.get("turn"), "urls": urls})
+    check("…with a name and a credential, given only inside the link", any(s.get("username") and s.get("credential") for s in servers.get("ice_servers", [])))
     # (that refusal came before any start, so the screen goes on)
     audit = json.dumps((await call("mobile.audit", {"limit": 50}))["entries"])
     check("the audit log says the screen's way", "monitor via relay" in audit)

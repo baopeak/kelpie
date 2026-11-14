@@ -41,7 +41,11 @@ name = "REGISTRAR"
 class_name = "Registrar"
 script_name = "kelpie-link-relay-room"
 
-# TICKET_SECRET and REGISTRATION_KEY come from `wrangler secret put`, never from this file.
+# TICKET_SECRET and REGISTRATION_KEY come from `wrangler secret put`, never from this file, as do the TURN secrets: TURN_KEY_ID and
+# TURN_API_TOKEN (a Cloudflare Realtime TURN key: the relay then mints short-lived credentials for its rooms' screens), or TURN_SECRET
+# and TURN_URLS for a coturn server. With neither, `/v1/turn` answers 404 `turn_not_configured`. Vars: TURN_MINTS_PER_DAY (500) and
+# TURN_MINTS_PER_NETWORK_DAY (20) cap the credentials minted in a UTC day; TURN_OPEN_ROOMS = "1" gives rooms made without a registration
+# key TURN too, which on this open relay means accepting what strangers' TURN traffic may cost (set a Cloudflare usage notification first).
 
 # Staging (`--env staging`): the same router, assets and limits under its own name and origin, bound to the staging room script.
 # Bindings and vars are not inherited by an environment, so they are repeated here. Its TICKET_SECRET is its own

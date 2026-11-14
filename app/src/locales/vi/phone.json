@@ -1,5 +1,12 @@
 {
-  "This browser cannot connect peer to peer (no WebRTC).": "Trình duyệt này không kết nối trực tiếp được vì không có WebRTC.",
+  "This relay offers no TURN.": "Relay này không cung cấp TURN.",
+  "The relay's TURN is used up for now. Try again later.": "TURN của relay đã hết lượt trong lúc này, vì vậy bạn hãy thử lại sau.",
+  "This computer's TURN allowance is used up (Kelpie → Settings → Mobile → Advanced).": "Hạn mức TURN của máy tính này đã dùng hết (Kelpie → Settings → Mobile → Advanced).",
+  "The relay did not give TURN credentials a moment ago.": "Relay vừa không cấp thông tin đăng nhập TURN.",
+  "{relay} (TURN)": "{relay} (TURN)",
+  "{mb} MB through TURN": "{mb} MB qua TURN",
+  "TURN is not available now: the picture stays on the relay.": "Hiện chưa dùng được TURN, vì vậy hình vẫn đi qua relay.",
+  "This computer's TURN allowance is used up, and the screen could not go back to the relay.": "Hạn mức TURN của máy tính này đã dùng hết, và màn hình không thể quay lại đi qua relay.",  "This browser cannot connect peer to peer (no WebRTC).": "Trình duyệt này không kết nối trực tiếp được vì không có WebRTC.",
   "A direct connection did not work from this network a moment ago.": "Kết nối trực tiếp từ mạng này vừa không thành công.",
   "This computer cannot send its screen peer to peer.": "Máy tính này không gửi được màn hình qua kết nối trực tiếp.",
   "Direct (peer to peer)": "Trực tiếp (P2P)",

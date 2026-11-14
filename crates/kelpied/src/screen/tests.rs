@@ -990,6 +990,83 @@ mod p2p {
     }
 
     #[tokio::test]
+    async fn turn_servers_are_asked_only_through_the_relay_and_say_why_there_are_none() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let direct = r.verb("sc_rtc_servers", json!({"sc": sc})).await.unwrap().unwrap();
+        assert_eq!(direct["turn"], "no_turn_direct", "a direct link needs no TURN");
+        assert!(direct["ice_servers"][0]["urls"][0].as_str().unwrap().starts_with("stun:"));
+        r.verb("sc_stop", json!({"sc": sc})).await.unwrap();
+        let _ = r.next("sc_end").await;
+        // Through the relay (the native app: no Face ID), with the relay off on this computer: said, and not kept against the way.
+        let (out2, _json2) = mpsc::channel(8);
+        let (media2, _frames2) = mpsc::channel(8);
+        let relay = || Phone { device: "phone", name: "Phone", conn: 5, out: &out2, media: &media2, cursor: &r.cursor, browser: false, relay: true };
+        let sc = r.d.screen.phone_verb(&r.d, relay(), "sc_start", &json!({"target": "w:66:7"})).await.unwrap().unwrap()["sc"].as_str().unwrap().to_string();
+        let through = r.d.screen.phone_verb(&r.d, relay(), "sc_rtc_servers", &json!({"sc": sc})).await.unwrap().unwrap();
+        assert_eq!(through["turn"], "relay_off");
+        assert!(r.d.mobile.turn_refused().is_none());
+    }
+
+    #[tokio::test]
+    async fn bytes_through_turn_are_counted_and_past_the_screens_allowance_the_picture_goes_back_to_the_link() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let _phone = connect(&r, &sc, true).await;
+        assert_eq!(path(&mut r).await["path"], "p2p");
+        let hold = r.d.screen.hold(&sc).unwrap();
+        let id = hold.state.lock().rtc.as_ref().unwrap().id;
+        let turn = |bytes: u64| kelpie_rtc::stats::Stats { local: "host", remote: "relay", rtt_ms: Some(40), bytes_tx: bytes, bytes_rx: 0, media_buffered: 0, media_full_ms: 0 };
+        r.d.screen.rtc_stats(&r.d, &hold, id, &turn(1_000));
+        r.d.screen.rtc_stats(&r.d, &hold, id, &turn(301_000));
+        {
+            let st = hold.state.lock();
+            assert!(st.turn_path == Some(true) && st.turn_bytes == 300_000 && st.turn_unsaved == 300_000, "from the peer's own count, while its pair goes through TURN");
+        }
+        assert!(!r.d.screen.turn_look(&r.d, &hold), "within the allowance");
+        assert_eq!(r.d.mobile.turn_used().0, 300_000, "counted for the day");
+        assert_eq!(hold.state.lock().turn_unsaved, 0);
+        // Past the screen's allowance (1 GB): the picture goes back to the link, and no new credential comes for this screen.
+        hold.state.lock().turn_bytes = 1024 * 1024 * 1024;
+        r.d.screen.rtc_stats(&r.d, &hold, id, &turn(302_000));
+        assert!(!r.d.screen.turn_look(&r.d, &hold), "the link takes it: the screen goes on");
+        let p = path(&mut r).await;
+        assert_eq!((p["path"].as_str(), p["why"].as_str()), (Some("tailscale"), Some("turn_budget_spent")));
+        assert!(hold.state.lock().turn_capped && !hold.state.lock().on_p2p);
+    }
+
+    #[tokio::test]
+    async fn a_peer_through_turn_alone_rests_on_turns_switch_not_peer_to_peers() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let off = r.d.mobile.requested_screen(&json!({"methods": {"p2p": false}})).unwrap();
+        r.d.mobile.set_screen(off).unwrap();
+        local_peers();
+        let (offering, offer) = test_phone::offer().await;
+        assert_eq!(r.verb("sc_rtc_offer", json!({"sc": sc, "sdp": offer})).await.unwrap_err().code, "method_off", "peer to peer is off");
+        let ack = r.verb("sc_rtc_offer", json!({"sc": sc, "sdp": offer, "relay_only": true})).await.unwrap().unwrap();
+        let mut phone = offering.accept(ack["sdp"].as_str().unwrap());
+        tokio::time::timeout(Duration::from_secs(10), phone.opened.wait_for(|o| *o)).await.unwrap().unwrap();
+        phone.sent_i.send(json!({"type": "rtc_hello", "sc": sc, "nonce": ack["nonce"]}).to_string().into_bytes()).unwrap();
+        assert_eq!(path(&mut r).await["path"], "p2p");
+        // Before its first stats it is held to TURN's rule, as offered (the hold's task looks every 250 ms, sooner than any stats).
+        let hold = r.d.screen.hold(&sc).unwrap();
+        {
+            let mut st = hold.state.lock();
+            st.turn_path = None;
+            assert_eq!(rtc::way_now(&hold, &st), Via::Turn);
+        }
+        r.send(&sc, &video(7, true, 500));
+        assert_eq!(media_of(&mut phone).await.seq, 7);
+        // Its stats say the pair is direct (an offer that said TURN alone and was not): peer to peer's rule, which is off, ends it.
+        let id = hold.state.lock().rtc.as_ref().unwrap().id;
+        let direct = kelpie_rtc::stats::Stats { local: "host", remote: "host", rtt_ms: Some(1), bytes_tx: 1, bytes_rx: 1, media_buffered: 0, media_full_ms: 0 };
+        r.d.screen.rtc_stats(&r.d, &hold, id, &direct);
+        let end = r.next_within("sc_end", Duration::from_secs(3)).await.expect("ended");
+        assert_eq!(end["reason"], "revoked");
+    }
+
+    #[tokio::test]
     async fn ending_the_screen_ends_its_peer() {
         let mut r = rig();
         let sc = r.start().await;

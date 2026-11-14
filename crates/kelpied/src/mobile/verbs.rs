@@ -119,6 +119,8 @@ pub enum Verb {
     ScRtcIce,
     /// The way the screen goes from now on (the link, or peer to peer).
     ScVia,
+    /// The ICE servers for the screen's next offer: STUN, and TURN's short-lived credentials through the relay.
+    ScRtcServers,
 }
 
 impl Verb {
@@ -170,6 +172,7 @@ impl Verb {
             "sc_rtc_offer" => Verb::ScRtcOffer,
             "sc_rtc_ice" => Verb::ScRtcIce,
             "sc_via" => Verb::ScVia,
+            "sc_rtc_servers" => Verb::ScRtcServers,
             _ => return None,
         })
     }
@@ -179,7 +182,7 @@ impl Verb {
             Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub | Verb::PushInfo | Verb::PushSub | Verb::PushUnsub | Verb::PushPrefs | Verb::PushTest | Verb::LockChallenge | Verb::LockEnrol | Verb::LockUnlock | Verb::LockNow | Verb::LockTouch => Permission::Read,
             Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume | Verb::NewOptions | Verb::NewSession => Permission::Write,
             Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => Permission::Control,
-            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia => Permission::Control,
+            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia | Verb::ScRtcServers => Permission::Control,
         }
     }
 
@@ -191,7 +194,7 @@ impl Verb {
 
     /// Whether this is one of the screen's verbs (`screen`).
     pub fn screen(self) -> bool {
-        matches!(self, Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia)
+        matches!(self, Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia | Verb::ScRtcServers)
     }
 
     /// What may pass while the phone is locked: keeping the connection up, and getting out of the lock. Nothing here says anything about a session.
@@ -240,11 +243,11 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 46] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::NewOptions, Verb::NewSession, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia];
+    const ALL: [Verb; 47] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::NewOptions, Verb::NewSession, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "panes", "tk_start", "tk_input", "tk_text", "tk_ack", "tk_stop", "tk_rebind", "screens", "sc_start", "sc_stop", "sc_ack", "sc_input", "sc_text", "sc_key", "sc_rebind", "sc_resume", "sc_sharpen", "sc_rtc_offer", "sc_rtc_ice", "sc_via"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "panes", "tk_start", "tk_input", "tk_text", "tk_ack", "tk_stop", "tk_rebind", "screens", "sc_start", "sc_stop", "sc_ack", "sc_input", "sc_text", "sc_key", "sc_rebind", "sc_resume", "sc_sharpen", "sc_rtc_offer", "sc_rtc_ice", "sc_via", "sc_rtc_servers"];
         assert_eq!(names.len(), ALL.len());
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
@@ -271,7 +274,7 @@ mod tests {
         let writes: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= Permission::Write).collect();
         assert_eq!(writes.len(), 26, "everything but taking over a pane or seeing the screen");
         let control: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() == Permission::Control).collect();
-        assert_eq!(control, [Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia]);
+        assert_eq!(control, [Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers]);
     }
 
     #[test]

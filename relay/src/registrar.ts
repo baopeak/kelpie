@@ -1,5 +1,6 @@
-// How many rooms were made today, per network and in all: one Durable Object for the whole relay, asked only when a room is about to be
-// made without a registration key, and only after the rate binding let the request through. It stores a count per UTC day and per
+// How many rooms were made today, per network and in all, and how many TURN credentials the relay minted today: one Durable Object for
+// the whole relay, asked only when a room is about to be made without a registration key (only after the rate binding let the request
+// through), or a credential minted. It stores a count per UTC day and per
 // network, the network being a hash (never an address), and forgets every day before yesterday the next time it counts. Nothing runs
 // on a timer: an idle Registrar costs nothing.
 
@@ -20,6 +21,7 @@ export class Registrar extends DurableObject<object> {
   constructor(ctx: DurableObjectState, env: object) {
     super(ctx, env);
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS rooms (day TEXT NOT NULL, key TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, key))");
+    ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS turn_mints (day TEXT NOT NULL, key TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY (day, key))");
   }
 
   /** Counts one more room for `network` today, unless the network or the whole relay has made its day's rooms already.
@@ -33,6 +35,22 @@ export class Registrar extends DurableObject<object> {
     sql.exec("DELETE FROM rooms WHERE day < ?", utcDay(now - 24 * 3600 * 1000));
     for (const key of [network, TOTAL]) {
       sql.exec("INSERT INTO rooms (day, key, count) VALUES (?, ?, 1) ON CONFLICT (day, key) DO UPDATE SET count = count + 1", day, key);
+    }
+    return "ok";
+  }
+
+  /** Counts one more TURN credential minted today for `network`, unless that network (`perNetwork`) or the whole relay (`perDay`) has minted
+   *  its day's. */
+  admitTurn(network: string, now: number, perNetwork: number, perDay: number): Admission {
+    if (!NETWORK_KEY.test(network)) throw new Error("not a network key");
+    const day = utcDay(now);
+    const sql = this.ctx.storage.sql;
+    const count = (key: string) => sql.exec<{ count: number }>("SELECT count FROM turn_mints WHERE day = ? AND key = ?", day, key).toArray()[0]?.count ?? 0;
+    if (count(network) >= perNetwork) return "network";
+    if (count(TOTAL) >= perDay) return "full";
+    sql.exec("DELETE FROM turn_mints WHERE day < ?", utcDay(now - 24 * 3600 * 1000));
+    for (const key of [network, TOTAL]) {
+      sql.exec("INSERT INTO turn_mints (day, key, count) VALUES (?, ?, 1) ON CONFLICT (day, key) DO UPDATE SET count = count + 1", day, key);
     }
     return "ok";
   }

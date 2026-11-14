@@ -4,8 +4,8 @@
 // when their region changes, where a finger lands on the picture under zoom, the two touch modes, input merged and stamped with the computer's
 // clock, frames acknowledged once decoded, and a stream counted lost after a few silent seconds. screen-view.tsx draws it.
 
-import { chooseVia, needsProof, pathRows, startRefusal, upgradesToP2p, viaText, type PathInfo, type RelayInfo, type ViaId } from "./screen-paths";
-import { P2P_RETRY_MS, VideoOrder, type PathStats, type PeerEvents } from "./screen-rtc";
+import { chooseVia, needsProof, pathRows, peerFor, startRefusal, viaText, type PathInfo, type RelayInfo, type ViaId } from "./screen-paths";
+import { P2P_RETRY_MS, STUN_ONLY, VideoOrder, type PathStats, type PeerEvents, type PeerSetup } from "./screen-rtc";
 
 export const MEDIA = 0x01;
 export const KIND_VIDEO = 1;
@@ -689,7 +689,7 @@ export interface TargetRow {
 }
 
 export type Reply =
-  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string }
+  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ice_servers?: RTCIceServer[]; turn?: string | null }
   | { t: "error"; code: string; message: string }
   | { t: "offline" }
   | { t: "unknown" };
@@ -720,7 +720,9 @@ export interface ScreenPort {
   /** Peer to peer, at a computer that has it: whether this browser can (WebRTC), a peer for screen `sc` (its media go to `deliver`), the way from now
    *  on (`sc_via`), and a media message to the view (as the link's are). */
   webrtc?(): boolean;
-  peer?(sc: string, ev: PeerEvents): PeerLike | null;
+  peer?(sc: string, ev: PeerEvents, setup: PeerSetup): PeerLike | null;
+  /** The ICE servers for a peer of screen `sc` (`sc_rtc_servers`, from a computer that has TURN): null from one before. */
+  servers?(sc: string, relayOnly: boolean): Promise<Reply> | null;
   via?(sc: string, via: ViaId): Promise<Reply>;
   deliver?(bytes: Uint8Array): void;
   serverNow(): number;
@@ -753,6 +755,8 @@ export interface Stats {
   crisp?: boolean | null;
   /** The computer's stage timings over the last second, in ms (`kelpie_screen::control::Stages`): for the measurement plan, shown in the debug view. */
   stages?: Record<string, number | null>;
+  /** What this screen sent through TURN so far (MB), once anything did. */
+  turn_mb?: number | null;
 }
 
 export interface ScreenState {
@@ -824,6 +828,8 @@ export function endedText(reason: string, t: (s: string) => string): string {
     case "app_closed":
     case "app":
       return t("The Kelpie app on the computer closed.");
+    case "turn_budget_spent":
+      return t("This computer's TURN allowance is used up, and the screen could not go back to the relay.");
     case "p2p_failed":
       return t("The direct (peer to peer) connection failed. Choose Automatic to fall back to the relay.");
     default:
@@ -878,6 +884,7 @@ export function detailsText(s: Stats | null, path: string | null, age: number | 
   if (typeof s?.kbps === "number") parts.push(`${Math.round(s.kbps)} kbps`);
   if (s?.h) parts.push(`${Math.round(s.fps ?? 0)} fps`, `${Math.round(s.h)}p`);
   if (age !== null) parts.push(t("{ms} ms old", { ms: Math.round(age) }));
+  if (p2p?.path === "turn" && typeof s?.turn_mb === "number") parts.push(t("{mb} MB through TURN", { mb: s.turn_mb }));
   return parts.join(" · ");
 }
 
@@ -919,6 +926,9 @@ export class ScreenSession {
   private p2pFailedAt = -Infinity;
   private statsAt = 0;
   private order = new VideoOrder();
+  private peerGen = 0;
+  /** The kind of peer opened last (TURN alone or not), which a reconnect or renewed credentials open again. */
+  private peerRelayOnly = false;
 
   constructor(private port: ScreenPort, private changed: (s: ScreenState | null) => void, private t: (s: string) => string = (s) => s) {}
 
@@ -998,7 +1008,8 @@ export class ScreenSession {
     this.chosen = via ?? "auto";
     this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null, usedVia: r.via ?? null, path: null, pathStats: null });
     // Peer to peer from the start (the computer waits for it), or Automatic moving onto it from the relay once it opens.
-    if (r.via === "p2p" || upgradesToP2p(this.chosen, r.via, pathRows(this.state?.paths, this.state?.relay, this.side(), this.t))) this.openPeer();
+    const kind = peerFor(this.chosen, r.via, pathRows(this.state?.paths, this.state?.relay, this.side(), this.t));
+    if (kind) void this.openPeer(kind === "turn");
     if (this.early) this.port.ack(r.sc, this.early);
     this.early = 0;
     if (this.earlyKey) {
@@ -1010,16 +1021,21 @@ export class ScreenSession {
   }
 
   /** `sc_state`, `sc_stats`, `sc_fhb`, `sc_path`, `sc_end`. */
-  onMessage(m: { type: string; sc?: string; state?: string; reason?: string; encoder?: string; path?: string; why?: string; stages?: Record<string, number | null> } & Stats) {
+  onMessage(m: { type: string; sc?: string; state?: string; reason?: string; encoder?: string; path?: string; why?: string; stages?: Record<string, number | null>; ice_servers?: RTCIceServer[] } & Stats) {
     const s = this.state;
     if (!s?.sc || m.sc !== s.sc || s.phase === "ended") return;
     if (m.type === "sc_end") return this.ended(endedText(m.reason ?? "", this.t));
     this.heardAt = this.port.now();
     if (m.type === "sc_path") return this.onPath(m.path ?? "", m.state ?? "", m.why ?? null);
+    // TURN's renewed credentials: a new peer with them (the computer swaps to it once it opens, and the old one's credentials end on their own).
+    if (m.type === "sc_rtc_servers") {
+      if (m.ice_servers?.length && this.state?.path === "p2p") void this.openPeer(this.peerRelayOnly, m.ice_servers);
+      return;
+    }
     if (m.type === "sc_state" && m.state === "encoder") this.patch({ encoder: m.encoder === "sw" ? "sw" : "hw" });
     else if (m.type === "sc_state" && m.state) this.patch({ remote: m.state });
     else if (m.type === "sc_stats") {
-      this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder, crisp: m.crisp, stages: m.stages }, age: quantile([...this.ages].sort((a, b) => a - b), 0.5) });
+      this.patch({ stats: { fps: m.fps, w: m.w, h: m.h, kbps: m.kbps, encode_ms_p95: m.encode_ms_p95, dropped: m.dropped, reason: m.reason, degraded: m.degraded, level: m.level, encoder: m.encoder, crisp: m.crisp, stages: m.stages, turn_mb: m.turn_mb }, age: quantile([...this.ages].sort((a, b) => a - b), 0.5) });
       this.ages = [];
     }
     this.thawed();
@@ -1050,11 +1066,27 @@ export class ScreenSession {
     }
   }
 
-  /** A peer for this screen, offered now: the computer moves the picture onto it once it opens, and keeps the one before until then. */
-  private openPeer() {
+  /** A peer for this screen, offered now: the computer moves the picture onto it once it opens, and keeps the one before until then. Its servers
+   *  come from the computer first (TURN through the relay); `relayOnly`: through TURN alone, which needs them. */
+  private async openPeer(relayOnly: boolean, given?: RTCIceServer[]) {
     const sc = this.state?.sc;
     if (!sc || !this.port.peer || !(this.port.webrtc?.() ?? false)) return;
     this.nextPeer?.close();
+    this.nextPeer = null;
+    // Only the newest ask opens a peer: an older one still waiting for its servers gives up.
+    const gen = ++this.peerGen;
+    const asked = given ? Promise.resolve<Reply>({ t: "ack", ice_servers: given, turn: null }) : (this.port.servers?.(sc, relayOnly) ?? null);
+    let setup: PeerSetup = { ...STUN_ONLY, relayOnly };
+    if (asked) {
+      const r = await asked;
+      if (gen !== this.peerGen || this.state?.sc !== sc || this.state.phase === "ended") return;
+      if (r.t === "ack" && r.ice_servers?.length) setup = { servers: r.ice_servers, relayOnly };
+      // TURN alone with no TURN given: there is nothing to open; the picture stays where it is, and the row says why.
+      if (relayOnly && (r.t !== "ack" || r.turn)) {
+        this.patch({ message: r.t === "ack" && r.turn ? this.t("TURN is not available now: the picture stays on the relay.") : this.state.message });
+        return;
+      }
+    } else if (relayOnly) return;
     const peer: PeerLike | null = this.port.peer(sc, {
       media: (bytes) => this.port.deliver?.(bytes),
       open: () => {},
@@ -1066,9 +1098,12 @@ export class ScreenSession {
         }
         if (this.peer === peer) this.peer = null;
       },
-    });
+    }, setup);
     if (!peer) return;
+    // One opened meanwhile by another call (TypeScript keeps the null set above).
+    (this.nextPeer as PeerLike | null)?.close();
     this.nextPeer = peer;
+    this.peerRelayOnly = relayOnly;
     void peer.start();
   }
 
@@ -1091,7 +1126,8 @@ export class ScreenSession {
     this.chosen = via;
     this.port.remember(via);
     this.patch({ via, message: null });
-    if ((via === "p2p" || (via === "auto" && this.port.route() === "relay")) && this.state?.path !== "p2p") this.openPeer();
+    if (via === "relay_turn") void this.openPeer(true);
+    else if ((via === "p2p" || (via === "auto" && this.port.route() === "relay")) && this.state?.path !== "p2p") void this.openPeer(false);
   }
 
   /** A media message, from the link or peer to peer: whether it goes to the view. A video frame older than one already taken does not (in a switch
@@ -1230,8 +1266,9 @@ export class ScreenSession {
       this.patch({ phase: "live", graceLeft: null });
       // The phone's network may have changed under its peer: a new one is opened, and the computer keeps the old one until it opens. Automatic
       // whose peer dropped meanwhile (the picture went back to the relay) tries again too.
-      const upgrade = upgradesToP2p(this.chosen, this.state?.usedVia, pathRows(this.state?.paths, this.state?.relay, this.side(), this.t));
-      if (this.state?.path === "p2p" || this.peer || this.nextPeer || this.state?.usedVia === "p2p" || upgrade) this.openPeer();
+      const kind = peerFor(this.chosen, this.state?.usedVia, pathRows(this.state?.paths, this.state?.relay, this.side(), this.t));
+      if (this.state?.path === "p2p" || this.peer || this.nextPeer) void this.openPeer(this.peerRelayOnly);
+      else if (kind) void this.openPeer(kind === "turn");
     } else if (r.t === "error") this.ended(endedText(r.code === "route_changed" ? "route_changed" : "link_lost", this.t));
   }
 

@@ -32,7 +32,7 @@ import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { ScreenSession, type ScreenState } from "./screen";
-import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, TAKEOVER_API } from "../../src/lib/attention";
+import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAKEOVER_API } from "../../src/lib/attention";
 import { ScreenPeer, type OfferReply } from "./screen-rtc";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
@@ -411,17 +411,18 @@ const remoteScreens = new ScreenSession({
   },
   proof: (target) => lock.screenProof(target),
   webrtc: () => canP2p(),
-  peer: (sc, ev) =>
+  peer: (sc, ev, setup) =>
     canP2p()
       ? new ScreenPeer({ RTCPeerConnection, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>) }, {
-          offer: async (s, sdp): Promise<OfferReply> => {
-            const r = await link.scRtcOffer(s, sdp);
+          offer: async (s, sdp, relayOnly): Promise<OfferReply> => {
+            const r = await link.scRtcOffer(s, sdp, relayOnly);
             if (r.t === "ack" && r.sdp && r.nonce) return { t: "ack", sdp: r.sdp, nonce: r.nonce, ice_servers: r.ice_servers };
             return r.t === "error" ? { t: "error", code: r.code, message: r.message } : { t: "offline" };
           },
           ice: (s, cand) => link.scRtcIce(s, cand),
-        }, sc, ev)
+        }, sc, ev, setup)
       : null,
+  servers: (sc, relayOnly) => (daemonApi() >= SCREEN_TURN_API ? link.scRtcServers(sc, relayOnly) : null),
   via: (sc, via) => link.scVia(sc, via),
   deliver: (bytes) => deliverScreenMedia(bytes),
   serverNow: () => link.serverNow(),

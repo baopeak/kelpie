@@ -57,6 +57,12 @@ computer, the answerer) and `app/phone/src/screen-rtc.ts` (the phone, the offere
 - **On `"c"`**: cursor messages whole (`0x01` first, kind 3), the latest only.
 - **On `"i"`** after the hello: `{"type": "sc_ack", "seq"}` and `{"type": "sc_input", "ops", "st"}` as on the link, without `sc` (the channel
   is the screen's). They are taken only while the screen's link is connected.
+- **TURN** (API 43): before its offer the phone asks `{type: "sc_rtc_servers", sc, relay_only?}`, answered `{ice_servers, turn}` (`turn` null, or
+  why there is none: `turn_not_configured`, `turn_full`, `turn_budget_spent`, `method_off`, `relay_off`, `turn_failed`, `no_turn_direct`). The
+  computer mints for a screen through the relay only, and five minutes before they end, while the pair goes through TURN, sends new ones as
+  `{type: "sc_rtc_servers", sc, ice_servers}`, with which the phone opens a new peer (swapped once open). An offer through TURN alone carries
+  `relay_only: true` (the phone's `iceTransportPolicy: "relay"`). `sc_stats` carries `turn_mb` once anything went through TURN; past an
+  allowance the picture goes back to the link (`sc_path {why: "turn_budget_spent"}`), or the screen ends with `turn_budget_spent`.
 - **Each side sees the other's IP addresses** (its host and public candidates); the relay sees only the encrypted session.
 
 ## The relay
@@ -73,6 +79,8 @@ Durable Object that counts the rooms made in a day (`src/registrar.ts`), or all 
 | `POST /v1/rooms`, body `{"pk": "<P-256 public key, uncompressed, base64url>"}` (1,024 bytes at most), no `Origin`; `Authorization: Bearer <registration key>` when the relay has one | `201 {"room", "ticket"}`; see "Making a room" for the refusals |
 | `GET /v1/desktop?t=<ticket>&ts=<ms>&sig=<signature>` (WebSocket) | 101 with `x-kelpie-relay-version: 2`, or 403 a bad ticket, signature or `Origin`, 404 no such room, 429 the month's cap is spent |
 | `GET /v1/phone?t=<ticket>&k=<token>` or `&p=<pairing token>` (WebSocket) | 101, or 403 a bad ticket, an unknown token or an `Origin` the room does not list, 409 eight phones already, 429 the cap |
+| `POST /v1/turn?t=<ticket>`, body `{"ts", "sig"}` (1,024 bytes at most), no `Origin` | `200 {"ice_servers", "username", "expires"}`: TURN credentials for 20 minutes; see "TURN" for the refusals |
+| `POST /v1/turn/revoke?t=<ticket>`, body `{"ts", "sig", "username"}` | `204`: the credential ends now (coturn's cannot: `204`, and it expires on its own) |
 | any other path under `/v1` | 404, 405 or 426, in plain text |
 | any path outside `/v1` | on Cloudflare: the phone app's static files, or the app's own 404 page, answered without running the Worker; on workerd: 404 in plain text, since a self-hosted relay serves no page |
 
@@ -107,6 +115,24 @@ expired counts, then of the oldest, never of all at once. In the isolate's memor
   relay's own. It guards against other pages only; the token is what lets a phone in.
 - **Version**: the desktop's 101 carries `x-kelpie-relay-version: 2`. A desktop that reads none (an older relay) speaks the first version:
   it sends `origin`, never `origins`, and offers no hosted app. A relay of the first version closes a socket on a message it does not know.
+
+#### TURN
+
+For a screen through the relay that cannot go straight between the phone and the computer (`relay/src/turn.ts`, `crates/kelpied/src/mobile/turn.rs`).
+
+- **Signature**: as the desktop's, over `kelpie-relay/1 turn <room> <ts>` to mint and `kelpie-relay/1 turn_revoke <room> <ts> <username>` to
+  revoke; `ts` within 5 minutes and later than the last one the room took for TURN (its sockets keep their own). A bad ticket, signature or
+  time is `403` and counts against the network as a refused socket does.
+- **Who**: a room made with the registration key, or any room where `TURN_OPEN_ROOMS` is `1` (else `404` with `x-kelpie-reason:
+  turn_not_offered`: the limits count credentials, not bytes, and anyone can make a room on an open relay); the room must have at least one
+  phone on its allow-list (`409`, `no_phones`); at most 10 mints an hour and 40 a day per room (`429`, `turn_room_limit`),
+  `TURN_MINTS_PER_NETWORK_DAY` (20 unless set) per network (`429`, `turn_network`) and `TURN_MINTS_PER_DAY` (500 unless set) for the whole
+  relay (`503`, `turn_full`) per UTC day. Rooms keep whether they were made with the key (`keyed`); a room from before counts as open.
+- **What**: with secrets `TURN_KEY_ID` and `TURN_API_TOKEN`, Cloudflare's TURN (`generate-ice-servers`, TTL 1,200 s); with `TURN_SECRET` and
+  `TURN_URLS` (comma-separated), coturn's time-limited credentials: `username = <expiry, s>:<room>`, `credential = base64(HMAC-SHA1(secret,
+  username))`. With neither, `404` with `x-kelpie-reason: turn_not_configured` (a relay from before TURN answers `404` too). URLs on port 53
+  are left out; an upstream failure is `502` `turn_upstream`. The API token never leaves the Worker, and nothing about a credential is logged.
+- **Vectors**: the statements and a coturn credential are in [`relay/test/vectors.json`](../relay/test/vectors.json).
 
 ### On the sockets
 

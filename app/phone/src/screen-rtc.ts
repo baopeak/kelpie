@@ -101,11 +101,20 @@ export function pathFromStats(entries: Iterable<StatsEntry>): PathStats | null {
 /** The computer's answer to an offer, or why not. */
 export type OfferReply = { t: "ack"; sdp: string; nonce: string; ice_servers?: RTCIceServer[] } | { t: "error"; code: string; message: string } | { t: "offline" };
 
-/** How the offer and late candidates reach the computer: on the link. */
+/** How the offer and late candidates reach the computer: on the link. `relayOnly`: an offer through TURN alone. */
 export interface RtcPort {
-  offer(sc: string, sdp: string): Promise<OfferReply>;
+  offer(sc: string, sdp: string, relayOnly: boolean): Promise<OfferReply>;
   ice(sc: string, cand: string): void;
 }
+
+/** What a peer is made with: the ICE servers (STUN, and TURN's short-lived credentials when the computer gave them), and whether it goes through
+ *  TURN alone. */
+export interface PeerSetup {
+  servers: RTCIceServer[];
+  relayOnly: boolean;
+}
+
+export const STUN_ONLY: PeerSetup = { servers: [{ urls: STUN }], relayOnly: false };
 
 export interface PeerEvents {
   /** A whole media message (`0x01` first), from "m" or "c". */
@@ -134,7 +143,7 @@ export class ScreenPeer {
   private found = 0;
   private onFound: (() => void) | null = null;
 
-  constructor(private env: PeerEnv, private port: RtcPort, private sc: string, private ev: PeerEvents) {}
+  constructor(private env: PeerEnv, private port: RtcPort, private sc: string, private ev: PeerEvents, private setup: PeerSetup = STUN_ONLY) {}
 
   /** Offers, and goes on once answered; `failed` is said when it does not work. */
   async start(): Promise<void> {
@@ -146,7 +155,7 @@ export class ScreenPeer {
   }
 
   private async run() {
-    const pc = new this.env.RTCPeerConnection({ iceServers: [{ urls: STUN }], iceTransportPolicy: "all" });
+    const pc = new this.env.RTCPeerConnection({ iceServers: this.setup.servers, iceTransportPolicy: this.setup.relayOnly ? "relay" : "all" });
     this.pc = pc;
     const media = pc.createDataChannel("m", { negotiated: true, id: 0 });
     const cursor = pc.createDataChannel("c", { negotiated: true, id: 1, ordered: false, maxRetransmits: 0 });
@@ -193,7 +202,7 @@ export class ScreenPeer {
     const sdp = pc.localDescription?.sdp;
     if (!sdp) throw new Error("no_offer");
     this.timers.push(this.env.setTimeout(() => this.opened < 3 && this.fail("not_open"), OPEN_MS));
-    const r = await this.port.offer(this.sc, sdp);
+    const r = await this.port.offer(this.sc, sdp, this.setup.relayOnly);
     if (this.done) return;
     if (r.t !== "ack") return this.fail(r.t === "error" ? r.code : "offline");
 
@@ -240,6 +249,7 @@ export class ScreenPeer {
       return false;
     }
   }
+
 
   /** The way the packets take now, from the browser's stats. */
   async stats(): Promise<PathStats | null> {

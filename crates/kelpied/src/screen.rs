@@ -174,6 +174,17 @@ struct State {
     offers: u64,
     /// An `sc_path` said while the link was away: the next connection hears it (`rebind`).
     unsent_path: Option<String>,
+    /// TURN credentials minted for this screen (`sc_rtc_servers`); whether the peer's pair goes through TURN now, as its stats last said (None
+    /// before a new peer's first); what went through TURN in
+    /// this screen, and since the hold's task last counted it; the peer's own count at its last stats (peer id, bytes); a renewal under way;
+    /// and the screen's TURN allowance spent (no new credential for it).
+    turn: Option<crate::mobile::turn::Minted>,
+    turn_path: Option<bool>,
+    turn_bytes: u64,
+    turn_unsaved: u64,
+    peer_bytes: (u64, u64),
+    turn_renewing: bool,
+    turn_capped: bool,
 }
 
 pub struct Hold {
@@ -317,12 +328,15 @@ impl Broker {
             return;
         }
         hold.wake.notify_one();
-        // Its peers end with it.
-        let (conn, peers) = {
+        // Its peers end with it, and its TURN credentials.
+        let (conn, peers, turn) = {
             let mut st = hold.state.lock();
-            (st.conn.take(), (st.rtc.take(), st.rtc_next.take()))
+            (st.conn.take(), (st.rtc.take(), st.rtc_next.take()), st.turn.take())
         };
         drop(peers);
+        if let Some(turn) = turn {
+            rtc::revoke_later(d, turn.username);
+        }
         if let Some(Link { out, .. }) = conn {
             if let Err(mpsc::error::TrySendError::Full(msg)) = out.try_send(end_message(sc, reason)) {
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
@@ -441,7 +455,8 @@ impl Broker {
                     let n = |k: &str| c[k].as_u64();
                     tracing::info!(sc, rule, from_kbps = ?n("from_kbps"), to_kbps = ?n("to_kbps"), rtt_recent_ms = ?n("rtt_recent_ms"), rtt_base_ms = ?n("rtt_base_ms"), link_full_ms = ?n("link_full_ms"), inflight = ?n("inflight"), "screen bandwidth cut");
                 }
-                self.tell(&hold, json!({"type": "sc_stats", "sc": sc, "fps": n("fps"), "w": n("w"), "h": n("h"), "kbps": n("kbps"), "encode_ms_p95": n("encode_ms_p95"), "dropped": n("dropped"), "reason": reason, "degraded": s["degraded"].as_bool() == Some(true), "level": n("level"), "encoder": encoder, "idr_ratio": n("idr_ratio"), "crisp": s["crisp"].as_bool(), "stages": stages}));
+                let turn_mb = { let st = hold.state.lock(); (st.turn_bytes > 0).then(|| st.turn_bytes / (1024 * 1024)) };
+                self.tell(&hold, json!({"type": "sc_stats", "sc": sc, "turn_mb": turn_mb, "fps": n("fps"), "w": n("w"), "h": n("h"), "kbps": n("kbps"), "encode_ms_p95": n("encode_ms_p95"), "dropped": n("dropped"), "reason": reason, "degraded": s["degraded"].as_bool() == Some(true), "level": n("level"), "encoder": encoder, "idr_ratio": n("idr_ratio"), "crisp": s["crisp"].as_bool(), "stages": stages}));
             }
             Some("encoder") => {
                 let encoder = params["encoder"].as_str().filter(|e| matches!(*e, "hw" | "sw")).unwrap_or("hw");
@@ -699,6 +714,7 @@ impl Broker {
             "sc_rtc_offer" => self.rtc_offer_begin(d, phone, req)?.await.map(Some),
             "sc_rtc_ice" => self.rtc_ice(&phone, req).map(|()| None),
             "sc_via" => self.rtc_via(d, &phone, req).map(|()| None),
+            "sc_rtc_servers" => self.rtc_servers_begin(d, phone, req)?.await.map(Some),
             _ => Err(refused("unknown_verb", format!("unknown request {verb:?}"))),
         }
     }
@@ -811,7 +827,10 @@ impl Broker {
         let grant = d.mobile.grant(phone.device);
         let sc = uuid::Uuid::new_v4().simple().to_string();
         // `max_kbps`: a screen through the relay WebSocket is held to its rate (an older app ignores it, and the daemon still counts the month).
-        let params = json!({"sc": sc, "target": target, "device": phone.name, "level": level.number(), "max_kbps": if via == Via::Relay { max_kbps } else { None }});
+        // Peer to peer first, nothing on the link meanwhile: P2P, or TURN with the relay WebSocket turned off.
+        let peer_first = via == Via::P2p || (via == Via::Turn && !d.mobile.screen_options().methods.relay_ws);
+        let on_link_relay = via == Via::Relay || (via == Via::Turn && !peer_first);
+        let params = json!({"sc": sc, "target": target, "device": phone.name, "level": level.number(), "max_kbps": if on_link_relay { max_kbps } else { None }});
         let started = match d.providers.request_within("screen", "screen.start", params, START_LIMIT).await {
             Ok(v) => v,
             Err(e) => {
@@ -864,6 +883,13 @@ impl Broker {
             clear_stats: 0,
             offers: 0,
             unsent_path: None,
+            turn: None,
+            turn_path: None,
+            turn_bytes: 0,
+            turn_unsaved: 0,
+            peer_bytes: (0, 0),
+            turn_renewing: false,
+            turn_capped: false,
         };
         // The link closed while the app was starting: the hold waits for the same device's next connection, like one whose link dropped.
         let link_gone = phone.out.is_closed() || phone.media.is_closed();
@@ -872,7 +898,7 @@ impl Broker {
             pause_notice(&mut state, &sc, true)
         });
         // Peer to peer from the start: nothing goes until the phone's peer opens (the phone offers as soon as it has the answer), and only that way.
-        let p2p = via == Via::P2p;
+        let p2p = peer_first;
         if p2p {
             state.p2p_only = true;
         }
@@ -973,7 +999,7 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
         // The grant first, then what it rests on as it is now: every path that takes control away clears the grant; this holds whatever a later one forgets.
         let (way, waited) = {
             let st = hold.state.lock();
-            (if st.on_p2p { Via::P2p } else { rtc::link_way(&hold) }, st.p2p_waiting.filter(|_| st.rtc_next.is_none()).map(|at| at.elapsed()))
+            (rtc::way_now(&hold, &st), st.p2p_waiting.filter(|_| st.rtc_next.is_none()).map(|at| at.elapsed()))
         };
         if !hold.grant.load(Ordering::SeqCst) || !d.mobile.screen_held(&hold.device, hold.browser, hold.relay, way) {
             return d.screen.end(&d, &hold.sc, "revoked", true);
@@ -990,6 +1016,10 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
             if d.mobile.relay_screen_spent() {
                 return d.screen.end(&d, &hold.sc, "relay_budget_spent", true);
             }
+        }
+        // What went through TURN, counted the same way; past the screen's, the day's or the month's allowance its credential ends.
+        if d.screen.turn_look(&d, &hold) {
+            return;
         }
         let now = Instant::now();
         let level = d.mobile.load.level();
