@@ -5,7 +5,7 @@
 //!   `hello {proto}`, and one that speaks another protocol is stopped and reported. Commands go to its stdin as JSON lines, in order, through
 //!   one writer; its stdout is frames (`kelpie_screen::wire`): replies, events, and media for the phone.
 //! - **The daemon's requests** (`screen.targets`, `screen.start`, `screen.text`) are answered from the helper's replies; its notices
-//!   (`screen.input`, `screen.flow`, `screen.keyframe`, `screen.pause`, `screen.resume_load`, `screen.stop`) go straight on.
+//!   (`screen.input`, `screen.flow`, `screen.keyframe`, `screen.pause`, `screen.resume_load`, `screen.cap`, `screen.stop`) go straight on.
 //! - **What the helper says** goes back as `provider.event {sc, kind, …}`: media (base64 on this local pipe; binary from the daemon to the
 //!   phone), its state, its stats, the encoder it uses, and its end (the stop hotkey, the window closed).
 //! - **The window** hears `screen-started` and `screen-ended` for the status bar's indicator, whose Stop is `screen_stop`.
@@ -394,6 +394,8 @@ pub fn provider_message(app: &AppHandle, msg: Value) {
             }
         }
         "screen.resume_load" => send(&h, json!({"cmd": "resume_load", "sc": sc})),
+        // The most the stream may send now (null: no cap of the way's): the daemon tells it under the screen's lock, so in order.
+        "screen.cap" => send(&h, json!({"cmd": "cap", "sc": sc, "max_kbps": params["max_kbps"]})),
         "screen.stop" => {
             let reason = params["reason"].as_str().unwrap_or("phone").to_string();
             if let Some(sc) = sc.as_str() {

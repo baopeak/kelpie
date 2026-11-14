@@ -38,6 +38,27 @@ The JSON messages inside the session are the phone protocol, described in archit
   relay, base64url of 32 random bytes, good until `expires` (ms). The computer keeps only its SHA-256 and replaces it after 7 days.
 - `addrs` carries the relay as an endpoint while it is on, and leaves it out when it is turned off. A page the relay hosts and a locked phone hear `addrs {partial: true}`: the relay alone, nothing of the computer's other addresses or its hostname (the hosted page still has the computer's name from its QR code, and the room is told the Tailscale origin among the pages it lets in).
 
+### Screen over WebRTC
+
+From API 42 the computer's screen may go peer to peer (Windows). Implemented in `crates/kelpie-rtc` with `crates/kelpied/src/screen/rtc.rs` (the
+computer, the answerer) and `app/phone/src/screen-rtc.ts` (the phone, the offerer).
+
+- **Signalling, inside the session only**: the phone sends `{type: "sc_rtc_offer", sc, sdp}` (at most 16 KiB) after ICE gathering or 2 s, and
+  the computer answers `{sdp, nonce, ice_servers}`; later phone candidates go as `{type: "sc_rtc_ice", sc, cand}` (an SDP `candidate:` line).
+  The computer's candidates are all in its answer. `{type: "sc_via", sc, via}` (`auto`, `p2p`, or the link's own `relay` / `tailscale`) sets the
+  way from then on; the computer says where the picture goes with `{type: "sc_path", sc, path, state, why?}` (`state` `live` or `failed`).
+- **Binding**: the offer and the answer travel only inside the end-to-end encrypted session, so the DTLS fingerprints they carry are those of
+  the two ends, and a DTLS peer with another certificate is refused. The first message on channel `"i"` must be
+  `{"type": "rtc_hello", "sc": <sc>, "nonce": <the answer's nonce>}`; anything else closes the peer before any media goes on it.
+- **Channels**, negotiated by id (no in-band open): 0 `"m"` reliable and ordered, 1 `"c"` unordered with no retransmission, 2 `"i"` reliable
+  and ordered.
+- **On `"m"`**: each media message (the link's binary format, `0x01` first) in chunks of at most 16,384 bytes,
+  `[0x02, msg_seq u32 LE, idx u16 LE, count u16 LE] + piece`. A message whose chunks were cut short by a newer one is dropped whole.
+- **On `"c"`**: cursor messages whole (`0x01` first, kind 3), the latest only.
+- **On `"i"`** after the hello: `{"type": "sc_ack", "seq"}` and `{"type": "sc_input", "ops", "st"}` as on the link, without `sc` (the channel
+  is the screen's). They are taken only while the screen's link is connected.
+- **Each side sees the other's IP addresses** (its host and public candidates); the relay sees only the encrypted session.
+
 ## The relay
 
 Source: [`relay/`](../relay). A Cloudflare Worker (the router, `src/worker.ts`) and one Durable Object per room (`src/room.ts`), with one more

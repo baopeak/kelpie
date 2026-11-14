@@ -76,6 +76,9 @@ enum Cmd {
     Sharpen(Rect),
     Pause(bool),
     ResumeLoad,
+    /// The most the stream may send from now on (kbps; None: no more than any stream): the way changed (the relay WebSocket is held to a rate,
+    /// peer to peer is not), or the daemon holds it under the rate a lossy path carries.
+    Cap(Option<u32>),
     Stop(String),
 }
 
@@ -279,6 +282,10 @@ impl Host {
             }
             "resume_load" => {
                 let _ = r.cmds.send(Cmd::ResumeLoad);
+                None
+            }
+            "cap" => {
+                let _ = r.cmds.send(Cmd::Cap(req["max_kbps"].as_u64().map(|k| k.min(u64::from(u32::MAX)) as u32)));
                 None
             }
             _ => Some(Err(format!("unknown command {cmd:?}"))),
@@ -489,6 +496,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
                         unpaint_all = true;
                     }
                 }
+                Ok(Cmd::Cap(kbps)) => ctl.bandwidth.set_cap(kbps.unwrap_or(crate::control::MAX_KBPS)),
                 Ok(Cmd::ResumeLoad) => {
                     ctl.resume(now);
                     flight.restart();

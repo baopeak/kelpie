@@ -53,6 +53,9 @@ export const SCREEN_FLOW_API = 40;
 /** Daemon API level that may show the screen through the relay (`mobile.set_screen`, `screen` in `mobile.status`, `device.screen` in the phone's hello,
  *  `paths` in `screens`, `sc_start {via, recheck}`). Below it the app offers no such switch and the phone never asks for the screen through the relay. */
 export const SCREEN_REMOTE_API = 41;
+/** Daemon API level that sends the screen peer to peer (WebRTC data channels: `p2p` in `paths`, `sc_rtc_offer`, `sc_rtc_ice`, `sc_via`, `sc_path`).
+ *  Below it the phone never offers a peer to peer way. */
+export const SCREEN_P2P_API = 42;
 
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;

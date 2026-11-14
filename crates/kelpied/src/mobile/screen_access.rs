@@ -44,7 +44,7 @@ impl Mobile {
         let (options, doubted) = match saved {
             None => (ScreenOptions::default(), false),
             Some(o) => match self.mac_key(false) {
-                Ok(Some(key)) if store::screen_holds(&o, &key) => (o, false),
+                Ok(Some(key)) if store::screen_holds(&o, &key) => (o.settled(), false),
                 _ => {
                     tracing::warn!("phone access: the screen's settings cannot be believed now: the defaults apply (off through the relay)");
                     (ScreenOptions::default(), true)
@@ -85,6 +85,8 @@ impl Mobile {
     /// (`screen_held`), and a phone of the hosted app goes back to typing: only a new grant, verified on the desktop, gives it control again.
     pub fn set_screen(&self, mut next: ScreenOptions) -> Result<Value> {
         let key = self.mac_key(true)?.ok_or_else(|| anyhow!("the credential store did not keep the device key"))?;
+        // Set by this build, which offers peer to peer: its way is the person's choice from now on.
+        next.p2p_chosen = true;
         store::seal_screen(&mut next, &key);
         let was = self.screen_options();
         let lock_on = self.lock_options().on;
@@ -207,32 +209,57 @@ impl Mobile {
         screen_policy::allowed(&facts, &self.screen_options())
     }
 
-    /// What a hold rests on as it goes, read again by its task (`screen::watch`).
-    pub(crate) fn screen_held(&self, device: &str, browser: bool, relay: bool) -> bool {
-        self.screen_allowed(device, browser, relay).is_ok()
+    /// What a hold going `way` rests on as it goes, read again by its task (`screen::watch`).
+    pub(crate) fn screen_held(&self, device: &str, browser: bool, relay: bool, way: Via) -> bool {
+        self.screen_facts(device, browser, relay).is_some_and(|f| screen_policy::held(&f, &self.screen_options(), way).is_ok())
+    }
+
+    /// Whether a screen of this connection may go `way` now (a switch mid-session, or the link to fall back on): its rule, that way turned on,
+    /// and for the relay's WebSocket its month not spent. No Face ID: the screen already had one.
+    pub(crate) fn screen_way(&self, device: &str, browser: bool, relay: bool, way: Via) -> Result<(), (&'static str, String)> {
+        let refusal = |r: Reason| (r.code(), r.message().to_string());
+        let facts = self.screen_facts(device, browser, relay).ok_or(refusal(Reason::NotGranted))?;
+        screen_policy::held(&facts, &self.screen_options(), way).map_err(refusal)?;
+        if way == Via::Relay && !facts.native && self.relay_screen_spent() {
+            return Err(("relay_budget_spent", "This month's screen allowance through the relay is used up. It starts again next month, or use Tailscale.".to_string()));
+        }
+        Ok(())
+    }
+
+    /// The most a screen through the relay's WebSocket may send (kbps).
+    pub(crate) fn relay_ws_kbps(&self) -> u32 {
+        self.screen_options().relay_ws_kbps.min(MAX_RELAY_WS_KBPS)
     }
 
     /// Whether a new screen may start, over `via`, with the passkey check `proof` for `target`: the way it goes, and the most it may send (kbps)
-    /// when that is the relay WebSocket. The passkey check is blocking: called off the async threads.
-    pub(crate) fn screen_may_start(&self, device: &str, browser: bool, relay: bool, via: Via, target: &str, proof: &Value) -> Result<(Via, Option<u32>), (&'static str, String)> {
+    /// while on the relay WebSocket (a page through the relay). `can_p2p`: the phone said it can go peer to peer (Automatic goes that way only then). The passkey check is
+    /// blocking: called off the async threads.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn screen_may_start(&self, device: &str, browser: bool, relay: bool, via: Via, can_p2p: bool, target: &str, proof: &Value) -> Result<(Via, Option<u32>), (&'static str, String)> {
         let refusal = |r: Reason| (r.code(), r.message().to_string());
         let facts = self.screen_facts(device, browser, relay).ok_or(refusal(Reason::NotGranted))?;
         let opts = self.screen_options();
         // Everything but the passkey first: no Face ID is asked for what would be refused anyway, nor once the month's allowance is spent.
         let way = screen_policy::may_start(&facts, &opts, via, Uv::Fresh).map_err(refusal)?;
-        if way == Via::Relay && !facts.native {
-            if self.relay_screen_spent() {
+        // Automatic through the relay with its WebSocket off goes peer to peer only: a phone that cannot (an older page, a browser without
+        // WebRTC) would wait for a picture that never comes.
+        if via == Via::Auto && way == Via::P2p && !can_p2p {
+            return Err(("method_off", "Through the relay this computer sends the screen only peer to peer, which this phone cannot do. Turn on the relay WebSocket in Kelpie → Settings → Mobile → Advanced.".to_string()));
+        }
+        if facts.relay && !facts.native {
+            if way == Via::Relay && self.relay_screen_spent() {
                 return Err(("relay_budget_spent", "This month's screen allowance through the relay is used up. It starts again next month, or use Tailscale.".to_string()));
             }
-            // The phone signs this screen's challenge over the target and the way it goes ("relay").
-            match self.screen_recheck(device, proof, target, way.word()) {
+            // The phone signs this screen's challenge over the target and the word "relay": a screen through the relay's connection, whichever way
+            // its picture then takes.
+            match self.screen_recheck(device, proof, target, Via::Relay.word()) {
                 Uv::Fresh => {}
                 Uv::Replayed => return Err(("needs_face_id", "That Face ID check was used already: confirm again.".to_string())),
                 _ => return Err(refusal(Reason::NeedsFaceId)),
             }
-            return Ok((way, Some(opts.relay_ws_kbps.min(MAX_RELAY_WS_KBPS))));
         }
-        Ok((way, None))
+        // The relay WebSocket's rate, for any screen of a page through the relay: it applies whenever its picture is on that way.
+        Ok((way, (facts.relay && !facts.native).then(|| opts.relay_ws_kbps.min(MAX_RELAY_WS_KBPS))))
     }
 
     /// The ways a phone on this connection may choose, each with whether it is available now and why not (`screens`' `paths`).
@@ -253,7 +280,9 @@ impl Mobile {
         };
         let none = facts.is_none().then_some("not_granted");
         let relay_why = if self.relay_url().is_none() && !relay { Some("relay_off") } else { none.or_else(|| check(Via::Relay)) };
-        json!([row("auto", none.or_else(|| check(Via::Auto))), row("tailscale", none.or_else(|| check(Via::Tailscale))), row("relay", relay_why)])
+        // Peer to peer: only where this computer has it (the phone adds its own reason when its browser has no WebRTC).
+        let p2p_why = if cfg!(windows) { none.or_else(|| check(Via::P2p)) } else { Some("no_p2p_here") };
+        json!([row("auto", none.or_else(|| check(Via::Auto))), row("tailscale", none.or_else(|| check(Via::Tailscale))), row("p2p", p2p_why), row("relay", relay_why)])
     }
 
     /// The relay's address, when it is on (`wss://host[:port]`).

@@ -32,6 +32,10 @@
 //! Through the relay only when the person allowed it on the computer (*See and control the screen without Tailscale*), with the phone's lock on, a
 //! window open and a fresh Face ID for each new screen (`mobile::screen_policy`); such a screen is held to the relay WebSocket's rate and monthly
 //! allowance, and ends within a look of its task when the switch goes off. A pane's takeover never goes through the relay.
+//!
+//! **Peer to peer** (`rtc`): the picture can leave the link for WebRTC data channels straight to the phone, set up inside the link; the hold's
+//! media and cursor then go to the peer, and its acknowledgements and input come back on it, under the same rules. A failed peer gives the
+//! picture back to the link when that way may be used, else the screen ends.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +56,8 @@ use crate::mobile::screen_policy::Via;
 use crate::mobile::CursorSlot;
 use crate::session::now_millis;
 use crate::takeover::{Refused, IDLE_STOP, INPUT_PER_SECOND, INPUT_TTL_MS};
+
+mod rtc;
 
 const WATCH: Duration = Duration::from_millis(250);
 pub const HEARTBEAT: Duration = Duration::from_secs(1);
@@ -149,6 +155,25 @@ struct State {
     after_text: Vec<(Instant, Vec<Value>)>,
     /// What went on the wire through the relay since the hold's task last counted it (`Mobile::count_relay_screen`).
     relay_bytes: u64,
+    /// The picture goes peer to peer (on `rtc`; with none yet, it waits for one and nothing goes), not on the link.
+    on_p2p: bool,
+    /// Peer to peer only: a peer that fails ends the screen instead of giving the picture back to the link.
+    p2p_only: bool,
+    /// The peer the picture goes on, and one being opened (the first, or a new one after the phone's network changed).
+    rtc: Option<rtc::Side>,
+    rtc_next: Option<rtc::Side>,
+    /// The helper was paused until a peer opens; since when the picture has waited for one.
+    paused_for_p2p: bool,
+    p2p_waiting: Option<Instant>,
+    /// Peer to peer: bytes the phone acknowledged since the peer's last stats, and the rate the stream is held under while the media channel
+    /// stays full (kbps), with how many clear stats in a row since it last tightened.
+    acked_bytes: u64,
+    ceiling: Option<u32>,
+    clear_stats: u8,
+    /// The phone's offers so far: an answer made for an older one (a slow STUN look-up) is not kept over a newer one.
+    offers: u64,
+    /// An `sc_path` said while the link was away: the next connection hears it (`rebind`).
+    unsent_path: Option<String>,
 }
 
 pub struct Hold {
@@ -159,6 +184,8 @@ pub struct Hold {
     /// other way ends it (`Broker::rebind`), so that a screen through the relay is always held to the relay's rule, rate and count.
     browser: bool,
     relay: bool,
+    /// Held to the relay WebSocket's rate while on the link (a page through the relay; the native app is not).
+    capped: bool,
     grant: Arc<AtomicBool>,
     ended: AtomicBool,
     wake: Notify,
@@ -290,7 +317,12 @@ impl Broker {
             return;
         }
         hold.wake.notify_one();
-        let conn = hold.state.lock().conn.take();
+        // Its peers end with it.
+        let (conn, peers) = {
+            let mut st = hold.state.lock();
+            (st.conn.take(), (st.rtc.take(), st.rtc_next.take()))
+        };
+        drop(peers);
         if let Some(Link { out, .. }) = conn {
             if let Err(mpsc::error::TrySendError::Full(msg)) = out.try_send(end_message(sc, reason)) {
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
@@ -456,21 +488,38 @@ impl Broker {
     fn media(&self, d: &Daemon, hold: &Hold, bytes: Vec<u8>) {
         let Some(peek) = wire::peek(&bytes) else { return };
         let mut st = hold.state.lock();
-        let Some(Link { media: lane, cursor, .. }) = st.conn.clone() else { return };
+        let Some(Link { media: link_lane, cursor: link_cursor, .. }) = st.conn.clone() else { return };
         if !hold.live() {
             return;
         }
+        let video = peek.kind == KIND_VIDEO;
+        // Peer to peer, the peer's channels; waiting for a peer, nothing goes (a video frame is said dropped, as on a full lane).
+        let p2p = st.on_p2p.then(|| st.rtc.as_ref().map(|s| (s.media.clone(), s.cursor.clone())));
+        let (lane, peer_cursor) = match p2p {
+            None => (link_lane, None),
+            Some(Some((media, cursor))) => (media, Some(cursor)),
+            Some(None) => {
+                if video {
+                    self.drop_video(d, hold, &mut st, peek.seq);
+                }
+                return;
+            }
+        };
+        let on_link = peer_cursor.is_none();
+        let wire_of = |len: usize| if on_link { wire_len(len) } else { rtc::rtc_wire_len(len) } as u64;
         // The cursor: its latest place, never behind video and never in its way.
         if peek.kind == KIND_CURSOR {
             st.raw += bytes.len() as u64;
-            st.wire += wire_len(bytes.len()) as u64;
-            if hold.relay {
+            st.wire += wire_of(bytes.len());
+            if hold.relay && on_link {
                 st.relay_bytes += wire_len(bytes.len()) as u64;
             }
-            cursor.put(bytes);
+            match peer_cursor {
+                Some(c) => c.put(bytes),
+                None => link_cursor.put(bytes),
+            }
             return;
         }
-        let video = peek.kind == KIND_VIDEO;
         if video && st.need_key && !peek.key {
             return self.drop_video(d, hold, &mut st, peek.seq);
         }
@@ -490,8 +539,8 @@ impl Broker {
         match lane.try_send(bytes) {
             Ok(()) => {
                 st.raw += len as u64;
-                st.wire += wire_len(len) as u64;
-                if hold.relay {
+                st.wire += wire_of(len);
+                if hold.relay && on_link {
                     st.relay_bytes += wire_len(len) as u64;
                 }
                 if video {
@@ -527,6 +576,72 @@ impl Broker {
         d.providers.notify("screen", "screen.flow", msg);
     }
 
+    /// The phone decoded video frame `seq` (on the link or peer to peer): what was in flight up to it is done, and the helper hears it.
+    fn ack(&self, d: &Daemon, hold: &Hold, seq: u32) {
+        let rtt = {
+            let mut st = hold.state.lock();
+            // Never past what was sent: a frame of an earlier stream, acknowledged while this one started, could carry a higher number.
+            let seq = seq.min(st.last_seq);
+            let mut rtt = None;
+            while let Some(&(s, at, len)) = st.sent.front() {
+                if s > seq {
+                    break;
+                }
+                st.sent.pop_front();
+                st.unacked = st.unacked.saturating_sub(len);
+                st.acked_bytes += len as u64;
+                if s == seq {
+                    rtt = Some(at.elapsed().as_millis() as u64);
+                }
+            }
+            Self::note_window(&mut st);
+            st.acked = st.acked.max(seq);
+            rtt
+        };
+        self.flow(d, hold, rtt.unwrap_or(0));
+    }
+
+    /// Clicks, moves, the wheel and keys from the phone (on the link or peer to peer).
+    fn input(&self, d: &Daemon, hold: &Hold, req: &Value) -> Result<(), Refused> {
+        let ops = kelpie_screen::input::checked_ops(&req["ops"]).ok_or_else(|| refused("bad_request", "not input a screen takes"))?;
+        // Late input, input onto a stale picture, or more than a phone needs is dropped without a word: the phone already shows it as not live.
+        let stale = Self::stale(&hold.state.lock());
+        if !kelpie_screen::input::fresh(req["st"].as_u64(), now_millis()) || stale || !Self::input_allowed(hold) {
+            // A button pressed before is let go all the same, so it is never left pressed on the computer (keys go down and up in one
+            // message): one `release` at most, with no place (the pointer does not move to where a stale picture put it), and only
+            // while a press is outstanding, so a flood of late `up`s is one release or nothing.
+            let mut st = hold.state.lock();
+            let release = ops.iter().any(|op| op["k"] == "up" || op["k"] == "release") && std::mem::take(&mut st.held);
+            if release && hold.live() {
+                // While a text is typed the release waits behind what waits with it, so that it never overtakes a press there.
+                if st.typing {
+                    st.after_text.push((Instant::now(), vec![json!({"k": "release"})]));
+                } else {
+                    d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": [{"k": "release"}], "t": now_millis()}));
+                }
+            }
+            return Ok(());
+        }
+        if !hold.live() {
+            return Err(refused("sc_gone", "That screen has ended."));
+        }
+        let mut st = hold.state.lock();
+        // More than a phone sends while a text is typed: dropped whole, so that what is told as pressed stays what the computer has.
+        if st.typing && st.after_text.len() >= MAX_AFTER_TEXT {
+            return Ok(());
+        }
+        st.last_input = Instant::now();
+        st.held = kelpie_screen::input::held_after(st.held, &ops);
+        // A text is being typed: this goes after it. Otherwise now, told under the hold's lock so that input that comes meanwhile, or
+        // what waited for a text, never overtakes it.
+        if st.typing {
+            st.after_text.push((Instant::now(), ops));
+        } else {
+            d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": ops, "t": now_millis()}));
+        }
+        Ok(())
+    }
+
     /// The phone's screen verbs. `Some` is a reply with content, `None` a plain ack.
     pub async fn phone_verb(&self, d: &Arc<Daemon>, phone: Phone<'_>, verb: &str, req: &Value) -> Result<Option<Value>, Refused> {
         match verb {
@@ -540,67 +655,12 @@ impl Broker {
             "sc_ack" => {
                 let hold = self.held_here(&phone, req)?;
                 let seq = req["seq"].as_u64().filter(|s| *s <= u64::from(u32::MAX)).ok_or_else(|| refused("bad_request", "missing seq"))? as u32;
-                let rtt = {
-                    let mut st = hold.state.lock();
-                    // Never past what was sent: a frame of an earlier stream, acknowledged while this one started, could carry a higher number.
-                    let seq = seq.min(st.last_seq);
-                    let mut rtt = None;
-                    while let Some(&(s, at, len)) = st.sent.front() {
-                        if s > seq {
-                            break;
-                        }
-                        st.sent.pop_front();
-                        st.unacked = st.unacked.saturating_sub(len);
-                        if s == seq {
-                            rtt = Some(at.elapsed().as_millis() as u64);
-                        }
-                    }
-                    Self::note_window(&mut st);
-                    st.acked = st.acked.max(seq);
-                    rtt
-                };
-                self.flow(d, &hold, rtt.unwrap_or(0));
+                self.ack(d, &hold, seq);
                 Ok(None)
             }
             "sc_input" => {
                 let hold = self.held_here(&phone, req)?;
-                let ops = kelpie_screen::input::checked_ops(&req["ops"]).ok_or_else(|| refused("bad_request", "not input a screen takes"))?;
-                // Late input, input onto a stale picture, or more than a phone needs is dropped without a word: the phone already shows it as not live.
-                let stale = Self::stale(&hold.state.lock());
-                if !kelpie_screen::input::fresh(req["st"].as_u64(), now_millis()) || stale || !Self::input_allowed(&hold) {
-                    // A button pressed before is let go all the same, so it is never left pressed on the computer (keys go down and up in one
-                    // message): one `release` at most, with no place (the pointer does not move to where a stale picture put it), and only
-                    // while a press is outstanding, so a flood of late `up`s is one release or nothing.
-                    let mut st = hold.state.lock();
-                    let release = ops.iter().any(|op| op["k"] == "up" || op["k"] == "release") && std::mem::take(&mut st.held);
-                    if release && hold.live() {
-                        // While a text is typed the release waits behind what waits with it, so that it never overtakes a press there.
-                        if st.typing {
-                            st.after_text.push((Instant::now(), vec![json!({"k": "release"})]));
-                        } else {
-                            d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": [{"k": "release"}], "t": now_millis()}));
-                        }
-                    }
-                    return Ok(None);
-                }
-                if !hold.live() {
-                    return Err(refused("sc_gone", "That screen has ended."));
-                }
-                let mut st = hold.state.lock();
-                // More than a phone sends while a text is typed: dropped whole, so that what is told as pressed stays what the computer has.
-                if st.typing && st.after_text.len() >= MAX_AFTER_TEXT {
-                    return Ok(None);
-                }
-                st.last_input = Instant::now();
-                st.held = kelpie_screen::input::held_after(st.held, &ops);
-                // A text is being typed: this goes after it. Otherwise now, told under the hold's lock so that input that comes meanwhile, or
-                // what waited for a text, never overtakes it.
-                if st.typing {
-                    st.after_text.push((Instant::now(), ops));
-                } else {
-                    d.providers.notify("screen", "screen.input", json!({"sc": hold.sc, "ops": ops, "t": now_millis()}));
-                }
-                Ok(None)
+                self.input(d, &hold, req).map(|()| None)
             }
             "sc_text" => self.text_begin(d, phone, req)?.await.map(Some),
             "sc_sharpen" => {
@@ -636,6 +696,9 @@ impl Broker {
                 Ok(None)
             }
             "sc_rebind" => self.rebind(d, &phone, req).map(|()| None),
+            "sc_rtc_offer" => self.rtc_offer_begin(d, phone, req)?.await.map(Some),
+            "sc_rtc_ice" => self.rtc_ice(&phone, req).map(|()| None),
+            "sc_via" => self.rtc_via(d, &phone, req).map(|()| None),
             _ => Err(refused("unknown_verb", format!("unknown request {verb:?}"))),
         }
     }
@@ -736,7 +799,8 @@ impl Broker {
         // Who may start one, which way, and with what Face ID (`screen_policy`): the passkey's check is blocking, and is used once.
         let via = Via::parse(req["via"].as_str()).ok_or_else(|| refused("bad_request", "unknown way"))?;
         let (dd, device, browser, relay, proof, tgt) = (d.clone(), phone.device.to_string(), phone.browser, phone.relay, req["recheck"].clone(), target.clone());
-        let (via, max_kbps) = tokio::task::spawn_blocking(move || dd.mobile.screen_may_start(&device, browser, relay, via, &tgt, &proof))
+        let can_p2p = req["p2p"] == true;
+        let (via, max_kbps) = tokio::task::spawn_blocking(move || dd.mobile.screen_may_start(&device, browser, relay, via, can_p2p, &tgt, &proof))
             .await
             .map_err(|_| refused("not_kept", "That did not finish."))?
             .map_err(|(code, message)| refused(code, message))?;
@@ -747,7 +811,7 @@ impl Broker {
         let grant = d.mobile.grant(phone.device);
         let sc = uuid::Uuid::new_v4().simple().to_string();
         // `max_kbps`: a screen through the relay WebSocket is held to its rate (an older app ignores it, and the daemon still counts the month).
-        let params = json!({"sc": sc, "target": target, "device": phone.name, "level": level.number(), "max_kbps": max_kbps});
+        let params = json!({"sc": sc, "target": target, "device": phone.name, "level": level.number(), "max_kbps": if via == Via::Relay { max_kbps } else { None }});
         let started = match d.providers.request_within("screen", "screen.start", params, START_LIMIT).await {
             Ok(v) => v,
             Err(e) => {
@@ -789,6 +853,17 @@ impl Broker {
             typing: false,
             after_text: Vec::new(),
             relay_bytes: 0,
+            on_p2p: false,
+            p2p_only: false,
+            rtc: None,
+            rtc_next: None,
+            paused_for_p2p: false,
+            p2p_waiting: None,
+            acked_bytes: 0,
+            ceiling: None,
+            clear_stats: 0,
+            offers: 0,
+            unsent_path: None,
         };
         // The link closed while the app was starting: the hold waits for the same device's next connection, like one whose link dropped.
         let link_gone = phone.out.is_closed() || phone.media.is_closed();
@@ -796,7 +871,12 @@ impl Broker {
             Self::set_gone(&mut state);
             pause_notice(&mut state, &sc, true)
         });
-        let hold = Arc::new(Hold { sc: sc.clone(), device: phone.device.to_string(), provider, browser: phone.browser, relay: via == Via::Relay, grant, ended: AtomicBool::new(false), wake: Notify::new(), state: Mutex::new(state) });
+        // Peer to peer from the start: nothing goes until the phone's peer opens (the phone offers as soon as it has the answer), and only that way.
+        let p2p = via == Via::P2p;
+        if p2p {
+            state.p2p_only = true;
+        }
+        let hold = Arc::new(Hold { sc: sc.clone(), device: phone.device.to_string(), provider, browser: phone.browser, relay: phone.relay, capped: max_kbps.is_some(), grant, ended: AtomicBool::new(false), wake: Notify::new(), state: Mutex::new(state) });
         self.holds.lock().insert(sc.clone(), hold.clone());
         // Frames that came before this hold were dropped unseen: the helper gives them up with a keyframe asked for now.
         let lost = {
@@ -811,6 +891,10 @@ impl Broker {
         }
         if let Some(params) = pause {
             d.providers.notify("screen", "screen.pause", params);
+        }
+        if p2p {
+            let mut st = hold.state.lock();
+            Self::wait_for_p2p(d, &hold, &mut st);
         }
         let title = short(started.get("title"), 80);
         let kind = if started["kind"] == "window" { "window" } else { "monitor" };
@@ -856,7 +940,12 @@ impl Broker {
             st.unacked = 0;
             st.need_key = true;
             st.need_key_since = Instant::now();
-            pause_notice(&mut st, sc, false)
+            // A screen waiting for its peer stays paused until that opens; where the picture went while the link was away is said now.
+            let paused = st.paused_for_p2p;
+            if let Some(path) = st.unsent_path.take() {
+                let _ = phone.out.try_send(path);
+            }
+            pause_notice(&mut st, sc, paused)
         };
         // The helper goes on, with a keyframe first: never a frame from before the gap.
         d.providers.notify("screen", "screen.pause", params);
@@ -882,8 +971,16 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
             return;
         }
         // The grant first, then what it rests on as it is now: every path that takes control away clears the grant; this holds whatever a later one forgets.
-        if !hold.grant.load(Ordering::SeqCst) || !d.mobile.screen_held(&hold.device, hold.browser, hold.relay) {
+        let (way, waited) = {
+            let st = hold.state.lock();
+            (if st.on_p2p { Via::P2p } else { rtc::link_way(&hold) }, st.p2p_waiting.filter(|_| st.rtc_next.is_none()).map(|at| at.elapsed()))
+        };
+        if !hold.grant.load(Ordering::SeqCst) || !d.mobile.screen_held(&hold.device, hold.browser, hold.relay, way) {
             return d.screen.end(&d, &hold.sc, "revoked", true);
+        }
+        // Waiting for a peer that nobody is opening any more.
+        if waited.is_some_and(|w| w >= rtc::P2P_WAIT) {
+            return d.screen.end(&d, &hold.sc, "p2p_failed", true);
         }
         // What went through the relay since the last look, counted outside the hold's lock (the store may be saved); the month's allowance spent
         // ends the screen, whatever was left of it at its start.

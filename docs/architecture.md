@@ -943,7 +943,7 @@ Private agent pages per platform: the Browser panes row of the components table;
 **Through the relay** (API 41, `mobile/screen_policy.rs`, `mobile/screen_access.rs`): off unless the person turns on *See and control the screen without
 Tailscale* (`mobile.set_screen {remote, methods}`, verified when it widens anything; sealed as `ScreenOptions` with the string `kelpie-screen-options/1`;
 options that do not verify are off through the relay and never rewritten silently, `screen.doubted` in `mobile.status`). A connection through the relay may
-use the screen only with `remote` and the relay WebSocket way on, a record with `control` (a hosted device may be raised to it then, for the screen only),
+use the screen only with `remote` and a way through it on (the relay WebSocket or peer to peer), a record with `control` (a hosted device may be raised to it then, for the screen only),
 a connection that may type, the lock on, a passkey and a window open; every new screen through it needs a passkey assertion with user verification over
 `recheck_challenge("screen:" + target, "relay", expiry)`, at most a minute ahead and used once (`Mobile::screen_recheck`). Over a direct link the rule is
 control's, unchanged, with no new Face ID. The hold remembers its way and the hold's task lets go within 250 ms once the rule no longer holds
@@ -956,15 +956,36 @@ tailscale, relay: available or why not) and `relay` (`{ours, host}`); `sc_start 
 says `ok` or why not (a hosted device below `control` is told what its raise waits on, `screen_remote_off`, `method_off`, `lock_off` or `no_passkey`,
 before `not_granted`); the audit line reads `monitor via relay`. A pane's takeover keeps `transport_cap`: never through the relay.
 
+**Peer to peer** (API 42, Windows, `crates/kelpie-rtc`, `screen/rtc.rs`; decision 2026-11-12, replacing "not WebRTC" below): the picture can leave the link for
+WebRTC data channels straight between the phone and this computer. The daemon is the answering peer (str0m 0.25 with SChannel DTLS, `wincrypto`; one UDP
+socket per peer bound to the IPv4 address its default route leaves from, which is its host candidate (never a Tailscale 100.64/10 address), and one
+server-reflexive candidate from Cloudflare's STUN). The
+phone offers inside the link (`sc_rtc_offer {sc, sdp}`, answered `{sdp, nonce, ice_servers}`; late candidates as `sc_rtc_ice`), so each side's DTLS
+fingerprint is authenticated by the link's keys and str0m refuses any other certificate. Three channels negotiated by number: 0 `"m"` media in chunks
+of 16 KiB (`[0x02, msg_seq u32, idx u16, count u16]`, reliable, ordered), 1 `"c"` the cursor (unordered, no retransmit), 2 `"i"` acknowledgements and input
+(reliable, ordered); the first message on `"i"` must be `{type: "rtc_hello", sc, nonce}` or the peer is closed. Once open, the hold's media and cursor go to the
+peer under the hold's lock and the helper starts again from a keyframe (`screen.pause {paused: false}`, as after a rebind); the JSON stays on the link, which says
+`sc_path {path, state, why?}`. Acknowledgements and input on `"i"` go through the same code as the link's verbs, with the screen's rule looked at again for each
+(`Mobile::screen_allowed`) and only while the hold's link is there. A peer that fails (not open in 10 s, ICE disconnected 3 s, a channel closed, a wrong hello)
+gives the picture back to the link when that way may be used, else the screen ends (`p2p_failed`); a new offer (the phone's network changed) opens a new peer
+while the old one streams, swapped when it opens. Ways: `p2p` in `paths` and `via` (`ScreenOptions.methods.p2p`); Automatic through the relay starts on the
+relay WebSocket and moves peer to peer when the phone's peer opens (or, for a phone whose `sc_start` says `p2p: true`, starts peer to peer only,
+paused until it opens, when the relay WebSocket is turned off; another phone is refused with `method_off`); the offer is answered off the connection's read
+loop, as `sc_text` is; `sc_via` switches mid-screen. A screen through the relay's connection needs the same Face ID whichever way its picture takes, and the remote switch
+ends it too (`screen_policy::held`, the way included). Rate: the relay WebSocket's cap is lifted peer to peer and put back on the link (`screen.cap`, the
+helper's `Bandwidth::set_cap`); under loss, while `"m"` stays at its 256 KiB budget for more than twice the round trip, the stream is held to 0.85 × what
+the phone acknowledged, let out a quarter every two clear seconds. Each side sees the other's IP addresses. `KELPIE_RTC_TEST_IMPAIR` (or the file
+`KELPIE_RTC_TEST_IMPAIR_FILE` names) loses, delays and slows the peer's packets in a debug build or an e2e run only; `KELPIE_RTC_STUN=off` skips STUN.
+
 A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29, Windows; macOS later). The same rules as a
 pane's takeover over a direct link (Tailscale or this computer's HTTPS address), the grant on the desktop with the person's verification
-as the only confirmation, the lock and a revoke ending it at once. The video goes **over the phone's end-to-end encrypted link**, not WebRTC: no UDP socket,
-no STUN or TURN (owner decision 2026-11-06; WebRTC is a later stage, only if stalls over 250 ms p95 are measured; a WebTransport spike comes first,
-2026-11-07). Built and run end to end on one desktop; the phase file lists what is still owed and the measurement plan.
+as the only confirmation, the lock and a revoke ending it at once. The video goes **over the phone's end-to-end encrypted link**, or peer to peer (above,
+from API 42; the 2026-11-06 decision against WebRTC was replaced on 2026-11-12, after the WebTransport and str0m spikes).
 
 ```
-phone ──link: screens · sc_start · sc_input · sc_text · sc_ack · sc_key · sc_stop · sc_rebind · sc_resume──▶ kelpied screen.rs ──provider (screen.*)──▶ app screen.rs ──stdin JSON──▶ kelpie-screen
-phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb · sc_end ◀── kelpied ◀── provider.event {sc, kind} ◀── app ◀── stdout frames ◀── kelpie-screen
+phone ──link: screens · sc_start · sc_input · sc_text · sc_ack · sc_key · sc_stop · sc_rebind · sc_resume · sc_rtc_offer · sc_rtc_ice · sc_via──▶ kelpied screen.rs ──provider (screen.*)──▶ app screen.rs ──stdin JSON──▶ kelpie-screen
+phone ◀── link: binary media (0x01…) + sc_state · sc_stats · sc_fhb · sc_path · sc_end ◀── kelpied ◀── provider.event {sc, kind} ◀── app ◀── stdout frames ◀── kelpie-screen
+phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) · "c" cursor ══▶ "i" rtc_hello · sc_ack · sc_input ══ kelpied screen/rtc.rs (kelpie-rtc)
 ```
 
 - **The helper** (`crates/kelpie-screen`, a workspace member that no default build makes): spawned by the app on the first viewer (`app/src-tauri/src/screen.rs`,

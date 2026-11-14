@@ -195,7 +195,7 @@ export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with.
    *  `prefs` with a `push_prefs`: the choices the computer keeps. `ready`, `projects`, `agents` and `why` with a `new_options`; `id` with a `new_session` (the session
    *  started), `dup` when that start was asked for before. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean; sdp?: string; nonce?: string; ice_servers?: RTCIceServer[] }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -223,7 +223,7 @@ export interface LinkHandlers {
   deviceChanged?(m: { name: string; change: string; permission: string | null }): void;
   /** A takeover's frame, heartbeat or end (`tk_frame`, `tk_fhb`, `tk_end`). */
   takeover?(m: { type: string; tk?: string; seq?: number; data?: string; meta?: unknown; reason?: string; paused?: boolean }): void;
-  /** The computer's screen: its state, stats, heartbeat or end (`sc_state`, `sc_stats`, `sc_fhb`, `sc_end`). */
+  /** The computer's screen: its state, stats, heartbeat, way or end (`sc_state`, `sc_stats`, `sc_fhb`, `sc_path`, `sc_end`). */
   screen?(m: { type: string; sc?: string; [k: string]: unknown }): void;
   /** A binary media message of the screen (video, a crisp tile, the cursor). */
   screenMedia?(bytes: Uint8Array): void;
@@ -794,9 +794,10 @@ export class Link {
     return this.request({ type: "screens" }, { write: false });
   }
 
-  /** `via`: the way chosen (the computer picks when it is left out). `recheck`: the person's Face ID over this screen, which a start through the relay needs. */
-  scStart(target: string, via?: ViaId | null, recheck?: Record<string, unknown>) {
-    return this.request({ type: "sc_start", target, ...(via ? { via } : {}), ...(recheck ? { recheck } : {}) }, { write: false });
+  /** `via`: the way chosen (the computer picks when it is left out). `recheck`: the person's Face ID over this screen, which a start through the relay needs.
+   *  `p2p`: this phone can go peer to peer (Automatic may then start that way). */
+  scStart(target: string, via?: ViaId | null, recheck?: Record<string, unknown>, p2p = false) {
+    return this.request({ type: "sc_start", target, ...(via ? { via } : {}), ...(recheck ? { recheck } : {}), ...(p2p ? { p2p } : {}) }, { write: false });
   }
 
   scStop(sc: string) {
@@ -829,6 +830,20 @@ export class Link {
 
   scSharpen(sc: string, rect: { x: number; y: number; w: number; h: number }) {
     this.post({ type: "sc_sharpen", sc, rect });
+  }
+
+  // The screen peer to peer (screen-rtc.ts): the offer and its answer, late candidates, and the way from now on.
+
+  scRtcOffer(sc: string, sdp: string) {
+    return this.request({ type: "sc_rtc_offer", sc, sdp }, { write: false });
+  }
+
+  scRtcIce(sc: string, cand: string) {
+    this.post({ type: "sc_rtc_ice", sc, cand });
+  }
+
+  scVia(sc: string, via: ViaId) {
+    return this.request({ type: "sc_via", sc, via }, { write: false });
   }
 
   /** The computer's clock as this phone reads it: this phone's, less the smallest difference seen lately. */
@@ -1291,6 +1306,7 @@ export class Link {
       case "sc_state":
       case "sc_stats":
       case "sc_fhb":
+      case "sc_path":
       case "sc_end":
         this.h.screen?.(m);
         if (m.type !== "sc_end") return;
@@ -1374,7 +1390,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers });
     }
     this.h.changed();
     return true;

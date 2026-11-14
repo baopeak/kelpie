@@ -38,6 +38,8 @@ hmac = "0.12"
 kelpie-link = { path = "../kelpie-link" }
 # A phone's screen (screen.rs): the media messages' format and the input checks, shared with the helper. Its pure modules only.
 kelpie-screen = { path = "../kelpie-screen", default-features = false }
+# The screen peer to peer (screen/rtc.rs): WebRTC data channels with str0m, on Windows only (where the screen helper runs).
+kelpie-rtc = { path = "../kelpie-rtc" }
 regex = "1"
 # The address an agent asks the window to open (`page.open`), read by the WHATWG rules the window's own parser follows.
 url = "2.5"
@@ -83,3 +85,7 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError"] }
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext", "LAError"] }
+
+# A phone's side of a peer to peer screen, for the broker's tests.
+[target.'cfg(windows)'.dev-dependencies]
+kelpie-rtc = { path = "../kelpie-rtc", features = ["test-phone"] }

@@ -31,8 +31,9 @@ import { afterFailedPairing, applyAddrs, movedTo, platformOf, relayMovedTo } fro
 import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
-import { KIND_VIDEO, ScreenSession, type ScreenState } from "./screen";
-import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_REMOTE_API, TAKEOVER_API } from "../../src/lib/attention";
+import { ScreenSession, type ScreenState } from "./screen";
+import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, TAKEOVER_API } from "../../src/lib/attention";
+import { ScreenPeer, type OfferReply } from "./screen-rtc";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
 // ---------- signals the views read ----------
@@ -115,6 +116,12 @@ let screenMediaSink: ((bytes: Uint8Array) => void) | null = null;
 export function onScreenMedia(sink: ((bytes: Uint8Array) => void) | null) {
   screenMediaSink = sink;
 }
+/** A media message of the screen, from the link or peer to peer: to the view, unless it is video older than what it already has. */
+function deliverScreenMedia(bytes: Uint8Array) {
+  if (remoteScreens.incoming(bytes)) screenMediaSink?.(bytes);
+}
+/** This browser can connect peer to peer, to a computer that offers it. */
+export const canP2p = () => daemonApi() >= SCREEN_P2P_API && typeof RTCPeerConnection === "function";
 export const connected = () => canAct(conn());
 
 // ---------- the link ----------
@@ -282,9 +289,7 @@ const link = new Link(browserEnv(), () => {
     remoteScreens.onMessage(m as Parameters<ScreenSession["onMessage"]>[0]);
   },
   screenMedia(bytes) {
-    // Only video says frames are coming; a cursor or a tile does not.
-    remoteScreens.media(bytes[1] === KIND_VIDEO);
-    screenMediaSink?.(bytes);
+    deliverScreenMedia(bytes);
   },
   sessions(m: SessionsMsg) {
     const before = new Map(sessions().map((s) => [s.id, s.status]));
@@ -384,7 +389,7 @@ export { takeovers };
 
 const remoteScreens = new ScreenSession({
   targets: () => link.screens(),
-  start: (target, via, recheck) => link.scStart(target, via, recheck),
+  start: (target, via, recheck) => link.scStart(target, via, recheck, canP2p()),
   stop: (sc) => link.scStop(sc),
   text: (sc, text, st) => link.scText(sc, text, st),
   rebind: (sc) => link.scRebind(sc),
@@ -405,6 +410,20 @@ const remoteScreens = new ScreenSession({
     if (id) rememberVia(id, via);
   },
   proof: (target) => lock.screenProof(target),
+  webrtc: () => canP2p(),
+  peer: (sc, ev) =>
+    canP2p()
+      ? new ScreenPeer({ RTCPeerConnection, setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>) }, {
+          offer: async (s, sdp): Promise<OfferReply> => {
+            const r = await link.scRtcOffer(s, sdp);
+            if (r.t === "ack" && r.sdp && r.nonce) return { t: "ack", sdp: r.sdp, nonce: r.nonce, ice_servers: r.ice_servers };
+            return r.t === "error" ? { t: "error", code: r.code, message: r.message } : { t: "offline" };
+          },
+          ice: (s, cand) => link.scRtcIce(s, cand),
+        }, sc, ev)
+      : null,
+  via: (sc, via) => link.scVia(sc, via),
+  deliver: (bytes) => deliverScreenMedia(bytes),
   serverNow: () => link.serverNow(),
   now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),

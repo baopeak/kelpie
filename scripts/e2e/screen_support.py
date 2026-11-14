@@ -155,6 +155,80 @@ def stop(name):
             print(f"{name} (pid {p.pid}) did not stop", flush=True)
 
 
+# ---------- the motion window ----------
+
+# The motion: a window full of text that scrolls a line every frame, and notes each click with the wall clock (ms) and where it landed.
+MOTION = r'''
+import ctypes, sys, time, tkinter as tk
+ctypes.windll.shcore.SetProcessDpiAwareness(2)
+title, events = sys.argv[1], sys.argv[2]
+def note(line):
+    with open(events, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+root = tk.Tk()
+root.title(title)
+root.geometry("960x640+80+80")
+root.attributes("-topmost", True)
+canvas = tk.Canvas(root, bg="white", highlightthickness=0)
+canvas.pack(fill="both", expand=True)
+LINE = 18
+items = [canvas.create_text(10, i * LINE, anchor="nw", font=("Consolas", 11), text="") for i in range(40)]
+n = [0]
+def tick():
+    n[0] += 1
+    for i, it in enumerate(items):
+        k = n[0] + i
+        canvas.itemconfigure(it, text=f"{k:08d}  the quick brown fox jumps over the lazy dog {k * 7919 % 100000:05d} " * 2)
+    root.after(33, tick)
+canvas.bind("<Button-1>", lambda e: note("click:%.1f:%d,%d" % (time.time() * 1000, e.x_root, e.y_root)))
+def where():
+    root.update_idletasks()
+    note("area:%d,%d,%d,%d" % (canvas.winfo_rootx(), canvas.winfo_rooty(), canvas.winfo_width(), canvas.winfo_height()))
+root.after(500, where)
+root.after(33, tick)
+root.mainloop()
+'''
+
+
+class Motion:
+    """A window of this script's own that scrolls text every frame (what the screen shows) and writes down each click with the wall clock and where it
+    landed (what a click reaches)."""
+
+    def __init__(self, s):
+        self.path = os.path.join(s.work, "motion-events.txt")
+        self.title = f"Kelpie screen motion {os.getpid()}"
+
+    def start(self):
+        spawn("motion", [sys.executable, "-c", MOTION, self.title, self.path])
+
+    def hwnd(self):
+        return ctypes.windll.user32.FindWindowW(None, self.title)
+
+    def events(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return [line.rstrip("\n") for line in f]
+        except OSError:
+            return []
+
+    def area(self):
+        """Its canvas on the screen (physical pixels): left, top, width, height."""
+        for line in self.events():
+            if line.startswith("area:"):
+                return tuple(int(v) for v in line[5:].split(","))
+        return None
+
+    def clicks_seen(self):
+        """Each click it got: (wall ms, x, y)."""
+        out = []
+        for line in self.events():
+            if line.startswith("click:"):
+                _, at, xy = line.split(":")
+                x, y = (int(v) for v in xy.split(","))
+                out.append((float(at), x, y))
+        return out
+
+
 # ---------- the phone ----------
 
 

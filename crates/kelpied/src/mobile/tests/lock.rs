@@ -1311,15 +1311,15 @@ async fn the_screen_through_the_relay_needs_the_switch_and_a_fresh_face_id_used_
     let (r, mut a) = enrolled().await;
     controller(&r.daemon);
     let m = &r.daemon.mobile;
-    let start = |via: Via, relay: bool, proof: &Value| m.screen_may_start("phone", true, relay, via, "m:1", proof).map_err(|(code, _)| code);
+    let start = |via: Via, relay: bool, proof: &Value| m.screen_may_start("phone", true, relay, via, true, "m:1", proof).map_err(|(code, _)| code);
     let soon = || now_millis() + 30_000;
     // Over a direct link: today's rule, no Face ID.
     assert_eq!(start(Via::Auto, false, &Value::Null), Ok((Via::Tailscale, None)));
     // Through the relay: off by default.
     assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:1", "relay", soon())), Err("screen_remote_off"));
-    assert!(!m.screen_held("phone", true, true));
+    assert!(!m.screen_held("phone", true, true, Via::Relay));
     m.set_screen(store::ScreenOptions { remote: true, ..m.screen_options() }).unwrap();
-    assert!(m.screen_held("phone", true, true), "a hold through the relay rests on the switch");
+    assert!(m.screen_held("phone", true, true, Via::Relay), "a hold through the relay rests on the switch");
     assert_eq!(start(Via::Auto, true, &Value::Null), Err("needs_face_id"));
     assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:2", "relay", soon())), Err("needs_face_id"), "over another screen's challenge");
     assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:1", "relay", now_millis() + 120_000)), Err("needs_face_id"), "more than a minute ahead");
@@ -1327,14 +1327,25 @@ async fn the_screen_through_the_relay_needs_the_switch_and_a_fresh_face_id_used_
     assert_eq!(start(Via::Auto, true, &good), Ok((Via::Relay, Some(store::RELAY_WS_KBPS))), "held to the relay WebSocket's rate");
     assert_eq!(start(Via::Auto, true, &good), Err("needs_face_id"), "used once");
     assert_eq!(start(Via::Tailscale, true, &good), Err("no_direct_link"));
-    // The month's allowance spent: refused before any Face ID is asked for.
+    // Peer to peer through the relay's connection: the same Face ID; over a direct link, none asked.
+    assert_eq!(start(Via::P2p, true, &Value::Null), Err("needs_face_id"));
+    assert_eq!(start(Via::P2p, true, &proof(&mut a, "screen:m:1", "relay", soon() + 1)), Ok((Via::P2p, Some(store::RELAY_WS_KBPS))), "the rate it is held to if it falls back to the relay WebSocket");
+    assert_eq!(start(Via::P2p, false, &Value::Null), Ok((Via::P2p, None)));
+    assert!(m.screen_held("phone", true, true, Via::P2p));
+    // Automatic with the relay WebSocket off goes peer to peer only, and only for a phone that says it can.
+    let ws_on = m.screen_options();
+    m.set_screen(store::ScreenOptions { methods: store::ScreenMethods { relay_ws: false, ..ws_on.methods }, ..ws_on.clone() }).unwrap();
+    let auto = |can: bool, proof: &Value| m.screen_may_start("phone", true, true, Via::Auto, can, "m:1", proof).map(|(way, _)| way).map_err(|(code, _)| code);
+    assert_eq!(auto(false, &Value::Null), Err("method_off"), "an older page or a browser without WebRTC is told, not left waiting");
+    assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 2)), Ok(Via::P2p));
+    m.set_screen(ws_on).unwrap();    // The month's allowance spent: refused before any Face ID is asked for.
     m.count_relay_screen(u64::from(store::RELAY_WS_MONTH_MB) * 1024 * 1024);
     assert!(m.relay_screen_spent());
     assert_eq!(start(Via::Auto, true, &proof(&mut a, "screen:m:1", "relay", soon())), Err("relay_budget_spent"));
     assert_eq!(m.screen_status()["relay_ws_used_mb"], store::RELAY_WS_MONTH_MB);
     // Turned off again: holds through the relay let go; a direct one is untouched.
     m.set_screen(store::ScreenOptions { remote: false, ..m.screen_options() }).unwrap();
-    assert!(!m.screen_held("phone", true, true) && m.screen_held("phone", true, false));
+    assert!(!m.screen_held("phone", true, true, Via::Relay) && !m.screen_held("phone", true, true, Via::P2p) && m.screen_held("phone", true, false, Via::Tailscale));
     let audit = m.audit_entries(50).to_string();
     assert!(audit.contains("screen without Tailscale: true (was false)") && audit.contains("screen without Tailscale: false (was true)"), "{audit}");
 }
@@ -1376,4 +1387,33 @@ async fn screen_options_that_do_not_verify_are_off_through_the_relay_and_said_so
     assert!(m.requested_screen(&json!({"relay_ws_kbps": 4000})).is_err(), "the relay WebSocket is held to 500 kbps at most");
     assert!(!m.screen_options().widened_by(&store::ScreenOptions::default()));
     assert!(store::ScreenOptions::default().widened_by(&store::ScreenOptions { remote: true, ..store::ScreenOptions::default() }), "turning it on is verified");
+}
+/// Options saved before peer to peer was offered had it on only as a placeholder: read, it follows the relay WebSocket's, so a person who
+/// turned the relay's way off still has no screen through the relay; once set again it is their own choice, and still verifies.
+#[tokio::test]
+async fn screen_options_from_before_peer_to_peer_keep_the_relay_off() {
+    let r = rig();
+    let m = &r.daemon.mobile;
+    let key = m.mac_key(true).unwrap().unwrap();
+    let mut old = store::ScreenOptions { remote: true, methods: store::ScreenMethods { relay_ws: false, ..store::ScreenMethods::default() }, ..store::ScreenOptions::default() };
+    assert!(old.methods.p2p && !old.p2p_chosen, "as the build before saved it");
+    store::seal_screen(&mut old, &key);
+    m.config.lock().screen = Some(old);
+    m.check_screen_options();
+    assert_eq!(m.screen_status()["doubted"], false, "the old seal still verifies");
+    assert!(!m.screen_options().methods.p2p, "the placeholder follows the relay WebSocket: off");
+    let mut next = m.screen_options();
+    next.methods.p2p = true;
+    m.set_screen(next).unwrap();
+    m.check_screen_options();
+    assert!(m.screen_options().methods.p2p && m.screen_options().p2p_chosen && !m.screen_options().methods.relay_ws, "the person's own choice now");
+    assert_eq!(m.screen_status()["doubted"], false);
+    // Unchecked in the build before, with the relay WebSocket left on: it stays off.
+    let mut unchecked = store::ScreenOptions { remote: true, methods: store::ScreenMethods { p2p: false, ..store::ScreenMethods::default() }, ..store::ScreenOptions::default() };
+    store::seal_screen(&mut unchecked, &key);
+    assert!(!unchecked.clone().settled().methods.p2p && unchecked.clone().settled().methods.relay_ws, "a way the person unchecked is never turned on by reading it");
+    // The flag is sealed: taking it away on file does not verify.
+    m.config.lock().screen.as_mut().unwrap().p2p_chosen = false;
+    m.check_screen_options();
+    assert_eq!(m.screen_status()["doubted"], true);
 }

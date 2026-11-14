@@ -130,7 +130,11 @@ impl Rig {
     }
 
     async fn next(&mut self, kind: &str) -> Option<Value> {
-        let end = Instant::now() + Duration::from_secs(3);
+        self.next_within(kind, Duration::from_secs(3)).await
+    }
+
+    async fn next_within(&mut self, kind: &str, within: Duration) -> Option<Value> {
+        let end = Instant::now() + within;
         while Instant::now() < end {
             match tokio::time::timeout(Duration::from_millis(100), self.phone.recv()).await {
                 Ok(Some(m)) => {
@@ -789,4 +793,214 @@ async fn a_screen_whose_phone_comes_back_another_way_ends_and_is_started_again()
     assert_eq!(err.code, "route_changed", "the phone says why");
     assert_eq!(r.d.screen.count(), 0, "ended");
     assert_eq!(r.told_now("screen.stop").await.last().map(|s| s["reason"].clone()), Some(json!("route_changed")));
+}
+
+/// The screen peer to peer, against a test phone (a str0m offerer with the phone's channels, on 127.0.0.1).
+#[cfg(windows)]
+mod p2p {
+    use super::*;
+    use kelpie_rtc::test_phone::{self, TestPhone};
+
+    /// The daemon's peers on the loopback, as the test phone is, and no STUN.
+    fn local_peers() {
+        std::env::set_var("KELPIE_RTC_STUN", "off");
+        std::env::set_var("KELPIE_RTC_TEST_HOST", "127.0.0.1");
+    }
+
+    /// Offers from the test phone, and says the hello with the answer's nonce (`hello: false` says a wrong one).
+    async fn connect(r: &Rig, sc: &str, hello: bool) -> TestPhone {
+        local_peers();
+        let (offering, offer) = test_phone::offer().await;
+        let ack = r.verb("sc_rtc_offer", json!({"sc": sc, "sdp": offer})).await.unwrap().unwrap();
+        assert!(ack["ice_servers"][0]["urls"][0].as_str().unwrap().starts_with("stun:"), "{ack}");
+        let mut phone = offering.accept(ack["sdp"].as_str().unwrap());
+        tokio::time::timeout(Duration::from_secs(10), phone.opened.wait_for(|o| *o)).await.expect("the channels open").unwrap();
+        let nonce = if hello { ack["nonce"].as_str().unwrap().to_string() } else { "not-it".to_string() };
+        phone.sent_i.send(json!({"type": "rtc_hello", "sc": sc, "nonce": nonce}).to_string().into_bytes()).unwrap();
+        phone
+    }
+
+    async fn path(r: &mut Rig) -> Value {
+        r.next("sc_path").await.expect("an sc_path")
+    }
+
+    async fn media_of(phone: &mut TestPhone) -> wire::Peek {
+        let m = tokio::time::timeout(Duration::from_secs(5), phone.media.recv()).await.expect("media peer to peer").unwrap();
+        wire::peek(&m).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_picture_moves_peer_to_peer_and_acknowledgements_and_input_come_back_on_it() {
+        let mut r = rig();
+        let sc = r.start().await;
+        r.send(&sc, &video(1, true, 500));
+        assert_eq!(r.frames().len(), 1, "on the link first");
+        let mut phone = connect(&r, &sc, true).await;
+        let p = path(&mut r).await;
+        assert_eq!((p["path"].as_str(), p["state"].as_str()), (Some("p2p"), Some("live")));
+        // The helper starts again from a keyframe, as after a rebind; the way's cap is told (none peer to peer).
+        let pauses = r.told_now("screen.pause").await;
+        assert_eq!(pauses.last().unwrap()["paused"], false);
+        assert_eq!(r.told("screen.cap").last().unwrap()["max_kbps"], json!(null));
+        r.send(&sc, &video(2, false, 500));
+        r.send(&sc, &video(3, true, 40_000));
+        r.send(&sc, &wire::cursor(wire::Shape::Arrow, true, 7, 8));
+        let got = media_of(&mut phone).await;
+        assert_eq!((got.kind, got.seq, got.key), (KIND_VIDEO, 3, true), "a keyframe first: the frame before it was dropped");
+        assert!(r.frames().is_empty(), "nothing more on the link");
+        let c = tokio::time::timeout(Duration::from_secs(5), phone.cursor.recv()).await.unwrap().unwrap();
+        assert_eq!(c, wire::cursor(wire::Shape::Arrow, true, 7, 8));
+        // An acknowledgement and input on "i" go as the link's would.
+        phone.sent_i.send(json!({"type": "sc_ack", "seq": 3}).to_string().into_bytes()).unwrap();
+        phone.sent_i.send(json!({"type": "sc_input", "ops": [{"k": "move", "x": 5, "y": 6}], "st": now_millis()}).to_string().into_bytes()).unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        while (r.told("screen.input").is_empty() || !r.told("screen.flow").iter().any(|f| f["acked"] == 3)) && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(r.told("screen.input").last().unwrap()["ops"][0]["k"], "move");
+        assert!(r.told("screen.flow").iter().any(|f| f["acked"] == 3), "the acknowledgement reached the helper");
+        // Back to the link by choice: the peer goes, the picture comes back on the link from a keyframe.
+        let stop = r.d.screen.hold(&sc).unwrap().state.lock().rtc.as_ref().unwrap().stop.clone();
+        r.verb("sc_via", json!({"sc": sc, "via": "tailscale"})).await.unwrap();
+        let p = path(&mut r).await;
+        assert_eq!((p["path"].as_str(), p["why"].as_str()), (Some("tailscale"), Some("chosen")));
+        r.send(&sc, &video(4, true, 500));
+        assert_eq!(r.frames().iter().map(|p| p.seq).collect::<Vec<_>>(), [4]);
+        let end = Instant::now() + Duration::from_secs(3);
+        while Arc::strong_count(&stop) > 1 && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(Arc::strong_count(&stop), 1, "the peer's task let go");
+    }
+
+    #[tokio::test]
+    async fn a_hello_with_another_nonce_closes_the_peer_and_the_picture_stays_on_the_link() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let _phone = connect(&r, &sc, false).await;
+        let p = path(&mut r).await;
+        assert_eq!((p["state"].as_str(), p["why"].as_str(), p["path"].as_str()), (Some("failed"), Some("bad_hello"), Some("tailscale")));
+        r.send(&sc, &video(1, true, 500));
+        assert_eq!(r.frames().len(), 1, "still on the link");
+        assert!(r.d.screen.hold(&sc).unwrap().state.lock().rtc_next.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_goes_away_gives_the_picture_back_to_the_link() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let phone = connect(&r, &sc, true).await;
+        assert_eq!(path(&mut r).await["path"], "p2p");
+        drop(phone);
+        let end = Instant::now() + Duration::from_secs(30);
+        let mut seen = Vec::new();
+        while Instant::now() < end && !seen.iter().any(|p: &Value| p["state"] == "live" && p["path"] == "tailscale") {
+            if let Some(p) = r.next("sc_path").await {
+                seen.push(p);
+            }
+        }
+        assert!(seen.iter().any(|p| p["state"] == "failed" && p["path"] == "p2p"), "{seen:?}");
+        assert!(seen.iter().any(|p| p["state"] == "live" && p["path"] == "tailscale"), "{seen:?}");
+        r.send(&sc, &video(9, true, 500));
+        assert_eq!(r.frames().iter().map(|p| p.seq).collect::<Vec<_>>(), [9], "the picture on the link again");
+        assert_eq!(r.d.screen.count(), 1, "the screen goes on");
+    }
+
+    #[tokio::test]
+    async fn peer_to_peer_only_waits_paused_and_ends_when_its_peer_fails() {
+        let mut r = rig();
+        let reply = r.verb("sc_start", json!({"target": "w:66:7", "via": "p2p"})).await.unwrap().unwrap();
+        assert_eq!(reply["via"], "p2p");
+        let sc = reply["sc"].as_str().unwrap().to_string();
+        assert_eq!(r.told_now("screen.pause").await.last().unwrap()["paused"], true, "nothing is encoded for nobody");
+        r.send(&sc, &video(1, true, 500));
+        assert!(r.frames().is_empty(), "nothing on the link");
+        // An offer whose phone never answers: not open within the limit, and peer to peer only ends the screen.
+        local_peers();
+        let (_offering, offer) = test_phone::offer().await;
+        r.verb("sc_rtc_offer", json!({"sc": sc, "sdp": offer})).await.unwrap();
+        let end = r.next_within("sc_end", Duration::from_secs(20)).await.expect("the screen ends");
+        assert_eq!(end["reason"], "p2p_failed");
+    }
+
+    #[tokio::test]
+    async fn an_offer_is_refused_when_peer_to_peer_is_turned_off_or_malformed() {
+        let r = rig();
+        let sc = r.start().await;
+        assert_eq!(r.verb("sc_rtc_offer", json!({"sc": sc, "sdp": "v=0 nonsense"})).await.unwrap_err().code, "p2p_failed");
+        assert_eq!(r.verb("sc_rtc_offer", json!({"sc": sc})).await.unwrap_err().code, "bad_request");
+        assert_eq!(r.verb("sc_rtc_ice", json!({"sc": sc, "cand": "<script>"})).await.unwrap_err().code, "bad_request");
+        assert_eq!(r.verb("sc_via", json!({"sc": sc, "via": "relay"})).await.unwrap_err().code, "not_on_relay");
+        let off = r.d.mobile.requested_screen(&json!({"methods": {"p2p": false}})).unwrap();
+        r.d.mobile.set_screen(off).unwrap();
+        let (_o, offer) = test_phone::offer().await;
+        assert_eq!(r.verb("sc_rtc_offer", json!({"sc": sc, "sdp": offer})).await.unwrap_err().code, "method_off");
+        assert_eq!(r.verb("sc_via", json!({"sc": sc, "via": "p2p"})).await.unwrap_err().code, "method_off");
+    }
+
+    #[tokio::test]
+    async fn a_link_that_drops_keeps_the_peer_and_the_picture_stays_on_it_after_the_rebind() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let mut phone = connect(&r, &sc, true).await;
+        assert_eq!(path(&mut r).await["path"], "p2p");
+        r.d.screen.link_closed(&r.d, 1);
+        // While the link is away nothing goes on the peer, and input on it is refused.
+        r.send(&sc, &video(5, true, 500));
+        phone.sent_i.send(json!({"type": "sc_input", "ops": [{"k": "move", "x": 1, "y": 1}], "st": now_millis()}).to_string().into_bytes()).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(r.told("screen.input").is_empty(), "no input without the link");
+        assert!(tokio::time::timeout(Duration::from_millis(200), phone.media.recv()).await.is_err(), "no picture without the link");
+        // The same device comes back: the picture stays peer to peer (nothing changed while it was away, so nothing is said again).
+        let (out2, mut json2) = mpsc::channel(8);
+        let (media2, _frames2) = mpsc::channel(8);
+        let back = Phone { device: "phone", name: "Phone", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: false };
+        r.d.screen.phone_verb(&r.d, back, "sc_rebind", &json!({"sc": sc})).await.unwrap();
+        assert!(json2.try_recv().is_err(), "no stale sc_path that would make the phone switch to a peer it is still opening");
+        r.send(&sc, &video(6, true, 500));
+        assert_eq!(media_of(&mut phone).await.seq, 6);
+        phone.sent_i.send(json!({"type": "sc_input", "ops": [{"k": "move", "x": 2, "y": 2}], "st": now_millis()}).to_string().into_bytes()).unwrap();
+        let end = Instant::now() + Duration::from_secs(3);
+        while r.told("screen.input").is_empty() && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert_eq!(r.told("screen.input").len(), 1, "input on the peer again, once the link is back");
+    }
+    #[tokio::test]
+    async fn a_fallback_while_the_link_was_away_is_said_on_the_next_connection() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let phone = connect(&r, &sc, true).await;
+        assert_eq!(path(&mut r).await["path"], "p2p");
+        r.d.screen.link_closed(&r.d, 1);
+        drop(phone);
+        // The peer goes while the link is away: the picture is the link's again, said to nobody yet.
+        let hold = r.d.screen.hold(&sc).unwrap();
+        let end = Instant::now() + Duration::from_secs(30);
+        while hold.state.lock().on_p2p && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!hold.state.lock().on_p2p, "back on the link");
+        let (out2, mut json2) = mpsc::channel(8);
+        let (media2, _frames2) = mpsc::channel(8);
+        let back = Phone { device: "phone", name: "Phone", conn: 2, out: &out2, media: &media2, cursor: &CursorSlot::default(), browser: false, relay: false };
+        r.d.screen.phone_verb(&r.d, back, "sc_rebind", &json!({"sc": sc})).await.unwrap();
+        let said: Value = serde_json::from_str(&json2.try_recv().expect("where the picture went")).unwrap();
+        assert_eq!((said["path"].as_str(), said["state"].as_str()), (Some("tailscale"), Some("live")));
+    }
+
+    #[tokio::test]
+    async fn ending_the_screen_ends_its_peer() {
+        let mut r = rig();
+        let sc = r.start().await;
+        let _phone = connect(&r, &sc, true).await;
+        assert_eq!(path(&mut r).await["path"], "p2p");
+        let stop = r.d.screen.hold(&sc).unwrap().state.lock().rtc.as_ref().unwrap().stop.clone();
+        r.verb("sc_stop", json!({"sc": sc})).await.unwrap();
+        let end = Instant::now() + Duration::from_secs(3);
+        while Arc::strong_count(&stop) > 1 && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(Arc::strong_count(&stop), 1, "no peer outlives its screen");
+    }
 }

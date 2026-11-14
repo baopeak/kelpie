@@ -131,6 +131,12 @@ export function screenReasonText(code: string, t: Translate): string | null {
       return t("The screen data the relay may carry this month is used up.");
     case "hosted_app_no_tailscale":
       return t("This app came from the relay, so it can reach the computer only through the relay.");
+    case "no_webrtc":
+      return t("This browser cannot connect peer to peer (no WebRTC).");
+    case "no_p2p_path":
+      return t("A direct connection did not work from this network a moment ago.");
+    case "no_p2p_here":
+      return t("This computer cannot send its screen peer to peer.");
     default:
       return null;
   }

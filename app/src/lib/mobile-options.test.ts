@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MobileDevice, MobileStatus } from "../components/settings/mobile-settings";
 import type { RelayStatus } from "../components/settings/mobile-relay-settings";
-import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import {
   alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
@@ -461,8 +461,10 @@ describe("the screen without Tailscale", () => {
   it("lists the ways in order, as they are set, and says which are not built yet", () => {
     const rows = screenMethodRows(facts(screen({ methods: { tailscale: true, p2p: false, relay_turn: true, relay_ws: false } })));
     expect(rows.map((r) => [r.id, r.label, r.on])).toEqual([["tailscale", "Tailscale", true], ["p2p", "Direct link (P2P)", false], ["relay_turn", "Relay (TURN)", true], ["relay_ws", "Relay WebSocket", false]]);
-    expect(rows.find((r) => r.id === "p2p")!.note).toContain("later update");
+    expect(rows.find((r) => r.id === "p2p")!.note, "a computer before peer to peer").toContain("later update");
     expect(rows.find((r) => r.id === "relay_turn")!.note).toContain("later update");
+    const p2p = screenMethodRows({ ...facts(screen({})), api: SCREEN_P2P_API }).find((r) => r.id === "p2p")!;
+    expect(p2p.note).toContain("network addresses");
     expect(rows.find((r) => r.id === "tailscale")!.note).toBeNull();
     expect(rows.every((r) => r.disabled === null)).toBe(true);
   });

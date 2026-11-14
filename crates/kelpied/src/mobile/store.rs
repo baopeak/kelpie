@@ -286,6 +286,11 @@ pub struct ScreenOptions {
     /// What it may send that way in a calendar month (MB).
     #[serde(default = "relay_ws_month_mb")]
     pub relay_ws_month_mb: u32,
+    /// Saved by a build that offers peer to peer, so `methods.p2p` is the person's choice. Options saved before had it on only as a placeholder
+    /// (the checkbox said "not available yet"): read, it stays on only with the relay WebSocket's (`ScreenOptions::settled`), so that
+    /// turning the relay's way off then still means no screen through the relay.
+    #[serde(default)]
+    pub p2p_chosen: bool,
     /// HMAC-SHA256 (hex) over the fields above.
     #[serde(default)]
     pub mac: String,
@@ -304,11 +309,20 @@ fn relay_ws_month_mb() -> u32 {
 
 impl Default for ScreenOptions {
     fn default() -> ScreenOptions {
-        ScreenOptions { remote: false, methods: ScreenMethods::default(), relay_ws_kbps: RELAY_WS_KBPS, relay_ws_month_mb: RELAY_WS_MONTH_MB, mac: String::new() }
+        ScreenOptions { remote: false, methods: ScreenMethods::default(), relay_ws_kbps: RELAY_WS_KBPS, relay_ws_month_mb: RELAY_WS_MONTH_MB, p2p_chosen: false, mac: String::new() }
     }
 }
 
 impl ScreenOptions {
+    /// Options as they apply: saved before peer to peer was offered, its way is on only if it was kept on and the relay WebSocket is on too
+    /// (only ever narrowed: a way the person unchecked stays off, and none is widened without the verification `set_screen` asks for).
+    pub fn settled(mut self) -> ScreenOptions {
+        if !self.p2p_chosen {
+            self.methods.p2p = self.methods.p2p && self.methods.relay_ws;
+        }
+        self
+    }
+
     /// Whether going from `self` to `next` lets the screen go more ways than before: the person verifies that.
     pub fn widened_by(&self, next: &ScreenOptions) -> bool {
         let (a, b) = (self.methods, next.methods);
@@ -513,7 +527,13 @@ fn options_input(o: &LockOptions) -> Vec<u8> {
 
 fn screen_input(o: &ScreenOptions) -> Vec<u8> {
     let m = o.methods;
-    format!("kelpie-screen-options/1|{}|{}|{}|{}|{}|{}|{}", o.remote, m.tailscale, m.p2p, m.relay_turn, m.relay_ws, o.relay_ws_kbps, o.relay_ws_month_mb).into_bytes()
+    let fields = format!("{}|{}|{}|{}|{}|{}|{}", o.remote, m.tailscale, m.p2p, m.relay_turn, m.relay_ws, o.relay_ws_kbps, o.relay_ws_month_mb);
+    // The second form says peer to peer was chosen: options sealed before verify as they were.
+    if o.p2p_chosen {
+        format!("kelpie-screen-options/2|{fields}|p2p_chosen").into_bytes()
+    } else {
+        format!("kelpie-screen-options/1|{fields}").into_bytes()
+    }
 }
 
 pub fn seal_screen(o: &mut ScreenOptions, key: &[u8; 32]) {

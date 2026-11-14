@@ -224,6 +224,7 @@
   "Relay (TURN)": "Relay (TURN)",
   "Relay WebSocket": "WebSocket của relay",
   "Not available yet: it comes in a later update.": "Chưa dùng được: cách này sẽ có trong một bản cập nhật sau.",
+  "Straight between the phone and this computer when both networks allow it. Each side then sees the other's network addresses.": "Điện thoại và máy tính này nối thẳng với nhau khi mạng ở cả hai phía cho phép. Khi đó mỗi bên sẽ thấy địa chỉ mạng của bên kia.",
   "Counts only while seeing the screen without Tailscale is on.": "Cách này chỉ có tác dụng khi tính năng xem màn hình không cần Tailscale đang bật.",
   "{used} MB of {total} MB this month": "{used} MB trên tổng {total} MB trong tháng này",
   "May take control (screen only)": "Được điều khiển (chỉ màn hình)",

@@ -2711,6 +2711,9 @@ impl Conn {
         if name == "sc_text" {
             return self.screen_text(granted, req, tag);
         }
+        if name == "sc_rtc_offer" {
+            return self.screen_offer(granted, req, tag);
+        }
         match self.run(granted, name, req).await {
             Ok(Some(mut reply)) => {
                 if let Some(t) = tag {
@@ -2848,13 +2851,31 @@ impl Conn {
             return refused(r);
         }
         let phone = self.screen_phone();
-        let typing = match self.daemon.screen.text_begin(&self.daemon, phone, req) {
-            Ok(typing) => typing,
-            Err(r) => return refused(refuse(r.code, r.message)),
-        };
+        match self.daemon.screen.text_begin(&self.daemon, phone, req) {
+            Ok(typing) => self.reply_later(tag, typing),
+            Err(r) => refused(refuse(r.code, r.message)),
+        }
+    }
+
+    /// The phone's WebRTC offer for its screen: answered once this computer's peer is made (a STUN look-up can take most of a second), on the
+    /// screen's control queue, while this connection goes on reading the phone's acknowledgements and input.
+    fn screen_offer(&self, granted: Permission, req: &Value, tag: Option<Value>) -> Option<Value> {
+        let refused = |r: Refusal| Some(json!({"type": "error", "req": tag, "code": r.code, "reason": r.reason, "message": r.message}));
+        if let Err(r) = self.screen_refused(Verb::ScRtcOffer, granted) {
+            return refused(r);
+        }
+        let phone = self.screen_phone();
+        match self.daemon.screen.rtc_offer_begin(&self.daemon, phone, req) {
+            Ok(answering) => self.reply_later(tag, answering),
+            Err(r) => refused(refuse(r.code, r.message)),
+        }
+    }
+
+    /// A screen verb's answer that comes later, on the screen's control queue.
+    fn reply_later(&self, tag: Option<Value>, answer: impl std::future::Future<Output = Result<Value, crate::takeover::Refused>> + Send + 'static) -> Option<Value> {
         let out = self.ctl.clone();
         tokio::spawn(async move {
-            let reply = match typing.await {
+            let reply = match answer.await {
                 Ok(mut reply) => {
                     reply["req"] = tag.unwrap_or(Value::Null);
                     reply
@@ -3173,7 +3194,7 @@ impl Conn {
             Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device, self.resume.as_deref()),
             // Carried out by the broker above.
             Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => return Err(refuse("bad_request", "not here")),
-            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen => return Err(refuse("bad_request", "not here")),
+            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia => return Err(refuse("bad_request", "not here")),
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;
