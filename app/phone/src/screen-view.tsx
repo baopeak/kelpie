@@ -7,7 +7,7 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { avcChunk, Backlog, canDecode, clampView, detailsText, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
 import { pathText } from "./conn-path";
-import { needsProof, pathRows } from "./screen-paths";
+import { needsProof, pathRows, type ViaId } from "./screen-paths";
 import { HOSTED } from "./hosted";
 import { t } from "./i18n";
 
@@ -15,7 +15,7 @@ const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: 
 const MOD_LABELS: Record<Mod, string> = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", meta: "Win" };
 
 /** The ways the computer lists for the screen, as the rows of Connect through (none from a computer that offers no choice). */
-const connectRows = () => pathRows(remoteScreen()?.paths, remoteScreen()?.relay, { hosted: HOSTED }, t);
+const connectRows = () => pathRows(remoteScreen()?.paths, remoteScreen()?.relay, { ...remoteScreens.side(remoteScreen()?.p2pFailed ?? false), hosted: HOSTED }, t);
 /** The way chosen can be used now (always, from a computer that offers no choice). */
 const startable = () => !connectRows().length || !!connectRows().find((r) => r.id === remoteScreen()?.via)?.ok;
 
@@ -38,6 +38,22 @@ function ConnectThrough() {
           )}
         </For>
       </div>
+    </Show>
+  );
+}
+
+/** The way the picture takes while it is shown, switched without ending the screen: Automatic, peer to peer, or the link's own way. */
+function SwitchWay() {
+  const s = () => remoteScreen()!;
+  const rows = () => connectRows().filter((r) => r.id === "auto" || r.id === "p2p" || r.id === (s().usedVia === "tailscale" || route() === "direct" ? "tailscale" : "relay"));
+  return (
+    <Show when={rows().some((r) => r.id === "p2p")}>
+      <label class="muted screen-way" data-switch-way>
+        {t("Connect through")}{" "}
+        <select value={s().via} disabled={s().phase !== "live"} onChange={(e) => void remoteScreens.switchVia(e.currentTarget.value as ViaId)}>
+          <For each={rows()}>{(r) => <option value={r.id} disabled={!r.ok}>{r.label}</option>}</For>
+        </select>
+      </label>
     </Show>
   );
 }
@@ -369,7 +385,10 @@ function Live() {
           <button class="btn" data-screen-sharpen onClick={(e) => { e.stopPropagation(); sharpen(); }}>{t("Sharpen")}</button>
         </Show>
       </p>
-      <p class="muted screen-details" data-screen-details>{detailsText(s().stats, connected() ? pathText(livePathNow(), t) : null, s().age, t, s().usedVia)}</p>
+      <p class="muted screen-details" data-screen-details data-screen-path={s().path ?? ""} data-screen-p2p={s().path === "p2p" ? (s().pathStats?.path ?? "p2p") : ""}>
+        {detailsText(s().stats, connected() ? pathText(livePathNow(), t) : null, s().age, t, s().path === "link" ? (s().usedVia === "p2p" ? null : s().usedVia) : s().usedVia, s().path === "p2p" ? (s().pathStats ?? { path: "p2p", local: "", remote: "", relayProtocol: null, rttMs: null, bytesReceived: 0 }) : null)}
+      </p>
+      <SwitchWay />
       <div class="composer">
         <div class="keybar">
           <For each={MODS}>{(m) => <button class="btn" classList={{ primary: mods().includes(m) }} aria-pressed={mods().includes(m)} disabled={!live()} onClick={() => toggleMod(m)}>{MOD_LABELS[m]}</button>}</For>

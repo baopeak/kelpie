@@ -1268,6 +1268,17 @@ stops until next month. Through the relay the phone lists windows by their progr
 ends if the phone comes back through the relay (and the other way round): see it again, with Face ID through the relay. Under Advanced, *Ways the screen may connect*
 can turn any way off.
 
+**Direct (peer to peer).** Before a screen starts, *Connect through* lists *Automatic* (recommended), *Tailscale*, *Direct (peer to peer)* and the
+relay, each saying whether it can be used now and why not; the phone remembers your last choice. *Automatic* through the relay shows the picture at
+once over the relay, then moves it to a direct connection between the phone and the computer when the two networks allow one (most home and office
+networks do), which is faster and does not count against the relay's monthly 1 GB; when that does not work, the picture simply stays on the relay.
+*Direct (peer to peer)* uses only the direct connection and ends the screen if it cannot be made. The line under the picture says which way it goes
+(`P2P · 48 ms round trip · …`), and *Connect through* under it switches the way without ending the screen. A direct connection is set up through
+Kelpie's encrypted link, so the relay cannot see or join it; it is itself encrypted (DTLS). **Each side sees the other's network addresses** (as
+in any video call). It needs a browser with WebRTC (Safari on iOS, Chrome on Android) and, for now, a Windows computer; the first time, Windows
+may ask whether `kelpied` may use the network. Through the relay it still needs Face ID at the start and *See and control the screen without Tailscale*
+on; turning *Direct link (P2P)* off under *Ways the screen may connect* ends any screen going that way.
+
 **The relay is always in the path.** The hosted app has no direct route to this computer, even on the same Wi-Fi: every message goes
 through the relay, end-to-end encrypted, so the phone needs the internet and the relay must be up. If it is not, the app says
 *Relay unreachable* or *Computer offline*, whichever does not answer. A hosted app belongs to one computer: pairing it with another asks
@@ -1298,6 +1309,8 @@ computer's settings, bypass mode included, so that code could do that too. What 
 - **The hosted app is not told where this computer is.** Kelpie tells it only how to reach the relay, never this computer's Tailscale
   name or its addresses on your network. It does know the computer's name, which pairing gives it to label the computer. A phone whose app
   is locked, on any page, is told no more than how to reach the relay until it is unlocked.
+  The one exception is a screen that goes straight to this computer (*Direct (peer to peer)*, or *Automatic* once it moves there): the page then learns this computer's
+  address on its network and its public address (never its Tailscale address), as each side of any video call does.
 
 If that is more trust than you want, use the Tailscale option below: the app then comes from this computer, and Kelpie's relay serves nothing
 a phone runs. A relay of your own on a server serves no app either; one on your own Cloudflare account serves the app you deploy there and makes
@@ -1480,7 +1493,8 @@ Settings → Mobile → Advanced, on by default; it uses more data, so it turns 
 frames first, then smaller, down to about 360p at 5 frames a second (a window stays at least 540 lines tall).
 
 If the connection drops (from Wi-Fi to mobile data, say), the picture freezes, nothing is sent, and the phone says *Reconnecting…* with the seconds left:
-the computer keeps the screen for 45 seconds, and the phone gets it back by itself as soon as it reconnects.
+the computer keeps the screen for 45 seconds, and the phone gets it back by itself as soon as it reconnects (a direct connection is made again on the new
+network, and the picture moves back onto it once it is up).
 
 On the computer an orange border goes around what is shared, with a badge naming the phone and the stop hotkey, and the status bar says *Shared with <phone>*
 with *Stop*. **Ctrl+Alt+Shift+K stops it from anywhere**; it is always on (you can pick another key in Settings → Mobile → Advanced, not turn it off, and Kelpie

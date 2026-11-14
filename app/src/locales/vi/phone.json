@@ -1,5 +1,11 @@
 {
-  "Not sure this was sent. Check the connection and answer again.": "Chưa chắc câu trả lời đã được gửi. Hãy kiểm tra kết nối rồi trả lời lại.",
+  "This browser cannot connect peer to peer (no WebRTC).": "Trình duyệt này không kết nối trực tiếp được vì không có WebRTC.",
+  "A direct connection did not work from this network a moment ago.": "Kết nối trực tiếp từ mạng này vừa không thành công.",
+  "This computer cannot send its screen peer to peer.": "Máy tính này không gửi được màn hình qua kết nối trực tiếp.",
+  "Direct (peer to peer)": "Trực tiếp (P2P)",
+  "P2P": "P2P",
+  "TURN": "TURN",
+  "The direct (peer to peer) connection failed. Choose Automatic to fall back to the relay.": "Kết nối trực tiếp (P2P) không thành công. Hãy chọn Tự động để quay về relay.",  "Not sure this was sent. Check the connection and answer again.": "Chưa chắc câu trả lời đã được gửi. Hãy kiểm tra kết nối rồi trả lời lại.",
   "the desktop": "máy tính",
   "Already answered on {who}": "Đã được trả lời trên {who}",
   "Already answered on {who} {ago}": "Đã được trả lời trên {who} {ago}",

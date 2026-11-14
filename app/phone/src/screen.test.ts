@@ -44,7 +44,8 @@ import {
   type ScreenPort,
   type ScreenState,
 } from "./screen";
-import type { ViaId } from "./screen-paths";
+import { pathRows, type ViaId } from "./screen-paths";
+import type { PeerEvents } from "./screen-rtc";
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 
@@ -259,9 +260,22 @@ interface RigOptions {
   remembered?: ViaId | null;
   /** What the person's Face ID gives: an assertion, or null when they did not give it. */
   proof?: Record<string, unknown> | null;
+  /** This browser has WebRTC (the session may open peers). */
+  webrtc?: boolean;
 }
 
-function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "rebind", Reply>> = {}, opts: RigOptions = {}) {
+/** A peer as the session sees it: what it sent on "i", whether it was started or closed, and its events to fire. */
+interface FakePeer {
+  sc: string;
+  sent: object[];
+  started: boolean;
+  closed: boolean;
+  /** "i" takes messages. */
+  open: boolean;
+  ev: PeerEvents;
+}
+
+function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "rebind" | "via", Reply>> = {}, opts: RigOptions = {}) {
   let now = 1000;
   const timers: { at: number; fn: () => void; id: number }[] = [];
   let nextId = 0;
@@ -277,7 +291,26 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
   const starts: { target: string; via: ViaId | null; recheck?: Record<string, unknown> }[] = [];
   const remembered: ViaId[] = [];
   const proofs: string[] = [];
+  const peers: FakePeer[] = [];
+  const vias: ViaId[] = [];
+  const delivered: Uint8Array[] = [];
   const port: ScreenPort = {
+    webrtc: () => opts.webrtc ?? false,
+    peer: (sc, ev) => {
+      const p: FakePeer = { sc, sent: [], started: false, closed: false, open: false, ev };
+      peers.push(p);
+      return {
+        start: async () => void (p.started = true),
+        send: (msg) => p.open && !p.closed && p.sent.push(msg) > 0,
+        stats: async () => ({ path: "p2p", local: "host", remote: "prflx", relayProtocol: null, rttMs: 12, bytesReceived: 1 }),
+        close: () => void (p.closed = true),
+      };
+    },
+    via: async (_sc, via) => {
+      vias.push(via);
+      return replies.via ?? { t: "ack" };
+    },
+    deliver: (b) => delivered.push(b),
     targets: async () => replies.targets ?? { t: "ack", targets: [{ id: "m:\\\\.\\DISPLAY1", kind: "monitor", title: "Screen 1", app: "", shortcut: null, w: 1920, h: 1080, minimized: false, primary: true }] },
     start: async (target, via, recheck) => {
       starts.push({ target, via, recheck });
@@ -331,7 +364,7 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     now = end;
   };
   const s = new ScreenSession(port, (x) => states.push(x));
-  return { s, sent, acks, keyframes, resumed, texts, states, stopped, kicks, sharpened, starts, remembered, proofs, advance, now: () => now };
+  return { s, sent, acks, keyframes, resumed, texts, states, stopped, kicks, sharpened, starts, remembered, proofs, peers, vias, delivered, advance, now: () => now };
 }
 
 describe("one screen from the phone", () => {
@@ -765,3 +798,151 @@ describe("choosing how the screen connects", () => {
     expect(detailsText({ kbps: 400 }, "Tailscale", null, t)).toBe("Tailscale · 400 kbps");
   });
 });
+
+describe("the screen peer to peer", () => {
+  const paths = [{ id: "auto", ok: true }, { id: "tailscale", ok: false, why: "no_direct_link" }, { id: "p2p", ok: true }, { id: "relay", ok: true }] as const;
+  const targets: Reply = { t: "ack", targets: [{ id: "w:1:2", kind: "window", title: "Code", app: "Code.exe", shortcut: "ide", w: 100, h: 100, minimized: false, primary: false }], paths: [...paths], relay: { ours: true, host: "relay.example" } };
+  const onRelay = (via: string) => rig({ targets, start: { t: "ack", result: "ok", sc: "sc1", title: "Code", kind: "window", via } }, { route: "relay", hosted: true, webrtc: true });
+  const video = (seq: number) => {
+    const b = new Uint8Array(40);
+    b[0] = 0x01;
+    b[1] = 1;
+    new DataView(b.buffer).setUint32(4, seq, true);
+    return b;
+  };
+
+  it("Automatic on the relay starts at once and opens a peer beside it; acknowledgements and input move onto it once the computer says so", async () => {
+    const r = onRelay("relay");
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.s.state).toMatchObject({ phase: "live", usedVia: "relay" });
+    expect(r.peers).toHaveLength(1);
+    expect(r.peers[0]).toMatchObject({ sc: "sc1", started: true });
+    // Before the computer moved the picture: still on the link.
+    r.s.decoded(1);
+    expect(r.acks).toEqual([1]);
+    r.peers[0].open = true;
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "live" });
+    expect(r.s.state?.path).toBe("p2p");
+    r.s.decoded(2);
+    r.s.input([{ k: "click", x: 1, y: 2, b: "left" }]);
+    expect(r.acks, "the link no more").toEqual([1]);
+    expect(r.peers[0].sent).toEqual([{ type: "sc_ack", seq: 2 }, { type: "sc_input", ops: [{ k: "click", x: 1, y: 2, b: "left" }], st: r.now() + 5 }]);
+    // A channel that cannot take it now: the link carries it.
+    r.peers[0].open = false;
+    r.s.decoded(3);
+    expect(r.acks).toEqual([1, 3]);
+  });
+
+  it("the details line names P2P from the browser's stats", async () => {
+    const r = onRelay("relay");
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "live" });
+    r.advance(1200);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(r.s.state?.pathStats).toMatchObject({ path: "p2p", rttMs: 12 });
+    expect(detailsText({ kbps: 900 }, "the relay", null, (x) => x, "relay", r.s.state!.pathStats)).toBe("P2P · {ms} ms round trip · 900 kbps");
+    expect(detailsText({ kbps: 900 }, null, null, (x) => x, null, { path: "turn", local: "relay", remote: "host", relayProtocol: "udp", rttMs: null, bytesReceived: 0 })).toBe("TURN · 900 kbps");
+  });
+
+  it("a peer that fails leaves the picture on the link, and Automatic does not try again on its own for a while", async () => {
+    const r = onRelay("relay");
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "relay", state: "failed", why: "not_open" });
+    expect(r.peers[0].closed).toBe(true);
+    expect(r.s.state?.p2pFailed).toBe(true);
+    await r.s.stop();
+    r.s.close();
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.peers, "no new peer within the retry time").toHaveLength(1);
+    const row = pathRowsOf(r.s);
+    expect(row).toMatchObject({ ok: true, why: "A direct connection did not work from this network a moment ago." });
+  });
+
+  it("the picture going back to the link closes the peer, and a computer's switch is followed", async () => {
+    const r = onRelay("relay");
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "live" });
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "failed", why: "ice_disconnected" });
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "relay", state: "live", why: "ice_disconnected" });
+    expect(r.s.state?.path).toBe("link");
+    expect(r.peers[0].closed).toBe(true);
+    r.s.decoded(4);
+    expect(r.acks).toEqual([4]);
+  });
+
+  it("peer to peer from the start opens a peer at once; a reconnect opens a new one", async () => {
+    const r = onRelay("p2p");
+    await r.s.openPicker();
+    r.s.choosePath("p2p");
+    await r.s.pick("w:1:2");
+    expect(r.starts[0].via).toBe("p2p");
+    expect(r.peers).toHaveLength(1);
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "live" });
+    await r.s.reconnected();
+    expect(r.peers).toHaveLength(2);
+    expect(r.peers[0].closed, "the one in use stays until the computer moves to the new one").toBe(false);
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "live" });
+    expect(r.peers[0].closed).toBe(true);
+    expect(r.peers[1].closed).toBe(false);
+  });
+
+  it("switching the way mid-screen asks the computer, and opens a peer for peer to peer", async () => {
+    const r = onRelay("relay");
+    await r.s.openPicker();
+    r.s.choosePath("relay");
+    await r.s.pick("w:1:2");
+    expect(r.peers, "the relay chosen: no peer").toHaveLength(0);
+    await r.s.switchVia("p2p");
+    expect(r.vias).toEqual(["p2p"]);
+    expect(r.peers).toHaveLength(1);
+    expect(r.remembered.at(-1)).toBe("p2p");
+    const refused = rig({ targets, start: { t: "ack", result: "ok", sc: "sc1", title: "Code", kind: "window", via: "relay" }, via: { t: "error", code: "method_off", message: "Turned off." } }, { route: "relay", webrtc: true });
+    await refused.s.openPicker();
+    refused.s.choosePath("relay");
+    await refused.s.pick("w:1:2");
+    await refused.s.switchVia("p2p");
+    expect(refused.peers).toHaveLength(0);
+    expect(refused.s.state?.message).toBe("Turned off.");
+  });
+
+  it("a live peer that dropped (the phone moved networks) is not a failure of the way: Automatic offers again once the link is back", async () => {
+    const r = onRelay("relay");
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "live" });
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "failed", why: "ice_disconnected" });
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "relay", state: "live", why: "ice_disconnected" });
+    expect(r.s.state?.p2pFailed).toBe(false);
+    await r.s.reconnected();
+    expect(r.peers).toHaveLength(2);
+    expect(r.peers[1].started).toBe(true);
+  });
+
+  it("video older than what the view has is not shown again, whichever way it came", async () => {
+    const r = onRelay("relay");
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.s.incoming(video(5))).toBe(true);
+    expect(r.s.incoming(video(4)), "the link's last frame after the peer's keyframe").toBe(false);
+    expect(r.s.incoming(video(6))).toBe(true);
+    expect(r.s.incoming(new Uint8Array([0x01, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0])), "a cursor always goes").toBe(true);
+  });
+
+  it("no peer without WebRTC in this browser, and the row says why", async () => {
+    const r = rig({ targets, start: { t: "ack", result: "ok", sc: "sc1", title: "Code", kind: "window", via: "relay" } }, { route: "relay", webrtc: false });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.peers).toHaveLength(0);
+    expect(pathRowsOf(r.s)).toMatchObject({ ok: false, why: "This browser cannot connect peer to peer (no WebRTC)." });
+  });
+});
+
+function pathRowsOf(s: ScreenSession) {
+  return pathRows(s.state?.paths, s.state?.relay, s.side(s.state?.p2pFailed ?? false), (x) => x).find((r) => r.id === "p2p");
+}

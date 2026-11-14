@@ -4,7 +4,8 @@
 // when their region changes, where a finger lands on the picture under zoom, the two touch modes, input merged and stamped with the computer's
 // clock, frames acknowledged once decoded, and a stream counted lost after a few silent seconds. screen-view.tsx draws it.
 
-import { chooseVia, needsProof, pathRows, startRefusal, viaText, type PathInfo, type RelayInfo, type ViaId } from "./screen-paths";
+import { chooseVia, needsProof, pathRows, startRefusal, upgradesToP2p, viaText, type PathInfo, type RelayInfo, type ViaId } from "./screen-paths";
+import { P2P_RETRY_MS, VideoOrder, type PathStats, type PeerEvents } from "./screen-rtc";
 
 export const MEDIA = 0x01;
 export const KIND_VIDEO = 1;
@@ -716,10 +717,25 @@ export interface ScreenPort {
   remember(via: ViaId): void;
   /** The person's Face ID over the screen's challenge: the assertion `sc_start` takes as `recheck`; null when they did not give it. */
   proof(target: string): Promise<Record<string, unknown> | null>;
+  /** Peer to peer, at a computer that has it: whether this browser can (WebRTC), a peer for screen `sc` (its media go to `deliver`), the way from now
+   *  on (`sc_via`), and a media message to the view (as the link's are). */
+  webrtc?(): boolean;
+  peer?(sc: string, ev: PeerEvents): PeerLike | null;
+  via?(sc: string, via: ViaId): Promise<Reply>;
+  deliver?(bytes: Uint8Array): void;
   serverNow(): number;
   now(): number;
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(t: unknown): void;
+}
+
+/** What the session needs of a peer (`screen-rtc.ts` `ScreenPeer`). */
+export interface PeerLike {
+  start(): Promise<void>;
+  /** A message on "i"; false when it cannot go there now (it goes on the link instead). */
+  send(msg: object): boolean;
+  stats(): Promise<PathStats | null>;
+  close(): void;
 }
 
 export interface Stats {
@@ -766,9 +782,15 @@ export interface ScreenState {
   via: ViaId;
   /** The way the computer used for the screen that started (`ack.via`). */
   usedVia: string | null;
+  /** Where the picture goes now, as the computer last said (`sc_path`): peer to peer, or the link; null before it said. And the browser's reading of the
+   *  peer's way (P2P or TURN, the round trip). */
+  path: "p2p" | "link" | null;
+  pathStats: PathStats | null;
+  /** Peer to peer failed from here a moment ago (`P2P_RETRY_MS`): Automatic does not try it on its own meanwhile. */
+  p2pFailed: boolean;
 }
 
-const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null, paths: null, relay: null, via: "auto", usedVia: null });
+const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null, paths: null, relay: null, via: "auto", usedVia: null, path: null, pathStats: null, p2pFailed: false });
 
 /** Why a screen ended, in the phone's words; the reason codes are the daemon's and the helper's. */
 export function endedText(reason: string, t: (s: string) => string): string {
@@ -802,6 +824,8 @@ export function endedText(reason: string, t: (s: string) => string): string {
     case "app_closed":
     case "app":
       return t("The Kelpie app on the computer closed.");
+    case "p2p_failed":
+      return t("The direct (peer to peer) connection failed. Choose Automatic to fall back to the relay.");
     default:
       return t("Stopped.");
   }
@@ -844,12 +868,12 @@ export function qualityText(s: Stats | null, t: (s: string) => string): string {
 }
 
 /** The details line: the way, the round trip, the rate, the frames, the size and the pictures' age: `Tailscale · 85 ms · 1200 kbps · 30 fps · 1080p · 120 ms old`. */
-export function detailsText(s: Stats | null, path: string | null, age: number | null, t: (s: string, vars?: Record<string, string | number>) => string, via: string | null = null): string {
+export function detailsText(s: Stats | null, path: string | null, age: number | null, t: (s: string, vars?: Record<string, string | number>) => string, via: string | null = null, p2p: PathStats | null = null): string {
   const parts: string[] = [];
-  // The way the computer says it used, else the phone's own reading of its connection.
-  const way = viaText(via, t) ?? path;
+  // Peer to peer: P2P or TURN as the browser sees it. Otherwise the way the computer says it used, else the phone's own reading of its connection.
+  const way = p2p ? (p2p.path === "turn" ? t("TURN") : t("P2P")) : (viaText(via, t) ?? path);
   if (way) parts.push(way);
-  const rtt = s?.stages?.ack_rtt_ms_p50;
+  const rtt = p2p?.rttMs ?? s?.stages?.ack_rtt_ms_p50;
   if (typeof rtt === "number") parts.push(t("{ms} ms round trip", { ms: Math.round(rtt) }));
   if (typeof s?.kbps === "number") parts.push(`${Math.round(s.kbps)} kbps`);
   if (s?.h) parts.push(`${Math.round(s.fps ?? 0)} fps`, `${Math.round(s.h)}p`);
@@ -887,6 +911,14 @@ export class ScreenSession {
   private kickedAt = -Infinity;
   private sharpenedAt = -Infinity;
   private ages: number[] = [];
+  /** Peer to peer: the peer the computer moved the picture onto, one being opened, the way the person chose, when it last failed from here, and the
+   *  order video comes in from both ways. */
+  private peer: PeerLike | null = null;
+  private nextPeer: PeerLike | null = null;
+  private chosen: ViaId = "auto";
+  private p2pFailedAt = -Infinity;
+  private statsAt = 0;
+  private order = new VideoOrder();
 
   constructor(private port: ScreenPort, private changed: (s: ScreenState | null) => void, private t: (s: string) => string = (s) => s) {}
 
@@ -911,9 +943,19 @@ export class ScreenSession {
     if (r.t === "ack") {
       const paths = r.paths ?? null;
       const relay = r.relay ?? null;
-      const via = chooseVia(pathRows(paths, relay, { hosted: this.port.hosted() }, this.t), this.port.remembered());
-      this.patch({ targets: r.targets ?? [], paths, relay, via });
+      const p2pFailed = this.p2pFailedNow();
+      const via = chooseVia(pathRows(paths, relay, this.side(p2pFailed), this.t), this.port.remembered());
+      this.patch({ targets: r.targets ?? [], paths, relay, via, p2pFailed });
     } else this.patch({ targets: [], message: r.t === "error" ? r.message : this.t("Not connected.") });
+  }
+
+  /** What this phone knows of its own ways (`pathRows`). */
+  side(p2pFailed = this.p2pFailedNow()) {
+    return { hosted: this.port.hosted(), webrtc: this.port.webrtc?.() ?? false, p2pFailed };
+  }
+
+  private p2pFailedNow(): boolean {
+    return this.port.now() - this.p2pFailedAt < P2P_RETRY_MS;
   }
 
   /** The way to connect, chosen in the list; kept for the next time on this pairing. */
@@ -953,7 +995,10 @@ export class ScreenSession {
     const now = this.port.now();
     this.heardAt = this.mediaAt = this.decodedAt = now;
     this.ages = [];
-    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null, usedVia: r.via ?? null });
+    this.chosen = via ?? "auto";
+    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null, usedVia: r.via ?? null, path: null, pathStats: null });
+    // Peer to peer from the start (the computer waits for it), or Automatic moving onto it from the relay once it opens.
+    if (r.via === "p2p" || upgradesToP2p(this.chosen, r.via, pathRows(this.state?.paths, this.state?.relay, this.side(), this.t))) this.openPeer();
     if (this.early) this.port.ack(r.sc, this.early);
     this.early = 0;
     if (this.earlyKey) {
@@ -964,12 +1009,13 @@ export class ScreenSession {
     this.watch();
   }
 
-  /** `sc_state`, `sc_stats`, `sc_fhb`, `sc_end`. */
-  onMessage(m: { type: string; sc?: string; state?: string; reason?: string; encoder?: string; stages?: Record<string, number | null> } & Stats) {
+  /** `sc_state`, `sc_stats`, `sc_fhb`, `sc_path`, `sc_end`. */
+  onMessage(m: { type: string; sc?: string; state?: string; reason?: string; encoder?: string; path?: string; why?: string; stages?: Record<string, number | null> } & Stats) {
     const s = this.state;
     if (!s?.sc || m.sc !== s.sc || s.phase === "ended") return;
     if (m.type === "sc_end") return this.ended(endedText(m.reason ?? "", this.t));
     this.heardAt = this.port.now();
+    if (m.type === "sc_path") return this.onPath(m.path ?? "", m.state ?? "", m.why ?? null);
     if (m.type === "sc_state" && m.state === "encoder") this.patch({ encoder: m.encoder === "sw" ? "sw" : "hw" });
     else if (m.type === "sc_state" && m.state) this.patch({ remote: m.state });
     else if (m.type === "sc_stats") {
@@ -977,6 +1023,87 @@ export class ScreenSession {
       this.ages = [];
     }
     this.thawed();
+  }
+
+  /** The computer moved the picture (`sc_path`): onto the peer opened last, back onto the link, or a peer failed. */
+  private onPath(path: string, state: string, why: string | null) {
+    if (state === "live" && path === "p2p") {
+      if (this.nextPeer) {
+        this.peer?.close();
+        this.peer = this.nextPeer;
+        this.nextPeer = null;
+      }
+      this.patch({ path: "p2p" });
+    } else if (state === "live") {
+      this.closePeers();
+      this.patch({ path: "link", pathStats: null });
+    } else if (state === "failed") {
+      // A peer that never opened from here says this network does not let one through; one that went live and then dropped (the phone moved
+      // networks) does not: a new one is offered once the link is back.
+      const liveDropped = this.state?.path === "p2p" && !this.nextPeer;
+      if (why !== "chosen" && !liveDropped) this.p2pFailedAt = this.port.now();
+      // A new peer failed while the picture still goes on another way: only that one goes.
+      this.nextPeer?.close();
+      this.nextPeer = null;
+      if (path !== "p2p") this.closePeers();
+      this.patch({ p2pFailed: this.p2pFailedNow() });
+    }
+  }
+
+  /** A peer for this screen, offered now: the computer moves the picture onto it once it opens, and keeps the one before until then. */
+  private openPeer() {
+    const sc = this.state?.sc;
+    if (!sc || !this.port.peer || !(this.port.webrtc?.() ?? false)) return;
+    this.nextPeer?.close();
+    const peer: PeerLike | null = this.port.peer(sc, {
+      media: (bytes) => this.port.deliver?.(bytes),
+      open: () => {},
+      failed: () => {
+        if (this.nextPeer === peer) {
+          this.nextPeer = null;
+          this.p2pFailedAt = this.port.now();
+          if (this.state && this.state.phase !== "ended") this.patch({ p2pFailed: true });
+        }
+        if (this.peer === peer) this.peer = null;
+      },
+    });
+    if (!peer) return;
+    this.nextPeer = peer;
+    void peer.start();
+  }
+
+  private closePeers() {
+    this.peer?.close();
+    this.nextPeer?.close();
+    this.peer = this.nextPeer = null;
+  }
+
+  /** The way from now on, chosen in the live view: the computer switches, and a peer is opened for a way that needs one. */
+  async switchVia(via: ViaId) {
+    const sc = this.state?.sc;
+    if (!sc || !this.port.via || !this.live()) return;
+    const r = await this.port.via(sc, via);
+    if (this.state?.sc !== sc) return;
+    if (r.t !== "ack") {
+      this.patch({ message: r.t === "error" ? r.message : this.t("Not connected.") });
+      return;
+    }
+    this.chosen = via;
+    this.port.remember(via);
+    this.patch({ via, message: null });
+    if ((via === "p2p" || (via === "auto" && this.port.route() === "relay")) && this.state?.path !== "p2p") this.openPeer();
+  }
+
+  /** A media message, from the link or peer to peer: whether it goes to the view. A video frame older than one already taken does not (in a switch
+   *  the old way's last frames can come after the new way's first, which is a keyframe). */
+  incoming(bytes: Uint8Array): boolean {
+    const video = bytes[1] === KIND_VIDEO;
+    if (video) {
+      const m = parseMedia(bytes);
+      if (m?.kind === "video" && !this.order.take(m.seq)) return false;
+    }
+    this.media(video);
+    return true;
   }
 
   /** A media message arrived (the view decodes it). Only video says frames are coming: the cursor moves on its own. */
@@ -1017,7 +1144,10 @@ export class ScreenSession {
   }
 
   private acknowledge(seq: number) {
-    if (this.state?.sc && this.state.phase !== "ended") this.port.ack(this.state.sc, seq);
+    if (this.state?.sc && this.state.phase !== "ended") {
+      // Peer to peer, on "i"; on the link when that cannot take it.
+      if (!(this.state.path === "p2p" && this.peer?.send({ type: "sc_ack", seq }))) this.port.ack(this.state.sc, seq);
+    }
     else if (this.state?.phase === "starting") this.early = Math.max(this.early, seq);
   }
 
@@ -1059,7 +1189,10 @@ export class ScreenSession {
     if (this.flushTimer !== null) this.port.clearTimeout(this.flushTimer);
     this.flushTimer = null;
     const ops = coalesce(this.queue.splice(0));
-    if (ops.length && this.state?.sc && this.live()) this.port.input(this.state.sc, ops, this.port.serverNow());
+    if (ops.length && this.state?.sc && this.live()) {
+      const st = this.port.serverNow();
+      if (!(this.state.path === "p2p" && this.peer?.send({ type: "sc_input", ops, st }))) this.port.input(this.state.sc, ops, st);
+    }
   }
 
   /** Text into the focused field: said as sent or not sent, never sent twice. */
@@ -1095,18 +1228,26 @@ export class ScreenSession {
     if (r.t === "ack") {
       this.heardAt = this.mediaAt = this.decodedAt = this.port.now();
       this.patch({ phase: "live", graceLeft: null });
+      // The phone's network may have changed under its peer: a new one is opened, and the computer keeps the old one until it opens. Automatic
+      // whose peer dropped meanwhile (the picture went back to the relay) tries again too.
+      const upgrade = upgradesToP2p(this.chosen, this.state?.usedVia, pathRows(this.state?.paths, this.state?.relay, this.side(), this.t));
+      if (this.state?.path === "p2p" || this.peer || this.nextPeer || this.state?.usedVia === "p2p" || upgrade) this.openPeer();
     } else if (r.t === "error") this.ended(endedText(r.code === "route_changed" ? "route_changed" : "link_lost", this.t));
   }
 
   close() {
     void this.stop();
     this.unwatch();
+    this.closePeers();
+    this.order.reset();
     this.set(null);
   }
 
   private ended(message: string) {
     this.queue = [];
     this.unwatch();
+    this.closePeers();
+    this.order.reset();
     this.patch({ phase: "ended", message });
   }
 
@@ -1132,6 +1273,14 @@ export class ScreenSession {
         if (left !== this.state.graceLeft) this.patch({ graceLeft: left });
       }
       if (this.state?.phase === "live" && this.mediaAt - this.decodedAt > STUCK_MS) this.needKeyframe();
+      // The peer's way and round trip, once a second, for the details line.
+      if (this.peer && this.state?.path === "p2p" && now - this.statsAt >= 1000) {
+        this.statsAt = now;
+        const peer = this.peer;
+        void peer.stats().then((p) => {
+          if (p && this.peer === peer && this.state?.path === "p2p") this.patch({ pathStats: p });
+        });
+      }
       // Heartbeats come and the computer says it sends frames, yet nothing has been shown: say so, and ask for a fresh picture.
       const sending = (this.state?.stats?.fps ?? 0) > 0;
       const stuck = this.state?.phase === "live" && sending && now - this.decodedAt > STUCK_SHOW_MS;

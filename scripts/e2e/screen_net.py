@@ -48,8 +48,6 @@ ap.add_argument("--seconds", type=int, default=60)
 ARGS = ap.parse_args()
 
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
-EVENTS = os.path.join(SETUP.work, "motion-events.txt")
-TITLE = f"Kelpie screen motion {os.getpid()}"
 WARM_S = 5
 ACK_DELAY = 0.008
 
@@ -64,62 +62,8 @@ CONDITIONS = [
     {"n": 8, "name": "50 ms, 60 s blackhole", "delay": 0.050, "blackhole": 60},
 ]
 
-# The motion: a window full of text that scrolls a line every frame, and notes each click with the wall clock (ms) and where it landed.
-MOTION = r'''
-import ctypes, sys, time, tkinter as tk
-ctypes.windll.shcore.SetProcessDpiAwareness(2)
-title, events = sys.argv[1], sys.argv[2]
-def note(line):
-    with open(events, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-root = tk.Tk()
-root.title(title)
-root.geometry("960x640+80+80")
-root.attributes("-topmost", True)
-canvas = tk.Canvas(root, bg="white", highlightthickness=0)
-canvas.pack(fill="both", expand=True)
-LINE = 18
-items = [canvas.create_text(10, i * LINE, anchor="nw", font=("Consolas", 11), text="") for i in range(40)]
-n = [0]
-def tick():
-    n[0] += 1
-    for i, it in enumerate(items):
-        k = n[0] + i
-        canvas.itemconfigure(it, text=f"{k:08d}  the quick brown fox jumps over the lazy dog {k * 7919 % 100000:05d} " * 2)
-    root.after(33, tick)
-canvas.bind("<Button-1>", lambda e: note("click:%.1f:%d,%d" % (time.time() * 1000, e.x_root, e.y_root)))
-def where():
-    root.update_idletasks()
-    note("area:%d,%d,%d,%d" % (canvas.winfo_rootx(), canvas.winfo_rooty(), canvas.winfo_width(), canvas.winfo_height()))
-root.after(500, where)
-root.after(33, tick)
-root.mainloop()
-'''
-
-
-def events():
-    try:
-        with open(EVENTS, encoding="utf-8") as f:
-            return [line.rstrip("\n") for line in f]
-    except OSError:
-        return []
-
-
-def area():
-    for line in events():
-        if line.startswith("area:"):
-            return tuple(int(v) for v in line[5:].split(","))
-    return None
-
-
-def clicks_seen():
-    out = []
-    for line in events():
-        if line.startswith("click:"):
-            _, at, xy = line.split(":")
-            x, y = (int(v) for v in xy.split(","))
-            out.append((float(at), x, y))
-    return out
+MOTION_WINDOW = ss.Motion(SETUP)
+area, clicks_seen = MOTION_WINDOW.area, MOTION_WINDOW.clicks_seen
 
 
 def pct(values, q):
@@ -378,13 +322,13 @@ async def scenario(run, d):
     phone = Phone(connect, passkey)
     p.ack_delay = ACK_DELAY
     phone.p = p
-    ss.spawn("motion", [sys.executable, "-c", MOTION, TITLE, EVENTS])
+    MOTION_WINDOW.start()
     check("the motion window is up", await asyncio.to_thread(until, area, 20))
     listed = await p.ask(type="screens", timeout=20)
     rows = (listed or {}).get("targets", [])
     monitor = next((r for r in rows if r["kind"] == "monitor" and r.get("primary")), None) or next((r for r in rows if r["kind"] == "monitor"), None)
     check("the phone lists the primary monitor", monitor is not None, [r.get("kind") for r in rows])
-    hwnd = ctypes.windll.user32.FindWindowW(None, TITLE)
+    hwnd = MOTION_WINDOW.hwnd()
     ss.to_front(hwnd)
     only = {int(x) for x in ARGS.only.split(",")} if ARGS.only else None
     results = []

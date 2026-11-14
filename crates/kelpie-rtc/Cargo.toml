@@ -1,0 +1,23 @@
+[package]
+name = "kelpie-rtc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "A phone's screen over WebRTC data channels: the daemon's answering peer (str0m), STUN, chunking"
+
+[dependencies]
+serde_json.workspace = true
+tokio = { workspace = true }
+parking_lot.workspace = true
+tracing.workspace = true
+
+# The peer runs where the screen does: Windows for now (DTLS through SChannel, no OpenSSL or NASM needed). macOS gets
+# `apple-crypto` with its screen backend. The pure modules (STUN, chunking, impairment) build everywhere.
+[target.'cfg(windows)'.dependencies]
+str0m = { version = "0.25", default-features = false, features = ["wincrypto"] }
+if-addrs = "0.15"
+
+[features]
+# The phone's side of a peer (test_phone.rs), for the daemon's tests.
+test-phone = []

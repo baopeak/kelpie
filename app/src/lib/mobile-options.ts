@@ -1,7 +1,7 @@
 // What each option of Settings → Mobile can do now, and the page's summary, from what the daemon said (`mobile.status`, `notify.get`).
 // Pure, so that every row is tested at every daemon level. The daemon enforces all of it; this only says so ahead of time:
 // `presence` follows `LockOptions::weakened_by` and `mobile.set_tailscale`, and a change it does not mention can still be refused.
-import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { t } from "./i18n";
 import { NOTIFY_API } from "./notify-events";
 import { pushSummary, type PushState, type TelegramMode } from "./push-config";
@@ -304,14 +304,15 @@ export interface ScreenMethodRow {
   note: string | null;
 }
 
-/** The checkboxes under Advanced. The relay ways count only while the screen without Tailscale is on; a direct link and the relay's TURN are not built yet,
- *  and the choice is kept for when they are. */
+/** The checkboxes under Advanced. The relay ways count only while the screen without Tailscale is on; the relay's TURN is not built yet, and the choice is
+ *  kept for when it is. A direct link (peer to peer) needs a computer at `SCREEN_P2P_API`. */
 export function screenMethodRows(f: OptionFacts): ScreenMethodRow[] {
   const sc = f.status?.screen;
   const disabled = blocked(f, SCREEN_REMOTE_API, !!sc, true);
   const labels: Record<ScreenMethod, string> = { tailscale: t("Tailscale"), p2p: t("Direct link (P2P)"), relay_turn: t("Relay (TURN)"), relay_ws: t("Relay WebSocket") };
   const note = (id: ScreenMethod): string | null => {
-    if (id === "p2p" || id === "relay_turn") return t("Not available yet: it comes in a later update.");
+    if (id === "relay_turn" || (id === "p2p" && f.api < SCREEN_P2P_API)) return t("Not available yet: it comes in a later update.");
+    if (id === "p2p") return t("Straight between the phone and this computer when both networks allow it. Each side then sees the other's network addresses.");
     if (id === "relay_ws" && !sc?.remote) return t("Counts only while seeing the screen without Tailscale is on.");
     return null;
   };

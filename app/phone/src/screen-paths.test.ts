@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseVia, isVia, needsProof, pathRows, readVia, relayName, startRefusal, viaKey, viaText, type PathInfo } from "./screen-paths";
+import { chooseVia, isVia, needsProof, pathRows, readVia, relayName, startRefusal, upgradesToP2p, viaKey, viaText, type PathInfo } from "./screen-paths";
 
 const fill = (text: string, vars?: Record<string, string | number>) => (vars ? text.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : text);
 const OURS = { ours: true, host: "relay.kelpie.example" };
@@ -53,6 +53,28 @@ describe("the rows of Connect through", () => {
   });
 });
 
+describe("the peer to peer row", () => {
+  const P2P: PathInfo[] = [{ id: "auto", ok: true }, { id: "p2p", ok: true }, { id: "relay", ok: true }];
+
+  it("is named, needs WebRTC in this browser, and says a recent failure without taking the choice away", () => {
+    const row = (f: { webrtc?: boolean; p2pFailed?: boolean }) => pathRows(P2P, OURS, { hosted: true, ...f }, fill)[1];
+    expect(row({ webrtc: true })).toMatchObject({ id: "p2p", label: "Direct (peer to peer)", ok: true, why: null });
+    expect(row({ webrtc: false })).toMatchObject({ ok: false, why: "This browser cannot connect peer to peer (no WebRTC)." });
+    expect(row({ webrtc: true, p2pFailed: true })).toMatchObject({ ok: true, why: "A direct connection did not work from this network a moment ago." });
+    expect(pathRows([{ id: "p2p", ok: false, why: "no_p2p_here" }], OURS, { hosted: false, webrtc: true }, fill)[0].why).toBe("This computer cannot send its screen peer to peer.");
+    expect(viaText("p2p", fill)).toBe("P2P");
+  });
+
+  it("Automatic moves onto it only from the relay, when it can be used and did not just fail", () => {
+    const rows = (f: { webrtc?: boolean; p2pFailed?: boolean }) => pathRows(P2P, OURS, { hosted: true, ...f }, fill);
+    expect(upgradesToP2p("auto", "relay", rows({ webrtc: true }))).toBe(true);
+    expect(upgradesToP2p("auto", "tailscale", rows({ webrtc: true })), "a direct link stays on Tailscale").toBe(false);
+    expect(upgradesToP2p("relay", "relay", rows({ webrtc: true })), "the relay chosen").toBe(false);
+    expect(upgradesToP2p("auto", "relay", rows({ webrtc: false }))).toBe(false);
+    expect(upgradesToP2p("auto", "relay", rows({ webrtc: true, p2pFailed: true }))).toBe(false);
+  });
+});
+
 describe("the way preselected", () => {
   const rows = (hosted: boolean, paths = ALL) => pathRows(paths, OURS, { hosted }, fill);
 
@@ -79,6 +101,8 @@ describe("whether the start needs Face ID", () => {
     expect(needsProof("auto", "direct")).toBe(false);
     expect(needsProof("tailscale", "direct")).toBe(false);
     expect(needsProof("tailscale", "relay")).toBe(false);
+    expect(needsProof("p2p", "relay"), "peer to peer through the relay's connection").toBe(true);
+    expect(needsProof("p2p", "direct")).toBe(false);
   });
 });
 
@@ -87,7 +111,7 @@ describe("the kept choice", () => {
     expect(viaKey("dev-1")).toBe("kelpie.screen.via.dev-1");
     expect([readVia("auto"), readVia("tailscale"), readVia("relay")]).toEqual(["auto", "tailscale", "relay"]);
     expect([readVia("webrtc"), readVia(""), readVia(null)]).toEqual([null, null, null]);
-    expect([isVia("relay"), isVia("p2p"), isVia(3)]).toEqual([true, false, false]);
+    expect([isVia("relay"), isVia("p2p"), isVia("turn"), isVia(3)]).toEqual([true, true, false, false]);
   });
 });
 

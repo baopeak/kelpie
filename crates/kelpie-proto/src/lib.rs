@@ -91,7 +91,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// over `recheck_challenge("screen:" + target, "relay", expiry)`, at most a minute ahead, used once) answered with `via`, the refusals
 /// `screen_remote_off`, `needs_face_id`, `relay_budget_spent`, `no_direct_link`, `not_on_relay`, and `max_kbps` in `screen.start` to the app. An older
 /// daemon never shows the screen through the relay, so the phone offers it only at 41.
-pub const API_LEVEL: u32 = 41;
+/// 42: the screen peer to peer (WebRTC data channels, `kelpie-rtc`, Windows): `p2p` in `paths` and as a `via` (`sc_start`, answered `via: "p2p"`; its `p2p: true` from a phone that can, without which Automatic never starts peer to peer only),
+/// the phone's `sc_rtc_offer {sc, sdp}` (answered `{sdp, nonce, ice_servers}`), `sc_rtc_ice {sc, cand}` and `sc_via {sc, via}`, the `sc_path {sc, path,
+/// state, why?}` message, the `p2p_failed` end and refusal, the `rtc_hello {sc, nonce}` first message on the `"i"` channel, chunked media on `"m"`
+/// (`0x02` first), and the `screen.cap {sc, max_kbps}` notice to the app. An older daemon lists no `p2p` way, so the phone offers it only at 42.
+pub const API_LEVEL: u32 = 42;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.
