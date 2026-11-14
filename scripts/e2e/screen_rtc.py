@@ -170,9 +170,10 @@ async def matrix(p, page, sc, t0, mark, monitor):
         rows.append({"n": c["n"], "name": c["name"], "open_ms": opened, **r, "survived": not ended, "kelpied_mb": daemon_mb()})
         print(json.dumps(rows[-1]), flush=True)
         if ended:
-            sc, t0, _ = await start(p, monitor)
+            sc, t0, again = await start(p, monitor)
+            check(f"a new screen after condition {c['n']} ended", bool(sc), again)
     set_impair("")
-    return rows
+    return rows, sc
 
 
 def matrix_table(rows):
@@ -191,8 +192,6 @@ def to_source(x, y, started):
     mw, mh = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
     sw, sh = started.get("w") or mw, started.get("h") or mh
     return round(x * sw / max(mw, 1)), round(y * sh / max(mh, 1))
-
-
 
 
 class Bridge:
@@ -297,7 +296,7 @@ async def scenario(run, d):
         browser, page = await page_for(pw, kinds[0], module, bridge)
         if ARGS.matrix:
             try:
-                NUMBERS["matrix"] = await matrix(p, page, sc, t0, mark, monitor)
+                NUMBERS["matrix"], sc = await matrix(p, page, sc, t0, mark, monitor)
                 rows = NUMBERS["matrix"]
                 check("the matrix ran every condition", len(rows) == len(MATRIX) + 1 and all("error" not in r for r in rows), [r for r in rows if "error" in r])
                 check("the screen survived every condition", all(r.get("survived", True) for r in rows), [r["name"] for r in rows if r.get("survived") is False])

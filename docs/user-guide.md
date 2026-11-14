@@ -1276,8 +1276,8 @@ can turn any way off.
 relay, each saying whether it can be used now and why not; the phone remembers your last choice. *Automatic* through the relay shows the picture at
 once over the relay, then moves it to a direct connection between the phone and the computer when the two networks allow one (most home and office
 networks do), which is faster and does not count against the relay's monthly 1 GB; when that does not work, the picture simply stays on the relay.
-With *Relay WebSocket* turned off under *Ways the screen may connect*, *Automatic* through the relay goes only peer to peer (or through TURN when
-peer to peer is off too): the picture waits for that connection, and the screen ends if it cannot be made.
+With *Relay WebSocket* turned off under *Ways the screen may connect*, *Automatic* through the relay goes only by a connection of its own between the
+phone and the computer (direct or, where the relay offers TURN, through TURN): the picture waits for that connection, and the screen ends if it cannot be made.
 *Direct (peer to peer)* uses only the direct connection and ends the screen if it cannot be made. The line under the picture says which way it goes
 (`P2P · 48 ms round trip · …`), and *Connect through* under it switches the way without ending the screen. A direct connection is set up through
 Kelpie's encrypted link, so the relay cannot see or join it; it is itself encrypted (DTLS). **Each side sees the other's network addresses** (as
