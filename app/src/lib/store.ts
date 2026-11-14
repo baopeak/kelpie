@@ -25,7 +25,7 @@ import { confirmRootStart } from "./root-user";
 import type { WorkStatus, AgentProfile, AppState, BranchInfo, InboxItem, LayoutNode, LayoutTemplate, Pane, Project, ProjectHost, RecentItem, ReviewNote, SessionInfo, SessionKind, SessionTarget, Settings, Tab, Workspace, WorkspaceMeta } from "./types";
 import { confirmDialog } from "./confirm-dialog";
 import { createHandOver, type ShutdownAnswer } from "./hand-over";
-import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, folderName, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
+import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, familyRoot, folderName, sessionDepthTree, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
 import { remember } from "./prompt-history";
 import { defaultSettings } from "./default-settings";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
@@ -493,7 +493,12 @@ function createAppStore() {
       case "session.closed": {
         const s = byHandle(p.handle);
         if (s) {
+          // Closed by the agent that opened it (or by the daemon): the pane that showed it shows the session above it again,
+          // without taking the keyboard. A close from the window (`closePane`) decides about its pane itself.
+          const shown = !closingFromPane.delete(s.id) && paneLocation(s.id);
+          const back = shown && familyFallback(s);
           setSessions(produce((m) => delete m[s.id]));
+          if (shown && back) updatePane(shown.projectId, shown.tabId, shown.paneId, { kind: back.chat ? "chat" : "terminal", sessionId: back.id });
           if (state.floating?.sessions.includes(s.id)) {
             update((st) => {
               st.floating.sessions = st.floating.sessions.filter((x) => x !== s.id);
@@ -1337,10 +1342,121 @@ function createAppStore() {
       return;
     }
     const s = sessions[sessionId];
+    // A sub-session (or the session that opened it) shows in the pane its family already has, not in a tab of its own.
+    const family = familyPaneOf(sessionId);
+    if (family) {
+      switchProject(family.projectId);
+      showInPane(family.projectId, family.tabId, family.paneId, sessionId);
+      return;
+    }
     const projectId = s?.project_id && state.projects.some((p) => p.id === s.project_id) ? s.project_id : state.activeProject;
     if (!projectId) return;
     switchProject(projectId);
     addTab(projectId, { id: uid(), kind: s?.chat ? "chat" : "terminal", sessionId });
+  }
+
+  // ---------- a sub-session family in one pane ----------
+  // The sessions an agent opened (and the ones those opened) belong to the tab of the session at the top: its pane switches
+  // between them with the strip under its header, and the tab bar holds no tab per sub-session.
+
+  /** A pane that shows a session of the same family as `sessionId` (preferring one in the session's own project), or null. */
+  function familyPaneOf(sessionId: string): { projectId: string; tabId: string; paneId: string } | null {
+    const tree = sessionTree();
+    const root = familyRoot(tree, sessionId);
+    // Best: in the session's own project, then a pane that shows a sub-session (the root stays in view when a split shows both).
+    let found: { projectId: string; tabId: string; paneId: string } | null = null;
+    let best = -1;
+    for (const [projectId, ws] of Object.entries(state.workspaces)) {
+      for (const tab of ws.tabs) {
+        for (const p of allPanes(tab.root)) {
+          if ((p.kind !== "terminal" && p.kind !== "chat") || !p.sessionId || !sessions[p.sessionId] || familyRoot(tree, p.sessionId) !== root) continue;
+          const score = (projectId === sessions[sessionId]?.project_id ? 2 : 0) + (p.sessionId !== root ? 1 : 0);
+          if (score > best) {
+            best = score;
+            found = { projectId, tabId: tab.id, paneId: p.id };
+          }
+        }
+      }
+    }
+    return found;
+  }
+
+  /** Shows `sessionId` in pane `paneId` in place of what it showed (that session keeps running), or focuses the pane that
+   *  already shows it: one session is never in two panes. */
+  function showInPane(projectId: string, tabId: string, paneId: string, sessionId: string) {
+    if (inFloating(sessionId)) {
+      selectFloating(sessionId);
+      return toggleFloating(true);
+    }
+    const loc = paneLocation(sessionId);
+    if (loc) {
+      switchProject(loc.projectId);
+      return focusPane(loc.projectId, loc.tabId, loc.paneId);
+    }
+    const s = sessions[sessionId];
+    replacePaneIn(projectId, tabId, paneId, { id: paneId, kind: s?.chat ? "chat" : "terminal", sessionId });
+    focusPane(projectId, tabId, paneId);
+  }
+
+  /** The floating terminal holds `id`: no pane may show it as well (they would share one terminal view). */
+  const inFloating = (id: string) => !!state.floating?.sessions.includes(id);
+
+  /** Sessions `closePane` is closing: their `session.closed` must not put their pane on another session. */
+  const closingFromPane = new Set<string>();
+
+  /** The session a pane showing sub-session `s` goes back to once `s` is closed: its nearest listed ancestor, when no pane
+   *  (nor the floating terminal) shows that one already. */
+  function familyFallback(s: SessionInfo): SessionInfo | null {
+    const seen = new Set<string>([s.id]);
+    for (let id = s.parent; id && !seen.has(id); id = sessions[id]?.parent) {
+      seen.add(id);
+      const up = sessions[id];
+      if (up) return paneLocation(up.id) || inFloating(up.id) ? null : up;
+    }
+    return null;
+  }
+
+  /** Tabs from before sub-sessions showed in their parent's pane: once per saved state, after the first session list, a tab
+   *  that holds only a session of a family another pane also shows is closed (its session keeps running and stays a chip of the
+   *  family's strip). Later starts leave alone a tab the user gives a sub-session. Kept: every pane in a split, a renamed or
+   *  broadcasting tab (the user arranged those), else the pane of the session nearest the top. */
+  function foldFamilyTabs() {
+    if (state.subTabsFolded || !canPersist()) return;
+    update((st) => (st.subTabsFolded = true));
+    const tree = sessionTree();
+    type Shown = { projectId: string; tabId: string; alone: boolean; depth: number; order: number };
+    const families = new Map<string, Shown[]>();
+    let order = 0;
+    for (const [projectId, ws] of Object.entries(state.workspaces)) {
+      for (const tab of ws.tabs) {
+        const panes = allPanes(tab.root);
+        for (const p of panes) {
+          if ((p.kind !== "terminal" && p.kind !== "chat") || !p.sessionId || !sessions[p.sessionId]) continue;
+          const root = familyRoot(tree, p.sessionId);
+          const list = families.get(root) ?? [];
+          list.push({ projectId, tabId: tab.id, alone: panes.length === 1 && !tab.name && !tab.broadcast, depth: sessionDepthTree(tree, p.sessionId), order: order++ });
+          families.set(root, list);
+        }
+      }
+    }
+    const drop: { projectId: string; tabId: string; keep: Shown }[] = [];
+    for (const shown of families.values()) {
+      if (shown.length < 2) continue;
+      const keep = shown.find((x) => !x.alone) ?? [...shown].sort((a, b) => a.depth - b.depth || a.order - b.order)[0];
+      for (const x of shown) if (x !== keep && x.alone) drop.push({ projectId: x.projectId, tabId: x.tabId, keep });
+    }
+    if (!drop.length) return;
+    update((st) => {
+      for (const d of drop) {
+        const w = st.workspaces[d.projectId];
+        if (!w) continue;
+        w.tabs = w.tabs.filter((t) => t.id !== d.tabId);
+        if (w.activeTab === d.tabId) w.activeTab = d.keep.projectId === d.projectId ? d.keep.tabId : (w.tabs[w.tabs.length - 1]?.id ?? null);
+      }
+    });
+    notify(drop.length === 1
+      ? t("A sub-session's tab was folded into its parent's tab: sub-sessions now show there, under the parent's header.")
+      : t("{n} sub-session tabs were folded into their parent's tab: sub-sessions now show there, under the parent's header.", { n: drop.length }), undefined, 8000);
   }
 
   function openFile(projectId: string, path: string, opts: { line?: number; diff?: boolean; staged?: boolean; rev?: Pane["rev"]; base?: string } = {}) {
@@ -1358,8 +1474,10 @@ function createAppStore() {
     addTab(projectId, { id: uid(), kind, path, line: opts.line, staged: opts.staged, rev: opts.rev, base: opts.base });
   }
 
-  /** Closes a pane. Terminal sessions are killed only when `kill` (default for exited ones). */
-  async function closePane(projectId: string, tabId: string, paneId: string, kill = true) {
+  /** Closes a pane. Terminal sessions are killed only when `kill` (default for exited ones). `back`: a sub-session shown in its
+   *  family's pane is stopped and the pane shows the session above it again (the pane's close button, *Close finished*); a
+   *  tab being closed passes no `back`, so it goes. */
+  async function closePane(projectId: string, tabId: string, paneId: string, kill = true, opts: { back?: boolean } = {}) {
     const ws = state.workspaces[projectId];
     const tab = ws?.tabs.find((t) => t.id === tabId);
     if (!tab) return;
@@ -1367,10 +1485,22 @@ function createAppStore() {
     if (pane?.kind === "browser") closeBrowser(pane.id);
     if (pane?.sessionId && kill) {
       const s = sessions[pane.sessionId];
+      const back = opts.back && s ? familyFallback(s) : null;
       disposeView(pane.sessionId);
-      if (s) await ipc.daemon("session.close", { handle: s.handle }).catch(() => {});
+      if (s) {
+        closingFromPane.add(s.id);
+        setTimeout(() => closingFromPane.delete(s.id), 30_000);
+        await ipc.daemon("session.close", { handle: s.handle }).catch(() => {});
+      }
+      // The pane may be gone, or show another session (a chip clicked meanwhile): that one stays.
+      const now = workspace(projectId).tabs.find((t) => t.id === tabId);
+      const still = now && findPane(now.root, paneId);
+      if (!still || still.sessionId !== pane.sessionId) return;
+      if (back && sessions[back.id] && !paneLocation(back.id) && !inFloating(back.id)) return showInPane(projectId, tabId, paneId, back.id);
     }
-    const root = removePane(tab.root, paneId);
+    const current = workspace(projectId).tabs.find((t) => t.id === tabId);
+    if (!current) return;
+    const root = removePane(current.root, paneId);
     update((st) => {
       const w = st.workspaces[projectId];
       if (!root) {
@@ -1736,13 +1866,14 @@ function createAppStore() {
       }
       resetStreams();
       // Fresh handles first, then flip `connected` so panes attach to the right sessions.
-      await refreshSessions().catch(() => {});
+      if (await refreshSessions().then(() => true, () => false)) foldFamilyTabs();
       setConnected(true);
       void onConnected();
     });
     // The connection may predate our listener.
     try {
       await refreshSessions();
+      foldFamilyTabs();
       setConnected(true);
       void onConnected();
     } catch {
@@ -1762,7 +1893,7 @@ function createAppStore() {
     projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
-    pendingEntries, daemonNeedsSwitch, switchDaemon, handOverHeldFor, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree,
+    pendingEntries, daemonNeedsSwitch, switchDaemon, handOverHeldFor, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree, showInPane, familyFallback,
     notesFor, addNote, removeNotes, noteKeyFor, clearNotesAt, promptsFor, rememberPrompt, resumable, sleepProject, hibernateIdle, hibernateSessions, wakeVisible,
     newFloating, toggleFloating, selectFloating, closeFloating,
   };

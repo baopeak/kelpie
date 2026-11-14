@@ -4,7 +4,7 @@ import { hostOf, projectHosts, vault } from "../lib/ssh-hosts";
 import { projectTarget, sessionTarget } from "../lib/remote";
 import { openNewSession } from "./new-session-menu";
 import { MicButton } from "./voice";
-import { store } from "../lib/store";
+import { store, sessionLabel } from "../lib/store";
 import { allPanes, cyclePane, findPane } from "../lib/layout";
 import { Icon, KindGlyph } from "./icons";
 import { ContextRing } from "./context-ring";
@@ -44,8 +44,11 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
   const composing = () => !!props.pane.sessionId && composerRequest()?.sessionId === props.pane.sessionId;
   const close = async () => {
     const s = session();
-    if (s?.alive && s.kind !== "shell" && !(await confirmDialog(t("Stop {kind} and close this pane?", { kind: s.kind })))) return;
-    void store.closePane(props.project.id, props.tab.id, props.pane.id);
+    // A sub-session in its family's pane: closing it shows the session above it again (see `closePane`).
+    const back = s && store.familyFallback(s);
+    const question = back ? t("Stop {kind} and go back to {name}?", { kind: s.kind, name: sessionLabel(back) }) : t("Stop {kind} and close this pane?", { kind: s?.kind ?? "" });
+    if (s?.alive && s.kind !== "shell" && !(await confirmDialog(question))) return;
+    void store.closePane(props.project.id, props.tab.id, props.pane.id, true, { back: true });
   };
   const split = (where: "right" | "down") => {
     focus();
@@ -119,9 +122,9 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
           {tools()}
         </div>
       </Show>
-      {/* Where this session stands among sub-sessions: the session that opened it, and the ones it opened. */}
-      <Show when={props.pane.kind === "terminal" || props.pane.kind === "chat" ? props.pane.sessionId : undefined} keyed>
-        {(id) => <SubSessionsBar sessionId={id} />}
+      {/* The sub-tabs of a sub-session family: the session at the top and every session below it, shown one at a time here. */}
+      <Show when={props.pane.kind === "terminal" || props.pane.kind === "chat" ? props.pane.sessionId : undefined}>
+        {(id) => <SubSessionsBar sessionId={id()} projectId={props.project.id} tabId={props.tab.id} paneId={props.pane.id} />}
       </Show>
       {/* The usage limit stopped this agent (the daemon says so for Claude Code). */}
       <Show when={props.pane.kind === "terminal" ? session() : undefined} keyed>

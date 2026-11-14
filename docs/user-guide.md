@@ -797,10 +797,14 @@ open). A request not answered in 5 minutes is refused, and one withdrawn when it
 
 **The tree.** A child sits under its parent in the sidebar (if both are in the same project); the
 parent row has a fold arrow and a badge coloured by the worst state below it (needs you, failed,
-working, finished, idle). Over a session with children, a strip lists them as chips with their
-last report; click one to open it, `+N` shows the rest. A child's strip starts with *Sub-session of
-<parent>*. *Close finished* on the strip, or in the right-click menu of the strip or the parent's
-row, closes the children that are done or exited after listing them; folders and worktrees are
+working, finished, idle). A family of sessions lives in the tab of the session at the top: under
+its header a strip of sub-tabs lists that session first, then every session below it (a grandchild
+marked `›`) with their last report. Clicking a chip, or a child's row in the sidebar, shows that
+session in the same pane, and the tab reads *parent › child*; `+N` shows the rest. No tab opens per
+child. The pane's close button on a child stops it and shows the session above it again; closing
+the tab closes the tab. Tabs of children opened by an older version are folded into the parent's
+tab once. *Close finished* on the strip, or in the right-click menu of the strip or the parent's
+row, closes the sub-sessions that are done or exited after listing them; folders and worktrees are
 kept. Closing a parent leaves its children running.
 
 **Limits on this computer.** At most 3 levels deep, 10 running children per session, and a limit

@@ -533,6 +533,8 @@ export interface AppState {
   /** The newest phone start (the audit log's time) already in Activity or seen: those newer are added when the window connects
    *  (`phone-starts.ts`). Unset until it is first remembered. */
   phoneStartsSeen?: number;
+  /** Tabs of sub-sessions were folded into their parent's tab (done once, when sub-sessions moved into the parent's pane). */
+  subTabsFolded?: boolean;
   /** Diff review notes by project id: only those of a daemon older than API 13 (it keeps them from there). */
   reviewNotes: Record<string, ReviewNote[]>;
   /** Prompts sent from the composer, newest first, by project id. */

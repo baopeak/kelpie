@@ -1620,12 +1620,8 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .sub-badge.working { background: var(--working); color: var(--on-working); }
 .sub-badge.done { background: var(--idle); }
 .sub-badge.idle { background: var(--text-faint); }
-/* The bar under a pane's header: who opened this session, and the ones it opened. */
+/* The bar under a pane's header: the sub-tabs of a sub-session family (the session at the top, then the ones below it). */
 .sub-strip { flex: none; display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 2px 10px; font-size: 12px; color: var(--text-dim); background: var(--bg-elev); border-bottom: 1px solid var(--border); overflow: hidden; }
-.sub-parent { border: 0; background: transparent; color: var(--text-dim); font: inherit; padding: 2px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
-.sub-parent:hover { background: var(--bg-hover); color: var(--text); }
-.sub-parent b { color: var(--text); font-weight: 600; }
-.sub-strip-label { flex: none; color: var(--text-faint); }
 .sub-chips { display: flex; gap: 6px; min-width: 0; overflow: hidden; }
 .sub-chip { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 210px; padding: 2px 9px 2px 7px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--bg-elev-2); color: var(--text); font: inherit; font-size: 11.5px; cursor: pointer; flex: 0 1 auto; }
 .sub-chip:hover { background: var(--bg-hover); }
@@ -1635,6 +1631,9 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .sub-chip.r-failed { border-color: var(--danger); }
 .sub-chip:is(.r-blocked, .r-needs_user) { border-color: var(--waiting); }
 .sub-chip.more { flex: none; color: var(--text-dim); }
+.sub-chip.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--bg-elev-2)); }
+.sub-chip.active .sub-chip-name { font-weight: 600; }
+.sub-chip-depth { flex: none; color: var(--text-faint); }
 .sub-close { margin-left: auto; flex: none; }
 /* The approval card: bottom right, over the window without covering a pane's controls. */
 .sub-cards { position: fixed; right: 16px; bottom: 36px; z-index: 119; width: min(430px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; }

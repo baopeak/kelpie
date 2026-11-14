@@ -4,6 +4,8 @@ import {
   childrenOfSession,
   dispatchRequest,
   emptyRequests,
+  familyOf,
+  familyRoot,
   finishedChildren,
   folderName,
   hasLiveDescendant,
@@ -77,6 +79,22 @@ describe("the session tree", () => {
     const tree = buildSessionTree(list);
     expect(sessionDepthTree(tree, "n299")).toBe(299);
     expect(childrenOfSession(tree, "n0")).toHaveLength(301);
+  });
+});
+
+describe("a family of sessions in one tab", () => {
+  it("finds the root from any depth, and lists the root, then each parent before its children, oldest first", () => {
+    const list = [session("root"), session("b", { parent: "root" }), session("a", { parent: "root" }), session("leaf", { parent: "b" }), session("alone")];
+    const tree = buildSessionTree(list);
+    expect(["root", "b", "leaf", "alone"].map((id) => familyRoot(tree, id))).toEqual(["root", "root", "root", "alone"]);
+    expect(familyOf(tree, list[0]).map((m) => `${m.s.id}:${m.depth}`)).toEqual(["root:0", "b:1", "leaf:2", "a:1"]);
+    expect(familyOf(tree, list[4]).map((m) => m.s.id)).toEqual(["alone"]);
+  });
+
+  it("treats a session whose parent is gone as its own root", () => {
+    const tree = buildSessionTree([session("orphan", { parent: "closed" }), session("kid", { parent: "orphan" })]);
+    expect(familyRoot(tree, "kid")).toBe("orphan");
+    expect(familyRoot(tree, "orphan")).toBe("orphan");
   });
 });
 

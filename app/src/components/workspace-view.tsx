@@ -15,6 +15,7 @@ import { agentLeases } from "../lib/agent-browser";
 import { HostChip } from "./host-target";
 import { projectTarget, sessionTarget } from "../lib/remote";
 import { kindInfo } from "../lib/agents";
+import { familyRoot } from "../lib/sub-sessions";
 import type { Pane, Project, Tab } from "../lib/types";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
@@ -47,6 +48,12 @@ function TabTitle(props: { tab: Tab; project: Project }) {
   const panes = createMemo(() => allPanes(props.tab.root));
   const focus = () => panes().find((p) => p.id === props.tab.focus) ?? panes()[0];
   const session = () => (focus()?.sessionId ? store.sessions[focus()!.sessionId!] : undefined);
+  /** A sub-session shown in its family's pane is named after the session at the top as well: the tab stays that family's. */
+  const title = () => {
+    const s = session();
+    const top = s && store.sessions[familyRoot(store.sessionTree(), s.id)];
+    return top && top.id !== s.id ? `${sessionLabel(top)} › ${sessionLabel(s)}` : paneTitle(focus());
+  };
   /** The focused pane's host when it is not the project's own machine. */
   const host = () => {
     const tg = session() && sessionTarget(session()!);
@@ -68,7 +75,7 @@ function TabTitle(props: { tab: Tab; project: Project }) {
       <Show when={panes().find((p) => agentLeases()[p.id])}>
         {(p) => <span class="badge agent-browser-badge" data-agent-badge title={t("{name} is using a page in this tab", { name: agentLeases()[p().id]?.name ?? "" })}><Icon name="sparkle" size={10} /></span>}
       </Show>
-      <span class="title">{props.tab.name ?? paneTitle(focus())}</span>
+      <span class="title">{props.tab.name ?? title()}</span>
       <Show when={session()}>{(s) => <ContextRing s={s()} size={12} />}</Show>
       <Show when={panes().length > 1}>
         <span class="tab-panes">
