@@ -7,7 +7,7 @@ members = ["crates/kelpie-proto", "crates/kelpie-link", "crates/kelpied", "crate
 default-members = ["crates/kelpie-proto", "crates/kelpie-link", "crates/kelpied", "crates/kelpie-rtc", "app/src-tauri"]
 
 [workspace.package]
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 license = "MIT"
 
