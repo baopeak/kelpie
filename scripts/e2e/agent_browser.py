@@ -26,8 +26,12 @@ with session, tool and target and no typed text, and no file of the data folder 
 On Windows also: in the tab shown, tabs says trusted input and screenshots; a click is trusted (the page sees event.isTrusted) and the main
 window keeps its keyboard focus; typing is trusted and lands; a key on an option that takes no focus and typing into a field that refuses focus on mousedown still land;
 an agent's Control+V is synthetic and pastes nothing; a screenshot is a PNG at most 1280 px wide, saved to a file, and one element can be
-pictured; the network list has POST 200 /api/login; with the tab in the background, tabs says so, a screenshot is refused and a click is
-synthetic. Not covered here: a phone's takeover of a pane, and macOS/Linux behaviour.
+pictured; the network list has POST 200 /api/login; with another program's window in front of the pane holding the foreground and the
+keyboard (foreground_window.py), the agent's click and typing are trusted and land in the page, Kelpie does not take the foreground and that
+window gets no click or key; with the tab in the background, tabs says so, a screenshot is refused and a click is synthetic. A phone given
+control (paired on a fake Tailscale origin, its passkey set up) takes the agent's pane over: every browser tool of the agent is refused saying
+a phone controls it and nothing it sent reaches the page; once the phone lets go the agent reads and acts again. Not covered here: macOS/Linux
+behaviour.
 """
 import base64
 import json
@@ -472,6 +476,9 @@ def scenario(run, d):
     w.js("const b = [...document.querySelectorAll('[data-agent-stop]')].find(b => b.offsetParent); b && b.click();")
     ok, text, _ = m3.call("kelpie_browser_snapshot", {"pane": own})
     check("Stop on the banner ends the agents' access to the pane", banner and not ok, text)
+    # After Stop: a takeover brings the agent's pane to the front, where the shared pane's banner is not.
+    if os.name == "nt":
+        phone_takeover(d, m1, pane, base, label_of, ref)
 
     step("audit")
     # Audit.
@@ -612,6 +619,7 @@ def windows_cdp(w, m1, pane, pa, pb, ref):
 
     ok, text, _ = m1.call("kelpie_browser_network", {"filter": "/api/login"})
     check("network lists the sign-in request", ok and "POST 200 /api/login" in text, text)
+    another_program_in_front(w, m1, ref)
 
     # Another project shown: the pane is a background tab.
     w.js(f"{S}.switchProject(arguments[0])", pb)
@@ -624,14 +632,156 @@ def windows_cdp(w, m1, pane, pa, pb, ref):
     w.js(f"{S}.switchProject(arguments[0])", pa)
 
 
+def phone_takeover(d, m1, pane, base, label_of, ref):
+    """A phone given control (paired on the fake Tailscale origin, its passkey set up) takes the agent's own pane over: every browser tool of the
+    agent is refused while it holds the pane, saying a phone controls it, and nothing the agent sent reaches the page; once the phone lets go the
+    agent reads and acts in the pane again. Windows: takeover streams through the WebView2 DevTools protocol."""
+    step("phone takeover")
+    import asyncio
+    import types
+    import screen_support as ss
+    setup = types.SimpleNamespace(origin=f"{ps.FAKE_TAILNET_NAME}:8443", port=PHONE_PORT, ts_state=TS_STATE, ts_log=TS_LOG)
+
+    async def call(method, params=None):
+        return await asyncio.to_thread(d.call, method, params or {})
+
+    async def agent(tool, args=None):
+        return await asyncio.to_thread(m1.call, tool, {"pane": pane, **(args or {})})
+
+    async def go():
+        serve_port = await ss.phones_on(setup, call)
+        phone, device, hello, _, _ = await ss.control_phone(setup, d, call, serve_port, "Agent browser phone")
+        try:
+            check("a phone paired on the Tailscale origin comes back unlocked, with control", hello.get("locked") is False and hello["device"]["permission"] == "control", hello.get("device"))
+            await agent("kelpie_browser_navigate", {"url": base + "/login"})
+            ok, snap, _ = await agent("kelpie_browser_snapshot")
+            count, email = ref(snap, "button", "Count"), ref(snap, "textbox", "Email")
+            before = await asyncio.to_thread(page_count, m1, pane)
+            check("before the takeover the agent reads its pane", ok and bool(count), snap[:120])
+            started = await phone.ask(type="tk_start", pane=label_of(pane), timeout=15)
+            tk = (started or {}).get("tk")
+            check("the phone takes the agent's pane over", bool(tk), started)
+            tools = [("kelpie_browser_snapshot", {}), ("kelpie_browser_click", {"ref": count}), ("kelpie_browser_type", {"ref": email, "text": "while-held@example.test"}),
+                     ("kelpie_browser_press", {"key": "Enter", "ref": count}), ("kelpie_browser_navigate", {"url": base + "/other"}), ("kelpie_browser_eval", {"expression": "1"}),
+                     ("kelpie_browser_console", {}), ("kelpie_browser_network", {}), ("kelpie_browser_wait", {"text": "Sign in", "timeout_s": 1}),
+                     ("kelpie_browser_screenshot", {})]
+            answers = {}
+            for tool, args in tools:
+                ok, text, _ = await agent(tool, args)
+                answers[tool] = (ok, text[:100])
+            print("TAKEOVER answers", json.dumps(answers), flush=True)
+            check("while the phone holds the pane every browser tool of the agent is refused, saying a phone controls it",
+                  all(not ok and "phone" in text.lower() for ok, text in answers.values()), {k: v for k, v in answers.items() if v[0] or "phone" not in v[1].lower()})
+            ok, text, _ = await asyncio.to_thread(m1.call, "kelpie_browser_tabs")
+            print("TAKEOVER tabs", text.split(pane)[1].split("\n")[0] if pane in text else text[:200], flush=True)
+            stopped = await phone.ask(type="tk_stop", tk=tk)
+            check("the phone lets go", (stopped or {}).get("type") == "ack", stopped)
+            back = await asyncio.to_thread(until, lambda: (lambda r: r if r[0] else None)(m1.call("kelpie_browser_snapshot", {"pane": pane})), 10)
+            ok, snap, _ = back or (False, "", None)
+            check("once the phone let go, the agent reads its pane again", ok, snap[:200])
+            held = await asyncio.to_thread(page_count, m1, pane)
+            check("…and nothing the agent sent while the phone held it reached the page", ok and held == before and "while-held@example.test" not in snap and "/other" not in snap.splitlines()[0], (before, held))
+            ok, text, _ = await agent("kelpie_browser_click", {"ref": ref(snap, "button", "Count")})
+            again = await asyncio.to_thread(until, lambda: (lambda n: n if n > before else None)(page_count(m1, pane)), 3)
+            check("…and acts in it again", ok and again == before + 1, (text, again))
+        finally:
+            await phone.close()
+            await call("mobile.revoke", {"id": device.id})
+
+    asyncio.run(go())
+
+
+def another_program_in_front(w, m1, ref):
+    """Windows: another program's window has the foreground and the keyboard, over the whole pane (the person works in another app while an agent
+    uses the tab shown). The agent's trusted click and typing land in the page under it (counted by the page itself, read with eval); Kelpie
+    never takes the foreground (each change of it is logged, another program of the person's may take it); the window in front gets no click
+    and no key. Its window is foreground_window.py, which logs what it gets."""
+    step("windows: another program in front")
+    rect = w.js("const h = [...document.querySelectorAll('.browser-host')].find(e => e.offsetParent); if (!h) return null;"
+                " const r = h.getBoundingClientRect(), k = devicePixelRatio; return [r.left, r.top, r.width, r.height].map(v => Math.round(v * k));")
+    log = os.path.join(scratch, f"foreground-{os.getpid()}.log")
+    open(log, "w").close()
+    probe = subprocess.Popen([sys.executable, os.path.join(HERE, "foreground_window.py"), log, app, *map(str, rect or [0, 0, 400, 300])], stdin=subprocess.PIPE)
+    procs["foreground"] = probe
+    lines = lambda: [json.loads(x) for x in open(log, encoding="utf-8").read().splitlines() if x.strip()]  # noqa: E731
+    ready = until(lambda: next((x for x in lines() if "ready" in x or "error" in x), None), 20)
+    hwnd = (ready or {}).get("ready")
+    front = lambda: ctypes_user32().GetForegroundWindow() == hwnd  # noqa: E731
+    check("another program's window is put in front of the pane, with the keyboard in its field", bool(hwnd) and ready.get("front") and ready.get("focus") and front(), {"rect": rect, "ready": ready})
+    try:
+        seen = len(lines())
+        ok, snap, _ = m1.call("kelpie_browser_snapshot")
+        before = page_count(m1)
+        ok, text, _ = m1.call("kelpie_browser_click", {"ref": ref(snap, "button", "Count")})
+        after = until(lambda: (lambda n: n if n > before else None)(page_count(m1)), 3) or page_count(m1)
+        print("FOREGROUND click", json.dumps({"text": text.splitlines()[1:], "before": before, "after": after, "front": front()}), flush=True)
+        check("with another program in front, the agent's click is trusted and lands in the page", ok and "(trusted)" in text and after == before + 1, (text, before, after))
+        ok, text, _ = m1.call("kelpie_browser_type", {"ref": ref(snap, "textbox", "Email"), "text": "front@example.test"})
+        ok2, snap2, _ = m1.call("kelpie_browser_snapshot")
+        check("…the agent's typing is trusted and lands in the page's field", ok and "(trusted)" in text and 'value="front@example.test"' in snap2, text)
+        time.sleep(0.5)
+        got = lines()[seen:]
+        moved = [e for e in got if e.get("event") == "foreground"]
+        # Another program of the person's may take the foreground meanwhile (the probe logs each change, looked at every 20 ms): only the app's own counts.
+        print("FOREGROUND changes", json.dumps({"changes": moved, "now": window_owner(ctypes_user32().GetForegroundWindow())}), flush=True)
+        check("…Kelpie never takes the foreground, through the click and the typing", not any(e.get("app") for e in moved) and not window_owner(ctypes_user32().GetForegroundWindow())["this app"], moved)
+        check("…and the window in front gets no click and no key", not [e for e in got if e.get("event") in ("button", "key")], got)
+    finally:
+        probe.stdin.close()
+        try:
+            probe.wait(10)
+        except subprocess.TimeoutExpired:
+            probe.kill()
+
+
+def page_count(m, pane=None):
+    """How many clicks the fixture's Count button has had, as the page itself counts them (eval in the agent's own pane; the snapshot does
+    not show the count's text)."""
+    ok, text, _ = m.call("kelpie_browser_eval", {"expression": "window.__count || 0", **({"pane": pane} if pane else {})})
+    try:
+        return int(text.splitlines()[-1]) if ok else -1
+    except ValueError:
+        return -1
+
+
+def window_owner(hwnd):
+    """Which program a window belongs to, and its title: for a failure's detail."""
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes_user32()
+    pid = wintypes.DWORD()
+    u.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+    title = ctypes.create_unicode_buffer(256)
+    u.GetWindowTextW(wintypes.HWND(hwnd), title, 256)
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", f"(Get-Process -Id {pid.value} -ErrorAction SilentlyContinue).Path"], capture_output=True, text=True).stdout.strip()
+    return {"hwnd": hwnd, "pid": pid.value, "exe": out, "title": title.value, "this app": os.path.normcase(out) == os.path.normcase(app)}
+
+
+def ctypes_user32():
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    u.GetForegroundWindow.restype = wintypes.HWND
+    return u
+
+
+# The phone that takes a pane over reaches this script's daemon through a fake Tailscale CLI (never the real one), at this port.
+PHONE_PORT = 48100 + os.getpid() % 400
+TS_BIN = TS_STATE = TS_LOG = None
+
+
 def main():
-    global SITE_PORT
+    global SITE_PORT, TS_BIN, TS_STATE, TS_LOG
     site = ThreadingHTTPServer(("127.0.0.1", 0), Site)
     SITE_PORT = site.server_address[1]
     threading.Thread(target=site.serve_forever, daemon=True).start()
     if port_open(1427):
         raise SystemExit("port 1427 is taken (another Vite dev server?): this script starts the app's own; stop that one first")
-    d = ps.Daemon(kelpied, env={"KELPIE_E2E": "1"}).start()
+    tailscale = os.path.join(scratch, f"agent-browser-tailscale-{os.getpid()}")
+    os.makedirs(tailscale, exist_ok=True)
+    TS_BIN, TS_STATE, TS_LOG = ps.write_fake_tailscale(tailscale)
+    # The load pinned calm: a busy computer refuses a phone's takeover, and these checks are about agents, not load.
+    d = ps.Daemon(kelpied, env={"KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": TS_BIN, "KELPIE_LOAD_FORCE": "L0:calm"}).start()
     procs["daemon"] = d.proc
     procs["vite"] = subprocess.Popen(["cmd", "/c", "pnpm", "exec", "vite", "--port", "1427", "--strictPort"] if os.name == "nt" else ["pnpm", "exec", "vite", "--port", "1427", "--strictPort"], cwd=os.path.join(REPO, "app"), stdout=open(os.path.join(scratch, "vite.log"), "w"), stderr=subprocess.STDOUT)
     until(lambda: port_open(1427), 60)
@@ -679,6 +829,7 @@ def main():
         d.stop()
         site.shutdown()
         shutil.rmtree(os.path.join(scratch, f"agent-browser-{os.getpid()}"), ignore_errors=True)
+        shutil.rmtree(tailscale, ignore_errors=True)
         shutil.rmtree(DATA, ignore_errors=True)
     failed = [r for r in results if not r[1]]
     print(json.dumps({"passed": len(results) - len(failed), "failed": len(failed)}))
