@@ -110,9 +110,9 @@ says that this relay does not serve the phone app; phones are paired over Tailsc
 
 ## TURN for the screen (optional)
 
-When a phone shows the computer's screen through the relay, Kelpie first tries a direct connection between the phone and the computer
-(peer to peer). Some networks do not allow one; TURN relays that traffic instead, and your relay can hand out short-lived TURN credentials
-for it. Without TURN, such a screen simply stays on the relay's own connection.
+When a phone shows the computer's screen through the relay, Kelpie tries a direct connection between the phone and the computer (peer
+to peer) and, where the relay offers TURN, a TURN-relayed one together, and keeps whichever works; your relay can hand out the short-lived TURN
+credentials for it. Without TURN, such a screen stays on the relay's own connection while *Relay WebSocket* is on.
 
 - **coturn**: run a [coturn](https://github.com/coturn/coturn) server with `use-auth-secret` and a `static-auth-secret`, then give the relay
   the same secret and the server's URLs: `TURN_SECRET=<that secret>` and `TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp`
@@ -124,10 +124,13 @@ The relay mints a credential (20 minutes) only for a room's own desktop, signed 
 in: at most 10 an hour and 40 a day per room, `TURN_MINTS_PER_NETWORK_DAY` (20 unless set) a day per network, and `TURN_MINTS_PER_DAY` (500
 unless set) a day for the whole relay. **Only rooms made with your registration key get TURN** unless you set `TURN_OPEN_ROOMS=1`: these limits
 count credentials, not bytes, so on a relay with open registration a stranger could make a room, pair a phone of their own and spend your
-TURN traffic. A room made before your relay had TURN counts as made without the key: make a new room in Kelpie (Settings → Mobile) to get it. Each computer also holds
+TURN traffic. A room made before your relay had TURN counts as made without the key: Kelpie offers *Make a new room* in Settings → Mobile after you
+remove a phone (or once the relay has been slow for a day); until the room is remade, its TURN requests get `404 turn_not_offered` and the
+phone says *This relay offers no TURN*. Each computer also holds
 its screens to its own TURN caps (1 GB a screen, 3 GB a day, 30 GB a month by default; Settings → Mobile → Advanced). The relay cannot read
 monthly TURN traffic by itself: set a usage notification in your TURN provider's dashboard, and remove the secrets to stop minting at once.
-With no TURN secret set, `/v1/turn` answers `404 turn_not_configured` and Kelpie leaves the way out.
+With no TURN secret set, `/v1/turn` answers `404 turn_not_configured` and the phone shows the TURN way as unavailable (*This relay offers no TURN*), asking again after ten
+minutes.
 
 ## Serving the phone app from your own Cloudflare account
 
