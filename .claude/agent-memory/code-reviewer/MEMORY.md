@@ -8,5 +8,5 @@
 - [Vault host identity](vault-host-identity.md) — checkHost/saveVault replace all SshHost objects; keyed Show on them remounts UI
 - [Windows command spawn facts](windows-command-spawn-facts.md) — .cmd args safe in std 1.97; no PATHEXT; relative program uses parent cwd; powershell (even w/o -Command) and cmd %VAR% inject; npm = runner; canonicalize for 8.3; stale-binary check
 - [GUI e2e isolation wrapper](gui-e2e-isolation-wrapper.md) — runpy wrapper for ssh_hosts/ssh_panes/remote; mkdtemp KELPIE_SSH_DIR breaks Windows OpenSSH
-- [Screen TURN review traps](screen-turn-review-traps.md) — seal form versioning, placeholder ways, watch 250ms vs stats 1s, post-mint liveness, TURN ts race, CF TURN expiry facts
+- [Screen TURN review traps](screen-turn-review-traps.md) — seal form versioning, placeholder ways, watch vs stats, post-mint liveness, TURN ts race, CF expiry, gesture-surface buttons click the PC
 - [Markdown slicing and remote write traps](markdown-slicing-and-remote-write-traps.md) — sliced lexing diverges; ssh tmp+mv truncation/symlinks; chained template replace + $$ temp files
