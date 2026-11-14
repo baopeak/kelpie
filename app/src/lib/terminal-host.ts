@@ -98,6 +98,10 @@ export class TermView {
 
   constructor(readonly sessionId: string, private settings: Settings) {
     this.el.className = "term-host";
+    // Links open only on Ctrl/Cmd+click: terminal text never triggers actions implicitly. The one under the pointer is kept for the
+    // terminal's right-click menu.
+    // xterm activates a link on any button: Ctrl+right-click is the menu, not a click.
+    const modified = (e: MouseEvent) => e.button === 0 && (isMac ? e.metaKey : e.ctrlKey);
     this.term = new Terminal({
       fontFamily: settings.fontFamily,
       fontSize: settings.fontSize,
@@ -115,15 +119,18 @@ export class TermView {
       fastScrollSensitivity: 5,
       smoothScrollDuration: 0,
       scrollOnUserInput: true,
+      // Links a program marks itself (OSC 8: the text shown may differ from the address): opened like the links found in the text,
+      // instead of xterm's default, a browser confirm() on any click. xterm keeps them to http(s).
+      linkHandler: {
+        activate: (e, uri) => void (modified(e) && openLink(uri)),
+        hover: (_e, uri) => (this.hoveredUrl = uri),
+        leave: () => (this.hoveredUrl = null),
+      },
     });
     this.term.loadAddon(this.fit);
     this.term.loadAddon(this.search);
     this.term.loadAddon(new Unicode11Addon());
     this.term.unicode.activeVersion = "11";
-    // Links open only on Ctrl/Cmd+click: terminal text never triggers actions implicitly. The one under the pointer is kept for the
-    // terminal's right-click menu.
-    // xterm activates a link on any button: Ctrl+right-click is the menu, not a click.
-    const modified = (e: MouseEvent) => e.button === 0 && (isMac ? e.metaKey : e.ctrlKey);
     this.term.loadAddon(new WebLinksAddon((e, uri) => modified(e) && openLink(uri), {
       hover: (_e, uri) => (this.hoveredUrl = uri),
       leave: () => (this.hoveredUrl = null),
