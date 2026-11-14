@@ -8,12 +8,14 @@
 //   key set (a Worker secret), only its holder may; otherwise, with `OPEN_REGISTRATION = "1"`, anyone, within limits per network and
 //   in all (rate binding, then the Registrar); otherwise nobody. Never a page.
 // - `GET /v1/desktop`, `GET /v1/phone`: WebSockets into a room, `?t=<ticket>` and what the room asks of each (room.ts).
+// - `POST /v1/turn`, `POST /v1/turn/revoke`: TURN credentials for the room's desktop, within limits (turn.ts).
 
 import { decodeBase64Url, encodeBase64Url, hex } from "./encoding";
 import type { Registrar } from "./registrar";
 import type { Room } from "./room";
+import { cloudflareMint, cloudflareRevoke, coturnMint, TURN_FULL, TURN_MINTS_PER_DAY, TURN_MINTS_PER_NETWORK_DAY, TURN_NETWORK, TURN_NO_PHONES, TURN_NOT_CONFIGURED, TURN_NOT_OFFERED, TURN_ROOM_LIMIT, turnMode, validUsername, type TurnEnv } from "./turn";
 
-export interface Env {
+export interface Env extends TurnEnv {
   ROOM: DurableObjectNamespace<Room>;
   REGISTRAR: DurableObjectNamespace<Registrar>;
   TICKET_SECRET: string;
@@ -199,7 +201,7 @@ async function register(request: Request, env: Env): Promise<Response> {
   }
   const room = hex(crypto.getRandomValues(new Uint8Array(16)));
   // No location hint: this first call, from the desktop's own request, places the room near the desktop.
-  await env.ROOM.get(env.ROOM.idFromName(room)).init(room, pk);
+  await env.ROOM.get(env.ROOM.idFromName(room)).init(room, pk, !open);
   return new Response(JSON.stringify({ room, ticket: await makeTicket(room, env.TICKET_SECRET) }), {
     status: 201,
     headers: { "content-type": "application/json", ...NO_SNIFF },
@@ -215,11 +217,56 @@ async function usableRoomKey(pk: string): Promise<boolean> {
   }
 }
 
+const MAX_TURN_BODY = 1024;
+
+/** A TURN credential minted for the room's desktop (`kind` "turn"), or one revoked: checked by the room, counted by the Registrar. The answer
+ *  never says more than the desktop needs; a refused signature counts against the network as a refused socket does. */
+async function turn(request: Request, env: Env, kind: "turn" | "revoke", ticket: string | null, fetchFn: typeof fetch): Promise<Response> {
+  if (request.method !== "POST") return plain(405, "post only\n");
+  if (request.headers.has("origin")) return plain(403, "not from a page\n");
+  const mode = turnMode(env);
+  if (!mode) return plain(404, "turn not configured\n", TURN_NOT_CONFIGURED);
+  if (!env.TICKET_SECRET) return plain(503, "relay not configured\n");
+  const room = await checkTicket(ticket, env.TICKET_SECRET);
+  if (room === null) return plain(403, "bad ticket\n");
+  const who = await failureKey(request, `turn ${room}`);
+  const now = Date.now();
+  if (admissions.out(who, now)) return plain(429, "too many refused attempts\n", TOO_MANY_REFUSED);
+  if (Number(request.headers.get("content-length") ?? "0") > MAX_TURN_BODY) return plain(413, "too large\n");
+  const body = (await request.json().catch(() => null)) as { ts?: unknown; sig?: unknown; username?: unknown } | null;
+  const ts = Number(body?.ts);
+  const sig = typeof body?.sig === "string" ? body.sig : "";
+  if (kind === "revoke" && !validUsername(body?.username)) return plain(400, "username\n");
+  const username = kind === "revoke" ? (body?.username as string) : "";
+  const admitted = await env.ROOM.get(env.ROOM.idFromName(room)).turnAdmit(kind, ts, sig, username, env.TURN_OPEN_ROOMS === "1");
+  if (admitted === "stale" || admitted === "bad" || admitted === "gone") {
+    admissions.note(who, now);
+    return plain(403, admitted === "gone" ? "no such room\n" : "bad signature\n");
+  }
+  if (admitted === "not_offered") return plain(404, "turn not offered to this room\n", TURN_NOT_OFFERED);
+  if (admitted === "no_phones") return plain(409, "no phone allowed in\n", TURN_NO_PHONES);
+  if (admitted === "limit") return plain(429, "too many credentials for this room\n", TURN_ROOM_LIMIT);
+  if (kind === "revoke") {
+    if (mode === "coturn") return new Response(null, { status: 204, headers: NO_SNIFF });
+    const status = await cloudflareRevoke(env, username, fetchFn);
+    return status === 204 ? new Response(null, { status: 204, headers: NO_SNIFF }) : plain(502, "upstream\n");
+  }
+  const registrar = env.REGISTRAR.get(env.REGISTRAR.idFromName("registrar"));
+  const network = await failureKey(request);
+  const day = await registrar.admitTurn(network, now, limit(env.TURN_MINTS_PER_NETWORK_DAY, TURN_MINTS_PER_NETWORK_DAY), limit(env.TURN_MINTS_PER_DAY, TURN_MINTS_PER_DAY));
+  if (day === "network") return plain(429, "too many credentials from this network today\n", TURN_NETWORK);
+  if (day === "full") return plain(503, "no more credentials today\n", TURN_FULL);
+  const out = mode === "cloudflare" ? await cloudflareMint(env, now, fetchFn) : await coturnMint(env, room, now);
+  if (!out.ok) return plain(out.status, "no credential\n", out.reason);
+  return new Response(JSON.stringify(out.minted), { status: 200, headers: { "content-type": "application/json", ...NO_SNIFF } });
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, _ctx?: unknown, fetchFn: typeof fetch = fetch): Promise<Response> {
     const { pathname, searchParams } = new URL(request.url);
     if (pathname === "/v1/health") return plain(200, "ok\n");
     if (pathname === "/v1/rooms") return request.method === "POST" ? register(request, env) : plain(405, "post only\n");
+    if (pathname === "/v1/turn" || pathname === "/v1/turn/revoke") return turn(request, env, pathname === "/v1/turn" ? "turn" : "revoke", searchParams.get("t"), fetchFn);
     if (!SOCKET_PATHS.has(pathname)) return plain(404, "not found\n");
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return plain(426, "websocket only\n");

@@ -47,6 +47,8 @@ pub(super) struct Side {
     pub(super) cursor: kelpie_rtc::Latest,
     candidates: mpsc::UnboundedSender<String>,
     candidates_left: u32,
+    /// Offered through TURN alone: its rule is TURN's from the start.
+    pub(super) relay_only: bool,
     pub(super) stop: Arc<Notify>,
 }
 
@@ -60,6 +62,36 @@ impl Drop for Side {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn ice_servers() -> Value {
     json!([{"urls": [format!("stun:{}", kelpie_rtc::STUN_SERVER)]}])
+}
+
+/// TURN credentials are renewed this long before they end, while a screen's pair goes through TURN.
+const RENEW_BEFORE_MS: u64 = 5 * 60 * 1000;
+
+/// The way a hold's picture goes now, which its rule is looked at again for: the link's, or peer to peer (through TURN when its pair is).
+pub(super) fn way_now(hold: &Hold, st: &State) -> Via {
+    // The pair as measured; until a new peer's first stats, the way it was offered (a peer offered through TURN alone that turns out direct is
+    // held to peer to peer's rule from then on).
+    let turn = st.turn_path.unwrap_or_else(|| st.rtc.as_ref().is_some_and(|s| s.relay_only));
+    match (st.on_p2p, turn) {
+        (false, _) => link_way(hold),
+        (true, true) => Via::Turn,
+        (true, false) => Via::P2p,
+    }
+}
+
+/// Ends a TURN credential at the relay, off the async threads; best effort.
+pub(super) fn revoke_later(d: &Daemon, username: String) {
+    let Some(d) = d.this() else { return };
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        rt.spawn_blocking(move || d.mobile.revoke_turn(&username));
+    }
+}
+
+/// The STUN servers with TURN's minted ones after them.
+fn with_turn(turn: &crate::mobile::turn::Minted) -> Value {
+    let mut all = ice_servers().as_array().cloned().unwrap_or_default();
+    all.extend(turn.ice_servers.as_array().cloned().unwrap_or_default());
+    json!(all)
 }
 
 /// The way the hold's link goes: the relay's WebSocket or the direct link.
@@ -83,23 +115,26 @@ impl Broker {
     pub fn rtc_offer_begin(&self, d: &Arc<Daemon>, phone: Phone<'_>, req: &Value) -> Result<impl std::future::Future<Output = Result<Value, Refused>> + Send + 'static, Refused> {
         let hold = self.held_here(&phone, req)?;
         let sdp = req["sdp"].as_str().filter(|s| !s.is_empty() && s.len() <= MAX_SDP).ok_or_else(|| refused("bad_request", "missing offer"))?.to_string();
-        d.mobile.screen_way(&hold.device, hold.browser, hold.relay, Via::P2p).map_err(|(code, message)| refused(code, message))?;
+        // A phone that offers through TURN alone asks that way's switch; any other offer, peer to peer's.
+        let way = if req["relay_only"] == true { Via::Turn } else { Via::P2p };
+        d.mobile.screen_way(&hold.device, hold.browser, hold.relay, way).map_err(|(code, message)| refused(code, message))?;
         let offer = {
             let mut st = hold.state.lock();
             st.offers += 1;
             st.offers
         };
         let d = d.clone();
-        Ok(async move { d.screen.open_peer(&d, &hold, &sdp, offer).await })
+        let relay_only = way == Via::Turn;
+        Ok(async move { d.screen.open_peer(&d, &hold, &sdp, offer, relay_only).await })
     }
 
     #[cfg(not(windows))]
-    async fn open_peer(&self, _d: &Arc<Daemon>, _hold: &Arc<Hold>, _sdp: &str, _offer: u64) -> Result<Value, Refused> {
+    async fn open_peer(&self, _d: &Arc<Daemon>, _hold: &Arc<Hold>, _sdp: &str, _offer: u64, _relay_only: bool) -> Result<Value, Refused> {
         Err(refused("no_p2p_here", "This computer cannot send its screen peer to peer."))
     }
 
     #[cfg(windows)]
-    async fn open_peer(&self, d: &Arc<Daemon>, hold: &Arc<Hold>, sdp: &str, offer: u64) -> Result<Value, Refused> {
+    async fn open_peer(&self, d: &Arc<Daemon>, hold: &Arc<Hold>, sdp: &str, offer: u64, relay_only: bool) -> Result<Value, Refused> {
         let mut cfg = kelpie_rtc::peer::Config::default();
         // Offline test runs ask no STUN server.
         if std::env::var("KELPIE_RTC_STUN").is_ok_and(|v| v == "off") {
@@ -110,7 +145,7 @@ impl Broker {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let (candidates, candidates_rx) = mpsc::unbounded_channel();
         let stop = Arc::new(Notify::new());
-        let side = Side { id, media: peer.media.clone(), cursor: peer.cursor.clone(), candidates, candidates_left: MAX_CANDIDATES, stop: stop.clone() };
+        let side = Side { id, media: peer.media.clone(), cursor: peer.cursor.clone(), candidates, candidates_left: MAX_CANDIDATES, relay_only, stop: stop.clone() };
         let replaced = {
             let mut st = hold.state.lock();
             if !hold.live() {
@@ -126,6 +161,126 @@ impl Broker {
         tracing::info!(sc = %hold.sc, "screen: peer to peer offered");
         tokio::spawn(pump(d.clone(), hold.clone(), peer, id, nonce.clone(), stop, candidates_rx));
         Ok(json!({"type": "ack", "result": "ok", "sdp": answer, "nonce": nonce, "ice_servers": ice_servers()}))
+    }
+
+    /// `sc_rtc_servers`: the ICE servers for the phone's next offer, STUN and, for a screen through the relay with TURN allowed and left in its
+    /// allowances, TURN's short-lived credentials (minted at the relay, or the screen's own while they last). Answered `{ice_servers, turn}`,
+    /// `turn` being null or why there is none; the caller may await it elsewhere (a mint is a request to the relay).
+    pub fn rtc_servers_begin(&self, d: &Arc<Daemon>, phone: Phone<'_>, req: &Value) -> Result<impl std::future::Future<Output = Result<Value, Refused>> + Send + 'static, Refused> {
+        let hold = self.held_here(&phone, req)?;
+        let d = d.clone();
+        Ok(async move {
+            let answer = |servers: Value, why: Option<&str>| json!({"type": "ack", "result": "ok", "ice_servers": servers, "turn": why});
+            if let Some(why) = d.screen.turn_why(&d, &hold) {
+                return Ok(answer(ice_servers(), Some(why)));
+            }
+            if let Some(m) = hold.state.lock().turn.clone().filter(|m| m.expires > now_millis() + RENEW_BEFORE_MS) {
+                return Ok(answer(with_turn(&m), None));
+            }
+            let dd = d.clone();
+            let minted = tokio::task::spawn_blocking(move || dd.mobile.mint_turn()).await.map_err(|_| refused("not_kept", "That did not finish."))?;
+            match minted {
+                Ok(m) => {
+                    let servers = with_turn(&m);
+                    {
+                        let mut st = hold.state.lock();
+                        // The screen ended or spent its allowance while the relay answered: that credential ends now, unused.
+                        if !hold.live() || st.turn_capped {
+                            drop(st);
+                            revoke_later(&d, m.username);
+                            return Ok(answer(ice_servers(), Some("turn_budget_spent")));
+                        }
+                        // The one it replaces may still be in a peer's use: it ends on its own (the screen's end revokes the newest).
+                        st.turn = Some(m);
+                    }
+                    Ok(answer(servers, None))
+                }
+                Err(why) => Ok(answer(ice_servers(), Some(why.code()))),
+            }
+        })
+    }
+
+    /// Why this screen gets no TURN now: not through the relay, the way turned off, or an allowance spent.
+    fn turn_why(&self, d: &Daemon, hold: &Hold) -> Option<&'static str> {
+        if !hold.relay {
+            return Some("no_turn_direct");
+        }
+        if d.mobile.screen_way(&hold.device, hold.browser, hold.relay, Via::Turn).is_err() {
+            return Some("method_off");
+        }
+        if hold.state.lock().turn_capped || d.mobile.turn_spent() {
+            return Some("turn_budget_spent");
+        }
+        None
+    }
+
+    /// The hold's task, at each look: what went through TURN is counted, a credential near its end renewed (and the phone given it), and past
+    /// an allowance the credential ends and the picture goes back to the link (or the screen ends). True when the screen ended.
+    pub(super) fn turn_look(&self, d: &Arc<Daemon>, hold: &Arc<Hold>) -> bool {
+        let (bytes, on_turn, session, renew) = {
+            let mut st = hold.state.lock();
+            let renew = st.turn_path == Some(true) && !st.turn_renewing && st.turn.as_ref().is_some_and(|m| m.expires <= now_millis() + RENEW_BEFORE_MS);
+            if renew {
+                st.turn_renewing = true;
+            }
+            (std::mem::take(&mut st.turn_unsaved), st.on_p2p && st.turn_path == Some(true), st.turn_bytes, renew)
+        };
+        if bytes > 0 {
+            d.mobile.count_turn(bytes);
+        }
+        if on_turn && (session >= turn_session_cap(d) || d.mobile.turn_spent()) {
+            return self.turn_cap(d, hold);
+        }
+        if renew {
+            let (d, hold) = (d.clone(), hold.clone());
+            tokio::spawn(async move {
+                let dd = d.clone();
+                let minted = tokio::task::spawn_blocking(move || dd.mobile.mint_turn()).await;
+                let mut st = hold.state.lock();
+                st.turn_renewing = false;
+                if let Ok(Ok(m)) = minted {
+                    // Ended or capped meanwhile: the new credential ends now, and the phone never hears of it.
+                    if !hold.live() || st.turn_capped {
+                        drop(st);
+                        return revoke_later(&d, m.username);
+                    }
+                    // The phone opens a new peer with these (the computer swaps to it once open, as after a network change): a peer's TURN
+                    // allocation is not known to take new credentials.
+                    let servers = with_turn(&m);
+                    st.turn = Some(m);
+                    if let Some(link) = st.conn.as_ref() {
+                        let _ = link.out.try_send(json!({"type": "sc_rtc_servers", "sc": hold.sc, "ice_servers": servers, "server_ts": now_millis()}).to_string());
+                    }
+                }
+            });
+        }
+        false
+    }
+
+    /// An allowance of TURN is spent: its credential ends, and the picture goes back to the link when that way may be used, else the screen
+    /// ends. True when it ended.
+    fn turn_cap(&self, d: &Arc<Daemon>, hold: &Arc<Hold>) -> bool {
+        let link_ok = d.mobile.screen_way(&hold.device, hold.browser, hold.relay, link_way(hold)).is_ok();
+        let (gone, end, turn) = {
+            let mut st = hold.state.lock();
+            st.turn_capped = true;
+            st.turn_path = None;
+            let turn = st.turn.take();
+            if !st.p2p_only && link_ok {
+                (self.to_link(d, hold, &mut st, "turn_budget_spent"), false, turn)
+            } else {
+                (st.rtc.take(), true, turn)
+            }
+        };
+        tracing::info!(sc = %hold.sc, "screen: TURN allowance reached");
+        drop(gone);
+        if let Some(turn) = turn {
+            revoke_later(d, turn.username);
+        }
+        if end {
+            self.end(d, &hold.sc, "turn_budget_spent", true);
+        }
+        end
     }
 
     /// `sc_rtc_ice`: a late candidate of the phone's, for the peer being opened (or the one in use).
@@ -220,6 +375,7 @@ impl Broker {
             st.p2p_waiting = None;
             st.ceiling = None;
             st.acked_bytes = 0;
+            st.turn_path = None;
             restart_flow(&mut st);
             self.cap(d, hold, &st);
             // A keyframe first, every tile painted again: as on a new connection. While the link is away the helper stays paused, and its
@@ -287,7 +443,11 @@ impl Broker {
     /// peer way still on, looked at again for each).
     #[cfg_attr(not(windows), allow(dead_code))]
     fn rtc_input(&self, d: &Arc<Daemon>, hold: &Hold, data: &[u8]) {
-        if !hold.live() || hold.state.lock().conn.is_none() || !d.mobile.screen_held(&hold.device, hold.browser, hold.relay, Via::P2p) {
+        let way = {
+            let st = hold.state.lock();
+            st.conn.is_some().then(|| way_now(hold, &st))
+        };
+        if !hold.live() || !way.is_some_and(|way| d.mobile.screen_held(&hold.device, hold.browser, hold.relay, way)) {
             return;
         }
         let Ok(req) = serde_json::from_slice::<Value>(data) else { return };
@@ -307,11 +467,23 @@ impl Broker {
     /// Once a second from the peer: under loss the media channel stays full, and the stream is held to a little under what the phone
     /// acknowledged (no second controller: the helper's own cap); once it drains the hold is let out a quarter every two seconds.
     #[cfg_attr(not(windows), allow(dead_code))]
-    fn rtc_stats(&self, d: &Daemon, hold: &Hold, id: u64, s: &kelpie_rtc::stats::Stats) {
+    pub(super) fn rtc_stats(&self, d: &Daemon, hold: &Hold, id: u64, s: &kelpie_rtc::stats::Stats) {
         use kelpie_screen::control::{MAX_KBPS, MIN_KBPS};
         let mut st = hold.state.lock();
         if !st.on_p2p || st.rtc.as_ref().is_none_or(|x| x.id != id) {
             return;
+        }
+        // What went through TURN: the peer's own count since its last stats, while its pair goes through TURN.
+        let total = s.bytes_tx + s.bytes_rx;
+        let delta = if st.peer_bytes.0 == id { total.saturating_sub(st.peer_bytes.1) } else { 0 };
+        st.peer_bytes = (id, total);
+        // Known once a pair is chosen.
+        if !s.remote.is_empty() {
+            st.turn_path = Some(s.path() == "turn");
+        }
+        if st.turn_path == Some(true) {
+            st.turn_bytes += delta;
+            st.turn_unsaved += delta;
         }
         let acked_kbps = (std::mem::take(&mut st.acked_bytes) * 8 / 1000).min(u64::from(MAX_KBPS)) as u32;
         let rtt = u64::from(s.rtt_ms.unwrap_or(100).max(50));
@@ -404,3 +576,9 @@ async fn pump(d: Arc<Daemon>, hold: Arc<Hold>, mut peer: kelpie_rtc::peer::Peer,
     }
 }
 
+
+/// One screen's TURN allowance (bytes): `KELPIE_TURN_TEST_CAP_KB` in a debug build or an e2e run, so a test reaches it in seconds.
+fn turn_session_cap(d: &Daemon) -> u64 {
+    let test = (cfg!(debug_assertions) || std::env::var("KELPIE_E2E").is_ok_and(|v| v == "1")).then(|| std::env::var("KELPIE_TURN_TEST_CAP_KB").ok()?.parse::<u64>().ok()).flatten();
+    test.map_or(u64::from(d.mobile.screen_options().turn_session_mb) * 1024 * 1024, |kb| kb * 1024)
+}

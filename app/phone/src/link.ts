@@ -195,7 +195,7 @@ export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with.
    *  `prefs` with a `push_prefs`: the choices the computer keeps. `ready`, `projects`, `agents` and `why` with a `new_options`; `id` with a `new_session` (the session
    *  started), `dup` when that start was asked for before. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean; sdp?: string; nonce?: string; ice_servers?: RTCIceServer[] }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean; sdp?: string; nonce?: string; ice_servers?: RTCIceServer[]; turn?: string | null }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -834,8 +834,12 @@ export class Link {
 
   // The screen peer to peer (screen-rtc.ts): the offer and its answer, late candidates, and the way from now on.
 
-  scRtcOffer(sc: string, sdp: string) {
-    return this.request({ type: "sc_rtc_offer", sc, sdp }, { write: false });
+  scRtcOffer(sc: string, sdp: string, relayOnly = false) {
+    return this.request({ type: "sc_rtc_offer", sc, sdp, ...(relayOnly ? { relay_only: true } : {}) }, { write: false });
+  }
+
+  scRtcServers(sc: string, relayOnly = false) {
+    return this.request({ type: "sc_rtc_servers", sc, ...(relayOnly ? { relay_only: true } : {}) }, { write: false });
   }
 
   scRtcIce(sc: string, cand: string) {
@@ -1307,6 +1311,7 @@ export class Link {
       case "sc_stats":
       case "sc_fhb":
       case "sc_path":
+      case "sc_rtc_servers":
       case "sc_end":
         this.h.screen?.(m);
         if (m.type !== "sc_end") return;
@@ -1390,7 +1395,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers, turn: m.turn });
     }
     this.h.changed();
     return true;

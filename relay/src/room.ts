@@ -22,6 +22,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { decodeBase64Url, hex } from "./encoding";
+import { revokeStatement, TURN_MINTS_PER_HOUR, TURN_MINTS_PER_ROOM_DAY, turnStatement } from "./turn";
 
 interface RoomEnv {
   RELAY_VERSION?: string;
@@ -108,11 +109,36 @@ export class Room extends DurableObject<RoomEnv> {
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
 
+  /** Whether the room's desktop may mint (`turn`) or revoke a TURN credential now: its signature over this request, a `ts` within 5 minutes
+   *  and above the last one used for TURN (its sockets keep their own), a phone allowed in to use it, and the room's limits. A mint admitted
+   *  is counted. */
+  async turnAdmit(kind: "turn" | "revoke", ts: number, sig: string, username = "", openRooms = false): Promise<"ok" | "stale" | "bad" | "no_phones" | "limit" | "gone" | "not_offered"> {
+    const pk = await this.ctx.storage.get<string>("pk");
+    const room = await this.ctx.storage.get<string>("room");
+    if (!pk || !room) return "gone";
+    const now = Date.now();
+    const lastTurnTs = (await this.ctx.storage.get<number>("lastTurnTs")) ?? 0;
+    if (!Number.isSafeInteger(ts) || Math.abs(now - ts) > CLOCK_SKEW_MS || ts <= lastTurnTs) return "stale";
+    const statement = kind === "turn" ? turnStatement(room, ts) : revokeStatement(room, ts, username);
+    if (!(await verifySigned(pk, statement, sig))) return "bad";
+    if (ts <= ((await this.ctx.storage.get<number>("lastTurnTs")) ?? 0)) return "stale";
+    await this.ctx.storage.put("lastTurnTs", ts);
+    if (kind === "revoke") return "ok";
+    // A room anyone could make (open registration, or from before rooms said) gets TURN only where the operator allows it.
+    if (!openRooms && !(await this.ctx.storage.get<boolean>("keyed"))) return "not_offered";
+    if (!((await this.ctx.storage.get<string[]>("allow")) ?? []).length) return "no_phones";
+    const day = ((await this.ctx.storage.get<number[]>("turnMints")) ?? []).filter((at) => now - at < 24 * 3600 * 1000);
+    if (day.length >= TURN_MINTS_PER_ROOM_DAY || day.filter((at) => now - at < 3600 * 1000).length >= TURN_MINTS_PER_HOUR) return "limit";
+    await this.ctx.storage.put("turnMints", [...day, now]);
+    return "ok";
+  }
+
   /** Called once by the router when the room is registered. */
-  async init(room: string, pk: string): Promise<void> {
+  async init(room: string, pk: string, keyed = false): Promise<void> {
     if (await this.ctx.storage.get("pk")) throw new Error("room exists");
     const now = Date.now();
-    await this.ctx.storage.put({ room, pk, lastUsed: now, lastTs: 0, allow: [], pair: [] });
+    // `keyed`: made with the registration key, so by someone the operator gave it to (TURN may be minted for such a room alone).
+    await this.ctx.storage.put({ room, pk, lastUsed: now, lastTs: 0, allow: [], pair: [], keyed });
     await this.ctx.storage.setAlarm(now + ROOM_TTL_MS);
   }
 
@@ -510,10 +536,15 @@ export function desktopStatement(room: string, ts: number): string {
 }
 
 export async function verifyDesktop(pk: string, room: string, ts: number, sig: string): Promise<boolean> {
+  return verifySigned(pk, desktopStatement(room, ts), sig);
+}
+
+/** The room key's ECDSA P-256 signature (IEEE P1363, base64url) over `statement`. */
+export async function verifySigned(pk: string, statement: string, sig: string): Promise<boolean> {
   if (!/^[A-Za-z0-9_-]{86}$/.test(sig)) return false;
   try {
     const key = await crypto.subtle.importKey("raw", decodeBase64Url(pk), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-    return await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, decodeBase64Url(sig), new TextEncoder().encode(desktopStatement(room, ts)));
+    return await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, decodeBase64Url(sig), new TextEncoder().encode(statement));
   } catch {
     return false;
   }

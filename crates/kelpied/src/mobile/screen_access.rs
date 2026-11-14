@@ -19,6 +19,8 @@ const SAVE_USE_EVERY: Duration = Duration::from_secs(60);
 /// allowance is 2 GB, and the link itself needs the rest.
 const MAX_RELAY_WS_KBPS: u32 = 500;
 const MAX_RELAY_WS_MONTH_MB: u32 = 1024;
+/// TURN's caps, each at most this (MB): 100 GB, a tenth of what Cloudflare carries free in a month.
+const MAX_TURN_MB: u32 = 100 * 1024;
 
 #[derive(Default)]
 pub struct ScreenMemory {
@@ -29,6 +31,11 @@ pub struct ScreenMemory {
     doubted: AtomicBool,
     /// When the month's use was last saved.
     saved_at: Mutex<Option<Instant>>,
+    /// The last mint of TURN credentials that failed, and why (`turn::Mobile::turn_refused`).
+    pub(super) turn_failed: Mutex<Option<(Instant, super::turn::Refusal)>>,
+    /// Held across each TURN request to the relay: its `ts` is taken under it, so requests reach the relay in the order of their `ts` (the
+    /// room takes only a later one).
+    pub(super) turn_requests: Mutex<()>,
 }
 
 /// This computer's month, as the use is counted (local time).
@@ -78,6 +85,9 @@ impl Mobile {
         };
         next.relay_ws_kbps = number("relay_ws_kbps", 150, MAX_RELAY_WS_KBPS)?.unwrap_or(next.relay_ws_kbps);
         next.relay_ws_month_mb = number("relay_ws_month_mb", 64, MAX_RELAY_WS_MONTH_MB)?.unwrap_or(next.relay_ws_month_mb);
+        next.turn_session_mb = number("turn_session_mb", 16, MAX_TURN_MB)?.unwrap_or(next.turn_session_mb);
+        next.turn_day_mb = number("turn_day_mb", 16, MAX_TURN_MB)?.unwrap_or(next.turn_day_mb);
+        next.turn_month_mb = number("turn_month_mb", 16, MAX_TURN_MB)?.unwrap_or(next.turn_month_mb);
         Ok(next)
     }
 
@@ -85,8 +95,9 @@ impl Mobile {
     /// (`screen_held`), and a phone of the hosted app goes back to typing: only a new grant, verified on the desktop, gives it control again.
     pub fn set_screen(&self, mut next: ScreenOptions) -> Result<Value> {
         let key = self.mac_key(true)?.ok_or_else(|| anyhow!("the credential store did not keep the device key"))?;
-        // Set by this build, which offers peer to peer: its way is the person's choice from now on.
+        // Set by this build, which offers peer to peer and TURN: those ways and TURN's caps are the person's choice from now on.
         next.p2p_chosen = true;
+        next.turn_chosen = true;
         store::seal_screen(&mut next, &key);
         let was = self.screen_options();
         let lock_on = self.lock_options().on;
@@ -121,7 +132,7 @@ impl Mobile {
         self.audit.add(
             "-",
             "setting",
-            &format!("screen without Tailscale: {} (was {}); ways: tailscale {}, p2p {}, relay turn {}, relay websocket {}; relay websocket {} kbps, {} MB a month", next.remote, was.remote, m.tailscale, m.p2p, m.relay_turn, m.relay_ws, next.relay_ws_kbps, next.relay_ws_month_mb),
+            &format!("screen without Tailscale: {} (was {}); ways: tailscale {}, p2p {}, relay turn {}, relay websocket {}; relay websocket {} kbps, {} MB a month; TURN {} MB a screen, {} MB a day, {} MB a month", next.remote, was.remote, m.tailscale, m.p2p, m.relay_turn, m.relay_ws, next.relay_ws_kbps, next.relay_ws_month_mb, next.turn_session_mb, next.turn_day_mb, next.turn_month_mb),
         );
         for event in lowered {
             self.audit.add(&event.id, "permission", &format!("{} now write: the screen without Tailscale was turned off", event.name));
@@ -140,6 +151,12 @@ impl Mobile {
             "relay_ws_kbps": o.relay_ws_kbps,
             "relay_ws_month_mb": o.relay_ws_month_mb,
             "relay_ws_used_mb": self.relay_screen_used() / (1024 * 1024),
+            "turn_session_mb": o.turn_session_mb,
+            "turn_day_mb": o.turn_day_mb,
+            "turn_month_mb": o.turn_month_mb,
+            "turn_used_day_mb": self.turn_used().0 / (1024 * 1024),
+            "turn_used_month_mb": self.turn_used().1 / (1024 * 1024),
+            "turn": self.turn_refused().map(|r| r.code()),
             "doubted": self.screen_memory.doubted.load(Ordering::SeqCst),
         })
     }
@@ -166,6 +183,11 @@ impl Mobile {
             }
             used.bytes = used.bytes.saturating_add(bytes);
         }
+        self.save_screen_use_soon();
+    }
+
+    /// Saves the screen's use (the relay WebSocket's and TURN's) if it was not saved in the last minute.
+    pub(super) fn save_screen_use_soon(&self) {
         let due = self.screen_memory.saved_at.lock().is_none_or(|at| at.elapsed() >= SAVE_USE_EVERY);
         if due {
             self.save_relay_screen_use();
@@ -241,9 +263,9 @@ impl Mobile {
         let opts = self.screen_options();
         // Everything but the passkey first: no Face ID is asked for what would be refused anyway, nor once the month's allowance is spent.
         let way = screen_policy::may_start(&facts, &opts, via, Uv::Fresh).map_err(refusal)?;
-        // Automatic through the relay with its WebSocket off goes peer to peer only: a phone that cannot (an older page, a browser without
+        // Automatic through the relay with its WebSocket off goes peer to peer (or TURN) only: a phone that cannot (an older page, a browser without
         // WebRTC) would wait for a picture that never comes.
-        if via == Via::Auto && way == Via::P2p && !can_p2p {
+        if via == Via::Auto && matches!(way, Via::P2p | Via::Turn) && !can_p2p {
             return Err(("method_off", "Through the relay this computer sends the screen only peer to peer, which this phone cannot do. Turn on the relay WebSocket in Kelpie → Settings → Mobile → Advanced.".to_string()));
         }
         if facts.relay && !facts.native {
@@ -282,7 +304,15 @@ impl Mobile {
         let relay_why = if self.relay_url().is_none() && !relay { Some("relay_off") } else { none.or_else(|| check(Via::Relay)) };
         // Peer to peer: only where this computer has it (the phone adds its own reason when its browser has no WebRTC).
         let p2p_why = if cfg!(windows) { none.or_else(|| check(Via::P2p)) } else { Some("no_p2p_here") };
-        json!([row("auto", none.or_else(|| check(Via::Auto))), row("tailscale", none.or_else(|| check(Via::Tailscale))), row("p2p", p2p_why), row("relay", relay_why)])
+        // TURN through the relay: as peer to peer, with the relay on, its last mint not refused, and its allowances left.
+        let turn_why = if !cfg!(windows) {
+            Some("no_p2p_here")
+        } else if self.relay_url().is_none() && !relay {
+            Some("relay_off")
+        } else {
+            none.or_else(|| check(Via::Turn)).or_else(|| self.turn_refused().map(|r| r.code())).or_else(|| self.turn_spent().then_some("turn_budget_spent"))
+        };
+        json!([row("auto", none.or_else(|| check(Via::Auto))), row("tailscale", none.or_else(|| check(Via::Tailscale))), row("p2p", p2p_why), row("relay_turn", turn_why), row("relay", relay_why)])
     }
 
     /// The relay's address, when it is on (`wss://host[:port]`).

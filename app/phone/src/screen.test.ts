@@ -45,7 +45,7 @@ import {
   type ScreenState,
 } from "./screen";
 import { pathRows, type ViaId } from "./screen-paths";
-import type { PeerEvents } from "./screen-rtc";
+import type { PeerEvents, PeerSetup } from "./screen-rtc";
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 
@@ -262,6 +262,8 @@ interface RigOptions {
   proof?: Record<string, unknown> | null;
   /** This browser has WebRTC (the session may open peers). */
   webrtc?: boolean;
+  /** The computer's answer to `sc_rtc_servers` (undefined: a computer from before TURN). */
+  servers?: Reply;
 }
 
 /** A peer as the session sees it: what it sent on "i", whether it was started or closed, and its events to fire. */
@@ -270,6 +272,7 @@ interface FakePeer {
   sent: object[];
   started: boolean;
   closed: boolean;
+  setup: PeerSetup;
   /** "i" takes messages. */
   open: boolean;
   ev: PeerEvents;
@@ -292,12 +295,13 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
   const remembered: ViaId[] = [];
   const proofs: string[] = [];
   const peers: FakePeer[] = [];
+  const serverAsks: boolean[] = [];
   const vias: ViaId[] = [];
   const delivered: Uint8Array[] = [];
   const port: ScreenPort = {
     webrtc: () => opts.webrtc ?? false,
-    peer: (sc, ev) => {
-      const p: FakePeer = { sc, sent: [], started: false, closed: false, open: false, ev };
+    peer: (sc, ev, setup) => {
+      const p: FakePeer = { sc, sent: [], started: false, closed: false, open: false, ev, setup };
       peers.push(p);
       return {
         start: async () => void (p.started = true),
@@ -305,6 +309,10 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
         stats: async () => ({ path: "p2p", local: "host", remote: "prflx", relayProtocol: null, rttMs: 12, bytesReceived: 1 }),
         close: () => void (p.closed = true),
       };
+    },
+    servers: (_sc, relayOnly) => {
+      serverAsks.push(relayOnly);
+      return opts.servers ? Promise.resolve(opts.servers) : null;
     },
     via: async (_sc, via) => {
       vias.push(via);
@@ -364,7 +372,7 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     now = end;
   };
   const s = new ScreenSession(port, (x) => states.push(x));
-  return { s, sent, acks, keyframes, resumed, texts, states, stopped, kicks, sharpened, starts, remembered, proofs, peers, vias, delivered, advance, now: () => now };
+  return { s, sent, acks, keyframes, resumed, texts, states, stopped, kicks, sharpened, starts, remembered, proofs, peers, vias, delivered, serverAsks, advance, now: () => now };
 }
 
 describe("one screen from the phone", () => {
@@ -946,3 +954,80 @@ describe("the screen peer to peer", () => {
 function pathRowsOf(s: ScreenSession) {
   return pathRows(s.state?.paths, s.state?.relay, s.side(s.state?.p2pFailed ?? false), (x) => x).find((r) => r.id === "p2p");
 }
+describe("the screen through the relay's TURN", () => {
+  const paths = [{ id: "auto", ok: true }, { id: "p2p", ok: true }, { id: "relay_turn", ok: true }, { id: "relay", ok: true }] as const;
+  const targets: Reply = { t: "ack", targets: [{ id: "w:1:2", kind: "window", title: "Code", app: "Code.exe", shortcut: "ide", w: 100, h: 100, minimized: false, primary: false }], paths: [...paths], relay: { ours: true, host: "relay.example" } };
+  const TURN = [{ urls: "stun:stun.cloudflare.com:3478" }, { urls: ["turn:turn.example:3478?transport=udp"], username: "u", credential: "c" }];
+  const on = (via: string, servers?: Reply) => rig({ targets, start: { t: "ack", result: "ok", sc: "sc1", title: "Code", kind: "window", via } }, { route: "relay", hosted: true, webrtc: true, servers });
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("Automatic asks the computer for its servers first and makes the peer with them, TURN's included", async () => {
+    const r = on("relay", { t: "ack", ice_servers: TURN, turn: null });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    await flush();
+    expect(r.serverAsks).toEqual([false]);
+    expect(r.peers[0].setup).toEqual({ servers: TURN, relayOnly: false });
+  });
+
+  it("the relay's TURN chosen opens a peer through TURN alone, and none when the computer has no TURN to give", async () => {
+    const r = on("relay", { t: "ack", ice_servers: TURN, turn: null });
+    await r.s.openPicker();
+    r.s.choosePath("relay_turn");
+    await r.s.pick("w:1:2");
+    await flush();
+    expect(r.starts[0].via).toBe("relay_turn");
+    expect(r.peers[0].setup.relayOnly).toBe(true);
+    const none = on("relay", { t: "ack", ice_servers: [{ urls: "stun:x" }], turn: "turn_not_configured" });
+    await none.s.openPicker();
+    none.s.choosePath("relay_turn");
+    await none.s.pick("w:1:2");
+    await flush();
+    expect(none.peers).toHaveLength(0);
+    expect(none.s.state?.message).toMatch(/TURN is not available now/);
+  });
+
+  it("renewed credentials open a new peer of the same kind with them, without asking again", async () => {
+    const r = on("relay", { t: "ack", ice_servers: TURN, turn: null });
+    await r.s.openPicker();
+    r.s.choosePath("relay_turn");
+    await r.s.pick("w:1:2");
+    await flush();
+    r.s.onMessage({ type: "sc_path", sc: "sc1", path: "p2p", state: "live" });
+    const renewed = [{ urls: ["turn:turn.example:3478"], username: "u2", credential: "c2" }];
+    r.s.onMessage({ type: "sc_rtc_servers", sc: "sc1", ice_servers: renewed });
+    await flush();
+    expect(r.peers).toHaveLength(2);
+    expect(r.peers[1].setup).toEqual({ servers: renewed, relayOnly: true });
+    expect(r.serverAsks, "the servers came with the message").toEqual([true]);
+    expect(r.peers[0].closed, "the one in use stays until the computer swaps").toBe(false);
+  });
+
+  it("Automatic through the relay with peer to peer not usable goes through TURN, and a computer that started TURN only gets its peer", async () => {
+    const noP2p = rig({ targets: { ...targets, paths: [{ id: "auto", ok: true }, { id: "p2p", ok: false, why: "method_off" }, { id: "relay_turn", ok: true }, { id: "relay", ok: true }] }, start: { t: "ack", result: "ok", sc: "sc1", title: "Code", kind: "window", via: "relay" } }, { route: "relay", hosted: true, webrtc: true, servers: { t: "ack", ice_servers: TURN, turn: null } });
+    await noP2p.s.openPicker();
+    await noP2p.s.pick("w:1:2");
+    await flush();
+    expect(noP2p.peers[0]?.setup.relayOnly).toBe(true);
+    const turnOnly = on("relay_turn", { t: "ack", ice_servers: TURN, turn: null });
+    await turnOnly.s.openPicker();
+    await turnOnly.s.pick("w:1:2");
+    await flush();
+    expect(turnOnly.peers[0]?.setup.relayOnly, "the computer waits for a TURN peer: Automatic opens it").toBe(true);
+  });
+
+  it("a computer from before TURN gives no servers: Automatic uses STUN, and TURN alone opens nothing", async () => {
+    const r = on("relay");
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.peers[0].setup.relayOnly).toBe(false);
+    expect(r.peers[0].setup.servers[0].urls).toMatch(/^stun:/);
+  });
+
+  it("the row names the relay, and the details say what went through TURN", () => {
+    const row = pathRows([{ id: "relay_turn", ok: false, why: "turn_budget_spent" }], { ours: true, host: "r" }, { hosted: true, webrtc: true }, (x, v) => (v ? x.replace("{relay}", String(v.relay)) : x))[0];
+    expect(row).toMatchObject({ label: "Kelpie's relay (TURN)", ok: false });
+    expect(row.why).toMatch(/TURN allowance is used up/);
+    expect(detailsText({ kbps: 300, turn_mb: 120 }, null, null, (x, v) => (v ? x.replace(/\{(\w+)\}/g, (_m, k: string) => String(v[k])) : x), null, { path: "turn", local: "relay", remote: "srflx", relayProtocol: "udp", rttMs: 80, bytesReceived: 0 })).toBe("TURN · 80 ms round trip · 300 kbps · 120 MB through TURN");
+  });
+});

@@ -137,6 +137,14 @@ export function screenReasonText(code: string, t: Translate): string | null {
       return t("A direct connection did not work from this network a moment ago.");
     case "no_p2p_here":
       return t("This computer cannot send its screen peer to peer.");
+    case "turn_not_configured":
+      return t("This relay offers no TURN.");
+    case "turn_full":
+      return t("The relay's TURN is used up for now. Try again later.");
+    case "turn_budget_spent":
+      return t("This computer's TURN allowance is used up (Kelpie → Settings → Mobile → Advanced).");
+    case "turn_failed":
+      return t("The relay did not give TURN credentials a moment ago.");
     default:
       return null;
   }

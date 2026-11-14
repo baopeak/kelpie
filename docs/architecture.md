@@ -977,6 +977,19 @@ helper's `Bandwidth::set_cap`); under loss, while `"m"` stays at its 256 KiB bud
 the phone acknowledged, let out a quarter every two clear seconds. Each side sees the other's IP addresses. `KELPIE_RTC_TEST_IMPAIR` (or the file
 `KELPIE_RTC_TEST_IMPAIR_FILE` names) loses, delays and slows the peer's packets in a debug build or an e2e run only; `KELPIE_RTC_STUN=off` skips STUN.
 
+**TURN** (API 43, `mobile/turn.rs`, `relay/src/turn.ts`): for a screen through the relay, the phone asks `sc_rtc_servers` before its offer and the
+daemon mints short-lived credentials at its relay (`POST /v1/turn`, signed with the room key; Cloudflare's TURN or coturn's, 20 minutes; the
+API token never leaves the Worker), cached per screen and renewed (pushed as `sc_rtc_servers`) five minutes before they end while the pair goes
+through TURN; the phone's ICE then chooses direct or TURN (`relay_turn`: TURN alone, `iceTransportPolicy: "relay"`). The computer needs no TURN
+client: Cloudflare relays to its host or server-reflexive candidate. The pair goes through TURN when its remote candidate is one the phone named
+`relay` (`kelpie_rtc::stats::Kinds`): its bytes then count against the screen's, the UTC day's and the month's caps (`ScreenOptions.turn_*_mb`,
+sealed; use in `screen_turn_day` / `screen_turn_month`), and past one the credential is revoked and the picture goes back to the link, or the
+screen ends (`turn_budget_spent`). A refused mint keeps the way off for a while: the relay's own answer (`turn_not_configured`, `turn_full`) 10 minutes, a failure (`turn_failed`) one.
+A peer offered through TURN alone is held to TURN's rule until its first stats say which pair it took, then by that pair. Limits at
+the relay: a room made with the registration key (or `TURN_OPEN_ROOMS`), a phone on its allow-list, 10 mints an hour and 40 a day per room,
+`TURN_MINTS_PER_NETWORK_DAY` and `TURN_MINTS_PER_DAY` a day; port-53 URLs left out. TURN requests are sent one at a time (the room takes only a later
+`ts`). Renewed credentials go to a new peer, never `setConfiguration` (a live TURN allocation is not known to take new ones).
+
 A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29, Windows; macOS later). The same rules as a
 pane's takeover over a direct link (Tailscale or this computer's HTTPS address), the grant on the desktop with the person's verification
 as the only confirmation, the lock and a revoke ending it at once. The video goes **over the phone's end-to-end encrypted link**, or peer to peer (above,

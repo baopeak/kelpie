@@ -29,13 +29,15 @@ pub struct Facts {
 }
 
 /// The way a screen goes, as asked (`auto` picks). `Tailscale` is the link when it is direct, `Relay` the link through the relay's WebSocket,
-/// `P2p` WebRTC data channels straight between the phone and this computer (the link carries only their setup).
+/// `P2p` WebRTC data channels straight between the phone and this computer (the link carries only their setup), `Turn` the same through the relay's
+/// TURN server (for a screen whose phone cannot reach this computer directly).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Via {
     Auto,
     Tailscale,
     Relay,
     P2p,
+    Turn,
 }
 
 impl Via {
@@ -45,6 +47,7 @@ impl Via {
             "tailscale" => Some(Via::Tailscale),
             "relay" => Some(Via::Relay),
             "p2p" => Some(Via::P2p),
+            "relay_turn" => Some(Via::Turn),
             _ => None,
         }
     }
@@ -55,13 +58,14 @@ impl Via {
             Via::Tailscale => "tailscale",
             Via::Relay => "relay",
             Via::P2p => "p2p",
+            Via::Turn => "relay_turn",
         }
     }
 }
 
-/// Whether any way that is not the direct link is turned on: the relay's WebSocket, or peer to peer.
+/// Whether any way that is not the direct link is turned on: the relay's WebSocket, peer to peer, or the relay's TURN.
 fn any_remote(opts: &ScreenOptions) -> bool {
-    opts.methods.relay_ws || opts.methods.p2p
+    opts.methods.relay_ws || opts.methods.p2p || opts.methods.relay_turn
 }
 
 /// Whether the way `way` itself is turned on, where it has a switch: a direct link's screen is never ended by its switch (it is the way
@@ -70,6 +74,7 @@ fn way_on(f: &Facts, opts: &ScreenOptions, way: Via) -> bool {
     match way {
         Via::Relay => f.native || opts.methods.relay_ws,
         Via::P2p => opts.methods.p2p,
+        Via::Turn => opts.methods.relay_turn,
         Via::Auto | Via::Tailscale => true,
     }
 }
@@ -186,17 +191,19 @@ pub fn allowed(f: &Facts, opts: &ScreenOptions) -> Result<(), Reason> {
 }
 
 /// Whether a new screen may start now, over `via` (`auto`: this connection's own way: through the relay its WebSocket when that is on, else
-/// peer to peer), and the way it then goes. A screen through the relay's connection needs a fresh Face ID whichever way its picture takes.
+/// peer to peer, else TURN), and the way it then goes. A screen through the relay's connection needs a fresh Face ID whichever way its picture
+/// takes.
 pub fn may_start(f: &Facts, opts: &ScreenOptions, via: Via, uv: Uv) -> Result<Via, Reason> {
     let way = match via {
         Via::Auto if f.relay && !f.native && !opts.methods.relay_ws && opts.methods.p2p => Via::P2p,
+        Via::Auto if f.relay && !f.native && !opts.methods.relay_ws && opts.methods.relay_turn => Via::Turn,
         Via::Auto if f.relay => Via::Relay,
         Via::Auto => Via::Tailscale,
         Via::Tailscale if f.relay => return Err(Reason::NoDirectLink),
-        Via::Relay if !f.relay => return Err(Reason::NotOnRelay),
+        Via::Relay | Via::Turn if !f.relay => return Err(Reason::NotOnRelay),
         v => v,
     };
-    if (way == Via::Tailscale && !opts.methods.tailscale && !f.native) || (way == Via::P2p && !opts.methods.p2p) {
+    if (way == Via::Tailscale && !opts.methods.tailscale && !f.native) || (way == Via::P2p && !opts.methods.p2p) || (way == Via::Turn && !opts.methods.relay_turn) {
         return Err(Reason::MethodOff);
     }
     allowed(f, opts)?;
@@ -254,7 +261,11 @@ mod tests {
     }
 
     fn opts_p2p(remote: bool, relay_ws: bool, tailscale: bool, p2p: bool) -> ScreenOptions {
-        ScreenOptions { remote, methods: ScreenMethods { tailscale, p2p, relay_turn: true, relay_ws }, ..ScreenOptions::default() }
+        opts_all(remote, relay_ws, tailscale, p2p, false)
+    }
+
+    fn opts_all(remote: bool, relay_ws: bool, tailscale: bool, p2p: bool, relay_turn: bool) -> ScreenOptions {
+        ScreenOptions { remote, methods: ScreenMethods { tailscale, p2p, relay_turn, relay_ws }, ..ScreenOptions::default() }
     }
 
     /// Every combination of page kind, way, switch, lock, passkey, window, Face ID and allowed ways gives the rule's answer: computed here the
@@ -271,15 +282,16 @@ mod tests {
                                 for passkey in [false, true] {
                                     for window in [false, true] {
                                         for record in [Permission::Write, Permission::Control] {
-                                            for (relay_ws, tailscale, p2p) in [(true, true, true), (false, true, true), (true, false, true), (true, true, false), (false, true, false)] {
+                                            for (relay_ws, tailscale, p2p, relay_turn) in [(true, true, true, false), (false, true, true, false), (true, false, true, false), (true, true, false, false), (false, true, false, false), (false, true, false, true), (true, true, true, true), (false, false, true, true)] {
                                                 for uv in [Uv::Fresh, Uv::Missing, Uv::Stale, Uv::Replayed] {
-                                                    for via in [Via::Auto, Via::Tailscale, Via::Relay, Via::P2p] {
+                                                    for via in [Via::Auto, Via::Tailscale, Via::Relay, Via::P2p, Via::Turn] {
                                                         if native && hosted {
                                                             continue;
                                                         }
                                                         rows += 1;
                                                         let f = Facts { record, native, secure_origin, hosted, lock_on, passkey, window, relay };
-                                                        let o = opts_p2p(remote, relay_ws, tailscale, p2p);
+                                                        let o = opts_all(remote, relay_ws, tailscale, p2p, relay_turn);
+                                                        let any = relay_ws || p2p || relay_turn;
                                                         let got = may_start(&f, &o, via, uv);
                                                         let lock = if !lock_on {
                                                             Err(Reason::LockOff)
@@ -293,21 +305,22 @@ mod tests {
                                                         // Automatic through the relay: its WebSocket, or peer to peer when that alone is on.
                                                         let way = match via {
                                                             Via::Auto if relay && !native && !relay_ws && p2p => Via::P2p,
+                                                            Via::Auto if relay && !native && !relay_ws && relay_turn => Via::Turn,
                                                             Via::Auto if relay => Via::Relay,
                                                             Via::Auto => Via::Tailscale,
                                                             v => v,
                                                         };
                                                         let want = if via == Via::Tailscale && relay {
                                                             Err(Reason::NoDirectLink)
-                                                        } else if via == Via::Relay && !relay {
+                                                        } else if (via == Via::Relay || via == Via::Turn) && !relay {
                                                             Err(Reason::NotOnRelay)
-                                                        } else if (way == Via::Tailscale && !tailscale && !native) || (way == Via::P2p && !p2p) {
+                                                        } else if (way == Via::Tailscale && !tailscale && !native) || (way == Via::P2p && !p2p) || (way == Via::Turn && !relay_turn) {
                                                             Err(Reason::MethodOff)
                                                         } else if record < Permission::Control {
                                                             // A hosted page is told the step before control can be given it.
                                                             if hosted && !remote {
                                                                 Err(Reason::ScreenRemoteOff)
-                                                            } else if hosted && !relay_ws && !p2p {
+                                                            } else if hosted && !any {
                                                                 Err(Reason::MethodOff)
                                                             } else if hosted && !lock_on {
                                                                 Err(Reason::LockOff)
@@ -329,7 +342,7 @@ mod tests {
                                                             }
                                                         } else if !remote {
                                                             Err(Reason::ScreenRemoteOff)
-                                                        } else if !relay_ws && !p2p {
+                                                        } else if !any {
                                                             Err(Reason::MethodOff)
                                                         } else if !secure_origin {
                                                             Err(Reason::PlainPage)
@@ -410,6 +423,7 @@ mod tests {
         assert!(Reason::ScreenRemoteOff.message().contains("See and control the screen without Tailscale"));
         assert_eq!(Via::parse(None), Some(Via::Auto));
         assert_eq!(Via::parse(Some("p2p")), Some(Via::P2p));
-        assert_eq!(Via::parse(Some("turn")), None, "not a way this computer has yet");
+        assert_eq!(Via::parse(Some("relay_turn")), Some(Via::Turn));
+        assert_eq!(Via::parse(Some("turn")), None, "not a way this computer knows");
     }
 }

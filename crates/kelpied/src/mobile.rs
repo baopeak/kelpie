@@ -32,6 +32,7 @@ pub(crate) mod screen_policy;
 mod store;
 mod sync;
 pub mod tailscale;
+pub(crate) mod turn;
 mod verbs;
 mod webauthn;
 
@@ -2714,6 +2715,9 @@ impl Conn {
         if name == "sc_rtc_offer" {
             return self.screen_offer(granted, req, tag);
         }
+        if name == "sc_rtc_servers" {
+            return self.screen_servers(granted, req, tag);
+        }
         match self.run(granted, name, req).await {
             Ok(Some(mut reply)) => {
                 if let Some(t) = tag {
@@ -2866,6 +2870,19 @@ impl Conn {
         }
         let phone = self.screen_phone();
         match self.daemon.screen.rtc_offer_begin(&self.daemon, phone, req) {
+            Ok(answering) => self.reply_later(tag, answering),
+            Err(r) => refused(refuse(r.code, r.message)),
+        }
+    }
+
+    /// The ICE servers for the screen's next offer: TURN credentials may be minted at the relay meanwhile, so the answer comes later.
+    fn screen_servers(&self, granted: Permission, req: &Value, tag: Option<Value>) -> Option<Value> {
+        let refused = |r: Refusal| Some(json!({"type": "error", "req": tag, "code": r.code, "reason": r.reason, "message": r.message}));
+        if let Err(r) = self.screen_refused(Verb::ScRtcServers, granted) {
+            return refused(r);
+        }
+        let phone = self.screen_phone();
+        match self.daemon.screen.rtc_servers_begin(&self.daemon, phone, req) {
             Ok(answering) => self.reply_later(tag, answering),
             Err(r) => refused(refuse(r.code, r.message)),
         }
@@ -3194,7 +3211,7 @@ impl Conn {
             Verb::LockTouch => self.daemon.mobile.lock_touch(&self.device, self.resume.as_deref()),
             // Carried out by the broker above.
             Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => return Err(refuse("bad_request", "not here")),
-            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia => return Err(refuse("bad_request", "not here")),
+            Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia | Verb::ScRtcServers => return Err(refuse("bad_request", "not here")),
             Verb::ChatAnswer => {
                 let (_, chat) = self.chat(req)?;
                 let request_id = req.get("request_id").filter(|r| r.is_string() || r.is_number()).ok_or_else(|| refuse("bad_request", "missing request_id"))?;

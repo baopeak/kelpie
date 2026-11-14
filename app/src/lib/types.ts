@@ -738,6 +738,13 @@ export interface MobileScreenStatus {
   relay_ws_kbps: number;
   relay_ws_month_mb: number;
   relay_ws_used_mb: number;
+  /** TURN through the relay (API 43): the caps (MB) and what was used, and why there is none now (null: nothing in the way). */
+  turn_session_mb?: number;
+  turn_day_mb?: number;
+  turn_month_mb?: number;
+  turn_used_day_mb?: number;
+  turn_used_month_mb?: number;
+  turn?: string | null;
   doubted: boolean;
 }
 

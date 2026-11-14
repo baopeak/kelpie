@@ -1,7 +1,7 @@
 // What each option of Settings → Mobile can do now, and the page's summary, from what the daemon said (`mobile.status`, `notify.get`).
 // Pure, so that every row is tested at every daemon level. The daemon enforces all of it; this only says so ahead of time:
 // `presence` follows `LockOptions::weakened_by` and `mobile.set_tailscale`, and a change it does not mention can still be refused.
-import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { t } from "./i18n";
 import { NOTIFY_API } from "./notify-events";
 import { pushSummary, type PushState, type TelegramMode } from "./push-config";
@@ -311,13 +311,38 @@ export function screenMethodRows(f: OptionFacts): ScreenMethodRow[] {
   const disabled = blocked(f, SCREEN_REMOTE_API, !!sc, true);
   const labels: Record<ScreenMethod, string> = { tailscale: t("Tailscale"), p2p: t("Direct link (P2P)"), relay_turn: t("Relay (TURN)"), relay_ws: t("Relay WebSocket") };
   const note = (id: ScreenMethod): string | null => {
-    if (id === "relay_turn" || (id === "p2p" && f.api < SCREEN_P2P_API)) return t("Not available yet: it comes in a later update.");
+    if ((id === "relay_turn" && f.api < SCREEN_TURN_API) || (id === "p2p" && f.api < SCREEN_P2P_API)) return t("Not available yet: it comes in a later update.");
+    if (id === "relay_turn") {
+      if (sc?.turn === "turn_not_configured") return t("This relay offers no TURN, so this way is not used.");
+      return t("Through the relay's TURN server when a direct connection cannot be made. The relay's operator pays for this traffic, so it is held to the limits below.");
+    }
     if (id === "p2p") return t("Straight between the phone and this computer when both networks allow it. Each side then sees the other's network addresses.");
     if (id === "relay_ws" && !sc?.remote) return t("Counts only while seeing the screen without Tailscale is on.");
     return null;
   };
   return SCREEN_METHODS.map((id) => ({ id, label: labels[id], on: sc?.methods[id] !== false, disabled, note: note(id) }));
 }
+
+/** TURN's use and caps: `TURN: 120 MB of 3072 MB today, 900 MB of 30720 MB this month, at most 1024 MB a screen`; null from a daemon before TURN. */
+export function turnUsageLine(sc: MobileStatus["screen"]): string | null {
+  if (!sc || typeof sc.turn_month_mb !== "number") return null;
+  return t("TURN: {day} MB of {dayCap} MB today, {month} MB of {monthCap} MB this month, at most {session} MB a screen", {
+    day: Math.round(sc.turn_used_day_mb ?? 0),
+    dayCap: Math.round(sc.turn_day_mb ?? 0),
+    month: Math.round(sc.turn_used_month_mb ?? 0),
+    monthCap: Math.round(sc.turn_month_mb),
+    session: Math.round(sc.turn_session_mb ?? 0),
+  });
+}
+
+/** TURN's three caps as Settings edits them (MB), with the daemon's bounds. */
+export const TURN_CAPS = [
+  { key: "turn_session_mb", label: () => t("TURN a screen (MB)") },
+  { key: "turn_day_mb", label: () => t("TURN a day (MB)") },
+  { key: "turn_month_mb", label: () => t("TURN a month (MB)") },
+] as const;
+export const TURN_CAP_MIN = 16;
+export const TURN_CAP_MAX = 100 * 1024;
 
 /** The relay WebSocket's use this month: `120 MB of 1024 MB this month`; null from a daemon that does not count it. */
 export function screenUsageLine(sc: MobileStatus["screen"]): string | null {

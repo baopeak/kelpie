@@ -56,6 +56,8 @@ export const SCREEN_REMOTE_API = 41;
 /** Daemon API level that sends the screen peer to peer (WebRTC data channels: `p2p` in `paths`, `sc_rtc_offer`, `sc_rtc_ice`, `sc_via`, `sc_path`).
  *  Below it the phone never offers a peer to peer way. */
 export const SCREEN_P2P_API = 42;
+/** Daemon API level that gives TURN through the relay (`sc_rtc_servers`, the `relay_turn` way, TURN's caps in `mobile.status`). */
+export const SCREEN_TURN_API = 43;
 
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;

@@ -93,7 +93,7 @@ fn e2e_refuses(e2e: bool, url: &str) -> bool {
 }
 
 /// Refuses, in an e2e run of a debug build (and in unit tests), any relay that is not on this machine.
-fn e2e_guard(url: &str) -> Result<()> {
+pub(super) fn e2e_guard(url: &str) -> Result<()> {
     #[cfg(debug_assertions)]
     {
         let e2e = cfg!(test) || std::env::var_os("KELPIE_E2E").is_some();
@@ -141,7 +141,7 @@ fn token_life(hosted: bool, dormant_days: u32) -> u64 {
 
 /// How this computer asks the relay over HTTP (making a room, reading what its phone app is): no redirect, the status as the relay gave it, and in an e2e
 /// run of a debug build the test relay's own CA as the only root, as `dial()` trusts it.
-fn https_agent(timeout: Duration) -> ureq::Agent {
+pub(super) fn https_agent(timeout: Duration) -> ureq::Agent {
     let mut config = ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0);
     let roots = test_roots();
     if !roots.is_empty() {
@@ -250,7 +250,12 @@ pub fn statement(room: &str, ts: u64) -> String {
 }
 
 fn signature(key: &SigningKey, room: &str, ts: u64) -> String {
-    let sig: Signature = key.sign(statement(room, ts).as_bytes());
+    sign(key, &statement(room, ts))
+}
+
+/// The room key's signature over `text`, as the relay checks it: r || s, base64url.
+pub(super) fn sign(key: &SigningKey, text: &str) -> String {
+    let sig: Signature = key.sign(text.as_bytes());
     kelpie_link::b64(&sig.to_bytes())
 }
 
@@ -289,7 +294,7 @@ pub fn normalized_url(text: &str) -> Result<String> {
 }
 
 /// `https://` for `wss://`, `http://` for `ws://`.
-fn http_url(url: &str) -> String {
+pub(super) fn http_url(url: &str) -> String {
     match url.strip_prefix("wss://") {
         Some(rest) => format!("https://{rest}"),
         None => format!("http://{}", url.strip_prefix("ws://").unwrap_or(url)),
@@ -491,7 +496,7 @@ struct Facts {
 }
 
 impl Runtime {
-    fn next_ts(&self) -> u64 {
+    pub(super) fn next_ts(&self) -> u64 {
         let mut last = self.last_ts.lock();
         *last = now_millis().max(*last + 1);
         *last
@@ -783,7 +788,7 @@ impl Mobile {
         known.unwrap_or(false)
     }
 
-    fn room_key(&self) -> Result<Option<SigningKey>> {
+    pub(super) fn room_key(&self) -> Result<Option<SigningKey>> {
         let mut cached = self.relay.room_key.lock();
         if cached.is_none() {
             *cached = match self.secrets.read(K_ROOM).context("reading the relay room key")? {

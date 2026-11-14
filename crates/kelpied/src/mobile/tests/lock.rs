@@ -1338,6 +1338,10 @@ async fn the_screen_through_the_relay_needs_the_switch_and_a_fresh_face_id_used_
     let auto = |can: bool, proof: &Value| m.screen_may_start("phone", true, true, Via::Auto, can, "m:1", proof).map(|(way, _)| way).map_err(|(code, _)| code);
     assert_eq!(auto(false, &Value::Null), Err("method_off"), "an older page or a browser without WebRTC is told, not left waiting");
     assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 2)), Ok(Via::P2p));
+    // With peer to peer off too, Automatic goes through TURN only, under the same guard.
+    m.set_screen(store::ScreenOptions { methods: store::ScreenMethods { relay_ws: false, p2p: false, ..ws_on.methods }, ..ws_on.clone() }).unwrap();
+    assert_eq!(auto(false, &Value::Null), Err("method_off"));
+    assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 3)), Ok(Via::Turn));
     m.set_screen(ws_on).unwrap();    // The month's allowance spent: refused before any Face ID is asked for.
     m.count_relay_screen(u64::from(store::RELAY_WS_MONTH_MB) * 1024 * 1024);
     assert!(m.relay_screen_spent());
@@ -1412,6 +1416,13 @@ async fn screen_options_from_before_peer_to_peer_keep_the_relay_off() {
     let mut unchecked = store::ScreenOptions { remote: true, methods: store::ScreenMethods { p2p: false, ..store::ScreenMethods::default() }, ..store::ScreenOptions::default() };
     store::seal_screen(&mut unchecked, &key);
     assert!(!unchecked.clone().settled().methods.p2p && unchecked.clone().settled().methods.relay_ws, "a way the person unchecked is never turned on by reading it");
+    // Options the build with peer to peer but before TURN saved (the second form): they verify, and its placeholder TURN way follows the relay
+    // WebSocket's, the caps the defaults.
+    let mut second = store::ScreenOptions { remote: true, p2p_chosen: true, methods: store::ScreenMethods { relay_ws: false, ..store::ScreenMethods::default() }, turn_day_mb: 9, ..store::ScreenOptions::default() };
+    store::seal_screen(&mut second, &key);
+    assert!(store::screen_holds(&second, &key));
+    let read = second.clone().settled();
+    assert!(read.methods.p2p && !read.methods.relay_turn && read.turn_day_mb == store::TURN_DAY_MB, "{read:?}");
     // The flag is sealed: taking it away on file does not verify.
     m.config.lock().screen.as_mut().unwrap().p2p_chosen = false;
     m.check_screen_options();

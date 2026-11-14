@@ -1283,6 +1283,16 @@ in any video call). It needs a browser with WebRTC (Safari on iOS, Chrome on And
 may ask whether `kelpied` may use the network. Through the relay it still needs Face ID at the start and *See and control the screen without Tailscale*
 on; turning *Direct link (P2P)* off under *Ways the screen may connect* ends any screen going that way.
 
+**Through the relay's TURN.** Some networks (many mobile carriers, strict office networks) do not allow a direct connection. A relay that
+offers TURN can carry it instead: *Automatic* then tries the direct connection and TURN together and keeps whichever works (TURN alone when
+*Direct link (P2P)* is turned off), and *Kelpie's relay (TURN)* in *Connect through* uses TURN only. A relay gives TURN only to the rooms its
+operator allows (Kelpie's relay: once its operator turns it on). The relay gives the computer short-lived TURN credentials (20 minutes, renewed while the
+screen lasts) that reach the phone only inside the encrypted link. Because the relay's operator pays for TURN traffic (Cloudflare charges
+past its free allowance), Kelpie holds it to 1 GB a screen, 3 GB a day and 30 GB a month by default, which you can change under Settings →
+Mobile → Advanced next to this month's use; past a limit the screen goes back to the relay's own connection, or ends if that way is off.
+The line under the picture says `TURN · … · 120 MB through TURN`. A relay without TURN says *This relay offers no TURN*, and the screen
+works as before.
+
 **The relay is always in the path.** The hosted app has no direct route to this computer, even on the same Wi-Fi: every message goes
 through the relay, end-to-end encrypted, so the phone needs the internet and the relay must be up. If it is not, the app says
 *Relay unreachable* or *Computer offline*, whichever does not answer. A hosted app belongs to one computer: pairing it with another asks
@@ -1313,7 +1323,7 @@ computer's settings, bypass mode included, so that code could do that too. What 
 - **The hosted app is not told where this computer is.** Kelpie tells it only how to reach the relay, never this computer's Tailscale
   name or its addresses on your network. It does know the computer's name, which pairing gives it to label the computer. A phone whose app
   is locked, on any page, is told no more than how to reach the relay until it is unlocked.
-  The one exception is a screen that goes straight to this computer (*Direct (peer to peer)*, or *Automatic* once it moves there): the page then learns this computer's
+  The one exception is a screen that goes peer to peer (*Direct (peer to peer)*, *Automatic* once it moves there, or the relay's TURN): the page then learns this computer's
   address on its network and its public address (never its Tailscale address), as each side of any video call does.
 
 If that is more trust than you want, use the Tailscale option below: the app then comes from this computer, and Kelpie's relay serves nothing

@@ -108,6 +108,27 @@ In Kelpie, Settings → Mobile, *Reach this computer through the relay*: put `ws
 to make this computer's room, and kept in the computer's credential store for making a new room later. Under *Hosted phone app*, Settings
 says that this relay does not serve the phone app; phones are paired over Tailscale and get their relay token the next time they connect.
 
+## TURN for the screen (optional)
+
+When a phone shows the computer's screen through the relay, Kelpie first tries a direct connection between the phone and the computer
+(peer to peer). Some networks do not allow one; TURN relays that traffic instead, and your relay can hand out short-lived TURN credentials
+for it. Without TURN, such a screen simply stays on the relay's own connection.
+
+- **coturn**: run a [coturn](https://github.com/coturn/coturn) server with `use-auth-secret` and a `static-auth-secret`, then give the relay
+  the same secret and the server's URLs: `TURN_SECRET=<that secret>` and `TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp`
+  (in `/etc/kelpie-relay.env`, or the environment workerd starts with).
+- **Cloudflare's TURN** (on Cloudflare): create a TURN key under Realtime → TURN Server, then `wrangler secret put TURN_KEY_ID` and
+  `wrangler secret put TURN_API_TOKEN` (the key's API token). Cloudflare bills TURN traffic after its free allowance.
+
+The relay mints a credential (20 minutes) only for a room's own desktop, signed with its room key, and only while the room has a phone allowed
+in: at most 10 an hour and 40 a day per room, `TURN_MINTS_PER_NETWORK_DAY` (20 unless set) a day per network, and `TURN_MINTS_PER_DAY` (500
+unless set) a day for the whole relay. **Only rooms made with your registration key get TURN** unless you set `TURN_OPEN_ROOMS=1`: these limits
+count credentials, not bytes, so on a relay with open registration a stranger could make a room, pair a phone of their own and spend your
+TURN traffic. A room made before your relay had TURN counts as made without the key: make a new room in Kelpie (Settings → Mobile) to get it. Each computer also holds
+its screens to its own TURN caps (1 GB a screen, 3 GB a day, 30 GB a month by default; Settings → Mobile → Advanced). The relay cannot read
+monthly TURN traffic by itself: set a usage notification in your TURN provider's dashboard, and remove the secrets to stop minting at once.
+With no TURN secret set, `/v1/turn` answers `404 turn_not_configured` and Kelpie leaves the way out.
+
 ## Serving the phone app from your own Cloudflare account
 
 Kelpie derives the app's address from the relay's: for `wss://relay.example.com` it is `https://relay.example.com`, and it only offers

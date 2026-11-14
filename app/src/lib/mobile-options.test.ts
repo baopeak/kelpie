@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { MobileDevice, MobileStatus } from "../components/settings/mobile-settings";
 import type { RelayStatus } from "../components/settings/mobile-relay-settings";
-import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
+import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import {
   alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
-  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, permissionLabel, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, screenPolicyLine, screenRemoteShown, screenUsageLine,
+  OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, permissionLabel, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, turnUsageLine, screenPolicyLine, screenRemoteShown, screenUsageLine,
   telegramChoice, turnOnAccess, withConnection, withNewerConnections, type AccessCalls, type ConnectionNews, type MobileRoute, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
 import { NOTIFY_API } from "./notify-events";
@@ -465,6 +465,11 @@ describe("the screen without Tailscale", () => {
     expect(rows.find((r) => r.id === "relay_turn")!.note).toContain("later update");
     const p2p = screenMethodRows({ ...facts(screen({})), api: SCREEN_P2P_API }).find((r) => r.id === "p2p")!;
     expect(p2p.note).toContain("network addresses");
+    const turn = (patch: Partial<NonNullable<MobileStatus["screen"]>>) => screenMethodRows({ ...facts(screen(patch)), api: SCREEN_TURN_API }).find((r) => r.id === "relay_turn")!.note;
+    expect(turn({})).toContain("operator pays");
+    expect(turn({ turn: "turn_not_configured" })).toContain("offers no TURN");
+    expect(turnUsageLine(status({ screen: { ...status().screen!, turn_session_mb: 1024, turn_day_mb: 3072, turn_month_mb: 30720, turn_used_day_mb: 12.4, turn_used_month_mb: 900 } }).screen)).toBe("TURN: 12 MB of 3072 MB today, 900 MB of 30720 MB this month, at most 1024 MB a screen");
+    expect(turnUsageLine(status().screen), "a daemon before TURN").toBeNull();
     expect(rows.find((r) => r.id === "tailscale")!.note).toBeNull();
     expect(rows.every((r) => r.disabled === null)).toBe(true);
   });
