@@ -72,6 +72,33 @@ export function sessionDepthTree(tree: SessionTree, id: string): number {
   return depth;
 }
 
+/** The top of the tree `id` is in (`id` itself when it is not nested): the session whose tab shows the whole family. */
+export function familyRoot(tree: SessionTree, id: string): string {
+  let at = id;
+  for (let up = tree.nested.get(at), guard = 0; up && guard < 10_000; up = tree.nested.get(up), guard++) at = up;
+  return at;
+}
+
+export interface FamilyMember {
+  s: SessionInfo;
+  /** 0: the root. */
+  depth: number;
+}
+
+/** `root` and everything below it, each parent before its children (oldest first), as the sub-tabs of the root's pane. */
+export function familyOf(tree: SessionTree, root: SessionInfo): FamilyMember[] {
+  const out: FamilyMember[] = [];
+  const stack: FamilyMember[] = [{ s: root, depth: 0 }];
+  // The tree has no loops, but a bound costs nothing.
+  for (let guard = 0; stack.length && guard < 10_000; guard++) {
+    const m = stack.pop()!;
+    out.push(m);
+    const kids = childrenOfSession(tree, m.s.id);
+    for (let i = kids.length - 1; i >= 0; i--) stack.push({ s: kids[i], depth: m.depth + 1 });
+  }
+  return out;
+}
+
 /** What a parent's row shows about everything below it. */
 export type ChildState = "waiting" | "error" | "working" | "done" | "idle" | "exited";
 

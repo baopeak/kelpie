@@ -163,17 +163,17 @@ export async function newChat(projectId: string, kind: SessionKind, where: "tab"
   }
 }
 
-export async function switchToChat(project: Project, tab: Tab, pane: Pane) {
+export async function switchToChat(project: Project, _tab: Tab, pane: Pane) {
   if (switching.has(pane.id)) return;
   switching.add(pane.id);
   try {
-    await doSwitchToChat(project, tab, pane);
+    await doSwitchToChat(project, pane);
   } finally {
     switching.delete(pane.id);
   }
 }
 
-async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
+async function doSwitchToChat(project: Project, pane: Pane) {
   const s = pane.sessionId ? store.sessions[pane.sessionId] : undefined;
   if (!s || !supportsChat(s.kind)) return;
   if (s.alive && s.status === "working" && !(await confirmDialog(t("The agent is working. Interrupt it and continue in chat view?")))) return;
@@ -211,7 +211,9 @@ async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
       lineage_from: s.id,
     });
     store.setSessions(info.id, info);
-    store.replacePaneIn(project.id, tab.id, pane.id, { id: pane.id, kind: "chat", sessionId: info.id });
+    // Where the session is now: the pane may show another sub-session since (a chip clicked while the agent stopped).
+    const loc = store.paneLocation(s.id);
+    if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "chat", sessionId: info.id });
     disposeView(s.id);
     await daemon("session.close", { handle: s.handle }).catch(() => {});
   } catch (e) {
@@ -221,17 +223,17 @@ async function doSwitchToChat(project: Project, tab: Tab, pane: Pane) {
 }
 
 /** `command`: typed into the terminal UI once it is ready (a command chat view cannot run). */
-export async function switchToTerminal(project: Project, tab: Tab, pane: Pane, command?: string) {
+export async function switchToTerminal(project: Project, _tab: Tab, pane: Pane, command?: string) {
   if (switching.has(pane.id)) return;
   switching.add(pane.id);
   try {
-    await doSwitchToTerminal(project, tab, pane, command);
+    await doSwitchToTerminal(project, pane, command);
   } finally {
     switching.delete(pane.id);
   }
 }
 
-async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, command?: string) {
+async function doSwitchToTerminal(project: Project, pane: Pane, command?: string) {
   const c = pane.sessionId ? store.sessions[pane.sessionId] : undefined;
   if (!c) return;
   const ctrl = controllers.get(c.id);
@@ -264,7 +266,9 @@ async function doSwitchToTerminal(project: Project, tab: Tab, pane: Pane, comman
     const resumes = CORE_AGENTS.includes(c.kind);
     const info = await createSession({ kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: resumes ? conv ?? undefined : undefined, args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32, prompt: command, lineage_from: c.id });
     store.setSessions(info.id, info);
-    store.replacePaneIn(project.id, tab.id, pane.id, { id: pane.id, kind: "terminal", sessionId: info.id });
+    // Where the session is now: the pane may show another sub-session since (a chip clicked while the agent stopped).
+    const loc = store.paneLocation(c.id);
+    if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "terminal", sessionId: info.id });
     disposeController(c.id);
     await daemon("session.close", { handle: c.handle }).catch(() => {});
   } catch (e) {

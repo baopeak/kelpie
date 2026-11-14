@@ -4,19 +4,21 @@ import { store, sessionLabel } from "./store";
 import * as ipc from "./ipc";
 import { t } from "./i18n";
 import { confirmDialog } from "./confirm-dialog";
-import { dispatchRequest, finishedChildren, setSubPolicy, showPostponed, toSubPolicy, type SubDecision } from "./sub-sessions";
+import { dispatchRequest, familyOf, finishedChildren, setSubPolicy, showPostponed, toSubPolicy, type SubDecision } from "./sub-sessions";
 import type { SessionInfo } from "./types";
 
-/** The sub-sessions of `parent` that would be closed by *Close finished sub-sessions*. */
-export const finishedOf = (parent: SessionInfo): SessionInfo[] => {
+/** The sub-sessions of `parent` that would be closed by *Close finished sub-sessions*: its children, or with `deep` everything
+ *  below it (the strip of a family). */
+export const finishedOf = (parent: SessionInfo, deep = false): SessionInfo[] => {
   const tree = store.sessionTree();
-  return finishedChildren(tree.children.get(parent.id) ?? [], tree);
+  const below = deep ? familyOf(tree, parent).slice(1).map((m) => m.s) : (tree.children.get(parent.id) ?? []);
+  return finishedChildren(below, tree);
 };
 
 /** Closes the sub-sessions of `parent` that said they are done or exited, after a question that lists them. Their folders and
  *  worktrees stay: closing a session never removes one. Returns how many were closed. */
-export async function closeFinishedSubSessions(parent: SessionInfo): Promise<number> {
-  const finished = finishedOf(parent);
+export async function closeFinishedSubSessions(parent: SessionInfo, deep = false): Promise<number> {
+  const finished = finishedOf(parent, deep);
   if (!finished.length) {
     store.notify(t("No finished sub-sessions to close."));
     return 0;
@@ -30,7 +32,8 @@ export async function closeFinishedSubSessions(parent: SessionInfo): Promise<num
     if (!now || !finishedChildrenNow(now)) continue;
     try {
       const loc = store.paneLocation(now.id);
-      if (loc) await store.closePane(loc.projectId, loc.tabId, loc.paneId);
+      // Shown in its family's pane: the pane goes back to the session above it.
+      if (loc) await store.closePane(loc.projectId, loc.tabId, loc.paneId, true, { back: true });
       else await ipc.daemon("session.close", { handle: now.handle });
       closed++;
     } catch (e) {
