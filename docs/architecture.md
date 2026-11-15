@@ -1138,9 +1138,12 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   WebCodecs), configured in the `avc` format with an `avcC` description built from the keyframe's SPS and PPS and `optimizeForLatency`, one `decode()` per
   frame, **no smoothing buffer**: a decoded frame is drawn as the decoder gives it, on a canvas asked for `desynchronized` (a low-latency canvas where the
   browser offers one, which the page reports), and a delta is skipped up to the next keyframe only when the decoder is behind its own usual queue by more
-  than two for three deltas in a row (`Backlog`: some Android decoders always keep a few). The cursor the finger moves is drawn at once (local echo); the
-  computer's cursor messages, a round trip old, leave its position alone for 400 ms after a local move and then follow it, a difference of 3 px or less
-  taken as none; a trackpad tap clicks where the cursor is drawn (`followHostCursor`), never at an older position. The page measures each frame (`FrameTimes`: inter-arrival and inter-present p50/p95/p99, gaps
+  than two for three deltas in a row (`Backlog`: some Android decoders always keep a few). The cursor is a layer of its own over the canvas (an SVG
+  moved by its CSS transform): moving it never draws the picture again, and the finger's moves show it there at once (local echo). The computer's cursor
+  messages, a round trip old, leave its position alone for 400 ms after a local move and after that until one comes back within 3 px of where the finger
+  left it (the computer caught up; late messages would pull it back along its path), for at most 2 s (`reconcileCursor`); a difference of 3 px or less is
+  taken as none; a trackpad tap clicks where the cursor is drawn (`followHostCursor`), never at an older position. `scripts/perf/phone_cursor.py`
+  measures how the cursor follows a finger in a browser. The page measures each frame (`FrameTimes`: inter-arrival and inter-present p50/p95/p99, gaps
   over 100 and 250 ms, decoder time, receive → present, frames never shown), shown with the computer's stages in the debug view (tap the quality line) and
   read by a test driver as `__kelpieScreenTimes()`. Under the quality line a details line says the way (Tailscale, this network, the relay), the round trip,
   the rate, frames a second, the size and how old the pictures were when shown (median, from `t0` and their capture times). A picture frozen for 3 s checks

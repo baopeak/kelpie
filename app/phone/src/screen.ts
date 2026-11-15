@@ -334,9 +334,14 @@ export function coalesce(ops: ScOp[]): ScOp[] {
   return out;
 }
 
-/** After the phone moved its own cursor, the computer's cursor messages (a round trip old) leave its position alone for this long. */
+/** After the phone moved its own cursor, the computer's cursor messages (a round trip old) leave its position alone for at least this long:
+ *  while the finger moves, every message is older than the place it put the cursor. */
 export const CURSOR_ECHO_MS = 400;
-/** Past the hold, a computer position this close (source pixels) to the drawn one is taken as the same, so the cursor does not jitter. */
+/** Past that, they still leave it alone until one comes back to where the finger left the cursor (the computer caught up: older messages,
+ *  late behind the picture on the relay, would pull it back along its path), for at most this long. A place the computer never comes back to
+ *  (the mouse moved at the desk, a program moved it, an edge held it) is drawn after it. */
+export const CURSOR_CATCHUP_MS = 2000;
+/** A computer position this close (source pixels) to the drawn one is taken as the same, so the cursor does not jitter. */
 export const CURSOR_SNAP_PX = 3;
 
 export interface CursorPos {
@@ -346,19 +351,32 @@ export interface CursorPos {
   y: number;
 }
 
-/** Where to draw the cursor when the computer says where it is: the shape and visibility always follow it; the position does too, unless the
- *  phone moved the cursor itself within `CURSOR_ECHO_MS` (its own echo is newer than this message), or it is within `CURSOR_SNAP_PX`. */
-export function reconcileCursor(drawn: CursorPos, host: CursorPos, now: number, echoedAt: number): CursorPos {
-  const echoing = now - echoedAt < CURSOR_ECHO_MS;
-  const close = Math.abs(host.x - drawn.x) <= CURSOR_SNAP_PX && Math.abs(host.y - drawn.y) <= CURSOR_SNAP_PX;
-  return echoing || close ? { ...host, x: drawn.x, y: drawn.y } : host;
+/** Where the finger last put the cursor (source pixels) and when. */
+export interface CursorEcho {
+  x: number;
+  y: number;
+  at: number;
 }
 
-/** A computer cursor message, as the page takes it: the cursor drawn (`reconcileCursor`), and, with no finger down, the point a trackpad tap
- *  clicks, which is always where the cursor is drawn (never the message's own position, which a local echo may be ahead of). */
-export function followHostCursor(drawn: CursorPos, tapAt: { x: number; y: number }, host: CursorPos, now: number, echoedAt: number, idle: boolean) {
-  const next = reconcileCursor(drawn, host, now, echoedAt);
-  return { drawn: next, tapAt: idle ? { x: next.x, y: next.y } : tapAt };
+/** Where to draw the cursor when the computer says where it is, and the echo still waited for (null once the computer caught up or the wait
+ *  is over). The shape and visibility always follow the computer; the position does too, unless the finger moved the cursor within
+ *  `CURSOR_ECHO_MS`, or the computer has not come back to where the finger left it within `CURSOR_CATCHUP_MS`, or it is within `CURSOR_SNAP_PX`. */
+export function reconcileCursor(drawn: CursorPos, host: CursorPos, now: number, echo: CursorEcho | null): { drawn: CursorPos; echo: CursorEcho | null } {
+  const near = (p: { x: number; y: number }) => Math.abs(host.x - p.x) <= CURSOR_SNAP_PX && Math.abs(host.y - p.y) <= CURSOR_SNAP_PX;
+  const kept = { ...host, x: drawn.x, y: drawn.y };
+  if (echo) {
+    const since = now - echo.at;
+    if (since < CURSOR_ECHO_MS || (since < CURSOR_CATCHUP_MS && !near(echo))) return { drawn: kept, echo };
+  }
+  return { drawn: near(drawn) ? kept : host, echo: null };
+}
+
+/** A computer cursor message, as the page takes it: the cursor drawn and the echo still waited for (`reconcileCursor`), and, with no finger
+ *  down, the point a trackpad tap clicks, which is always where the cursor is drawn (never the message's own position, which a local echo may
+ *  be ahead of). */
+export function followHostCursor(drawn: CursorPos, tapAt: { x: number; y: number }, host: CursorPos, now: number, echo: CursorEcho | null, idle: boolean) {
+  const next = reconcileCursor(drawn, host, now, echo);
+  return { drawn: next.drawn, echo: next.echo, tapAt: idle ? { x: next.drawn.x, y: next.drawn.y } : tapAt };
 }
 /** A decoder this many chunks behind its own usual queue is behind. */
 export const BACKLOG_OVER = 2;

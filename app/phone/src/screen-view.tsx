@@ -2,9 +2,10 @@
 // as a trackpad or directly, a key bar with Ctrl, Shift and Alt, a field for text (sent as one message, said as sent or not sent), the
 // quality line, and Stop. Video is decoded with WebCodecs and drawn with the crisp tiles and the cursor over it; the logic is screen.ts.
 // Nothing waits to be shown: a decoded frame is drawn as it comes out of the decoder (no smoothing buffer), on a low-latency canvas where the
-// browser offers one, and a frame the decoder is too far behind for is skipped. The cursor the finger moves is drawn at once (local echo).
+// browser offers one, and a frame the decoder is too far behind for is skipped. The cursor is a layer of its own over the picture: moving it
+// never draws the picture again, so it follows the finger at the screen's own rate, at once where the finger puts it (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, Backlog, canDecode, clampView, detailsText, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { avcChunk, Backlog, canDecode, clampView, detailsText, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
 import { pathText } from "./conn-path";
 import { needsProof, pathRows, type ViaId } from "./screen-paths";
@@ -99,36 +100,27 @@ function Picker() {
   );
 }
 
-/** A small cursor drawn where the computer's is: an arrow, or an I-beam over text. */
-function drawCursor(ctx: CanvasRenderingContext2D, x: number, y: number, shape: number, dpr: number) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.scale(dpr, dpr);
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = "#000";
-  ctx.fillStyle = "#fff";
-  ctx.beginPath();
-  if (shape === 1) {
-    ctx.rect(-1.5, -9, 3, 18);
-  } else {
-    ctx.moveTo(0, 0);
-    ctx.lineTo(0, 16);
-    ctx.lineTo(4.5, 12);
-    ctx.lineTo(8, 19);
-    ctx.lineTo(10.5, 18);
-    ctx.lineTo(7, 11);
-    ctx.lineTo(12, 11);
-    ctx.closePath();
-  }
-  ctx.fill();
-  ctx.stroke();
-  ctx.restore();
+/** A small cursor shown where the computer's is, its point at (0, 0) in CSS pixels: an arrow, or an I-beam over text. Vector, so it is crisp at
+ *  any pixel ratio. */
+function CursorShape(props: { shape: number }) {
+  return (
+    <Show when={props.shape === 1} fallback={
+      <svg width="14" height="22" viewBox="-1 -1 14 22" style={{ left: "-1px", top: "-1px" }}>
+        <path d="M0 0 L0 16 L4.5 12 L8 19 L10.5 18 L7 11 L12 11 Z" fill="#fff" stroke="#000" stroke-width="1.5" />
+      </svg>
+    }>
+      <svg width="6" height="20" viewBox="-3 -10 6 20" style={{ left: "-3px", top: "-10px" }}>
+        <rect x="-1.5" y="-9" width="3" height="18" fill="#fff" stroke="#000" stroke-width="1.5" />
+      </svg>
+    </Show>
+  );
 }
 
 function Live() {
   const s = () => remoteScreen()!;
   let box!: HTMLDivElement;
   let canvas!: HTMLCanvasElement;
+  let cursorEl!: HTMLDivElement;
   const gestures = new Gestures();
   const [mode, setMode] = createSignal<"trackpad" | "direct">("trackpad");
   const [mods, setMods] = createSignal<Mod[]>([]);
@@ -144,13 +136,15 @@ function Live() {
   let skipToKey = true;
   let src = { w: 0, h: 0 };
   let cursor = { shape: 0, visible: false, x: 0, y: 0 };
+  const [cursorShape, setCursorShape] = createSignal(0);
   const pending = new Map<number, { unpaint: { x: number; y: number; w: number; h: number }[]; unpaintAll: boolean; srcW: number; srcH: number; captureMs: number }>();
   const overlay = new Overlay<ImageBitmap>((b) => b.close());
   let shownSeq = 0;
-  let drawQueued = false;
+  let drawFrame = 0;
   let ctx2d: CanvasRenderingContext2D | null = null;
-  // When the finger last moved the cursor: the computer's cursor messages (a round trip old) leave its position alone for a moment.
-  let echoedAt = -Infinity;
+  // Where and when the finger last put the cursor: the computer's cursor messages (a round trip old) leave its position alone until they
+  // come back there (`reconcileCursor`).
+  let echo: CursorEcho | null = null;
   const times = new FrameTimes();
   const backlog = new Backlog();
   // For the measurement plan: what the phone saw, read from the page (a debugging console or a test driver).
@@ -164,8 +158,23 @@ function Live() {
     return { el: { left: r.left, top: r.top, width: r.width, height: r.height }, srcW: src.w, srcH: src.h, view: view() };
   };
 
+  /** Moves the cursor's layer to where the cursor is in the picture as shown now (zoom and pan included); nothing else is drawn. */
+  const placeCursor = () => {
+    if (!cursor.visible || !src.w) {
+      cursorEl.style.display = "none";
+      return;
+    }
+    const r = box.getBoundingClientRect();
+    const c = toClient(cursor.x, cursor.y, { left: 0, top: 0, width: r.width, height: r.height }, src.w, src.h, view());
+    cursorEl.style.transform = `translate3d(${c.x}px, ${c.y}px, 0)`;
+    cursorEl.style.display = "";
+    setCursorShape(cursor.shape);
+  };
+
+  /** The picture and its crisp tiles, drawn again whole: for a new picture or tile, a new view or size (never for the cursor). */
   const draw = () => {
-    drawQueued = false;
+    if (drawFrame) cancelAnimationFrame(drawFrame);
+    drawFrame = 0;
     const ctx = context();
     if (!ctx || !src.w) return;
     const dpr = window.devicePixelRatio || 1;
@@ -187,16 +196,12 @@ function Live() {
       const b = toClient(tile.rect.x + tile.rect.w, tile.rect.y + tile.rect.h, el, src.w, src.h, v);
       ctx.drawImage(tile.image, a.x, a.y, b.x - a.x, b.y - a.y);
     }
-    if (cursor.visible) {
-      const c = toClient(cursor.x, cursor.y, el, src.w, src.h, v);
-      drawCursor(ctx, c.x, c.y, cursor.shape, dpr);
-    }
+    // The view or the picture's size may have changed: the cursor goes with the picture.
+    placeCursor();
   };
+  /** One whole drawing at the next animation frame, however many things asked for it (a picture drawn meanwhile takes it). */
   const redraw = () => {
-    if (!drawQueued) {
-      drawQueued = true;
-      requestAnimationFrame(draw);
-    }
+    drawFrame ||= requestAnimationFrame(draw);
   };
 
   const configure = (next: DecoderSetup) => {
@@ -251,10 +256,11 @@ function Live() {
     if (!m) return;
     if (m.kind === "cursor") {
       // With no finger down, a tap clicks where the cursor is drawn (the computer's place once the echo is over), never elsewhere.
-      const followed = followHostCursor(cursor, gestures.cursor, { shape: m.shape, visible: m.visible, x: m.x, y: m.y }, performance.now(), echoedAt, gestures.idle());
+      const followed = followHostCursor(cursor, gestures.cursor, { shape: m.shape, visible: m.visible, x: m.x, y: m.y }, performance.now(), echo, gestures.idle());
       cursor = followed.drawn;
+      echo = followed.echo;
       gestures.cursor = followed.tapAt;
-      return redraw();
+      return placeCursor();
     }
     if (m.kind === "tile") {
       void createImageBitmap(new Blob([m.image.slice()], { type: m.format === "png" ? "image/png" : "image/jpeg" })).then((image) => {
@@ -316,11 +322,11 @@ function Live() {
       redraw();
     }
     send(o.ops);
-    // The finger moved the cursor: drawn there at once (local echo), the computer's next positions reconciled to it.
+    // The finger moved the cursor: shown there at once (local echo), the computer's next positions reconciled to it.
     if (o.ops.some((op) => op.k === "move")) {
       cursor = { ...cursor, x: gestures.cursor.x, y: gestures.cursor.y };
-      echoedAt = performance.now();
-      draw();
+      echo = { x: cursor.x, y: cursor.y, at: performance.now() };
+      placeCursor();
     }
   };
   const touch = (e: PointerEvent) => ({ id: e.pointerId, x: e.clientX, y: e.clientY });
@@ -383,6 +389,7 @@ function Live() {
       </div>
       <div class="takeover-screen screen-canvas" ref={box} style={{ "touch-action": "none" }} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}>
         <canvas ref={canvas} aria-label={t("The computer's screen")} />
+        <div class="screen-cursor" ref={cursorEl} style={{ display: "none" }} aria-hidden="true" data-screen-cursor><CursorShape shape={cursorShape()} /></div>
         <Show when={remoteText(s().remote, t)}>{(line) => <div class="takeover-lost" role="status" data-remote-state={s().remote}>{line()}</div>}</Show>
         <Show when={s().phase === "frozen" || !connected()}>
           <div class="takeover-lost" role="status" data-screen-reconnecting>

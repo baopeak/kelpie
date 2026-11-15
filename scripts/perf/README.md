@@ -71,3 +71,13 @@ before trusting a verdict.
 `--inject-busy-loop 100` blocks the page for 100 ms once, from the test run itself (a `setTimeout`
 started through `__kelpie`; product code is untouched). `long_tasks` must then exceed the baseline
 and the gate must exit with status 1.
+
+## The phone's cursor
+
+`phone_cursor.py` is not part of the gate: it measures how the phone's screen view shows the cursor a finger moves, in Playwright's Chromium as an
+emulated iPhone (a canvas without `desynchronized`, as Safari has), against the real `screen-view.tsx` with the phone's state stubbed and a fake
+computer in the page (1080p H.264 at 30 frames a second, its cursor a round trip behind). Its header says what each number is.
+
+```bash
+python -X utf8 scripts/perf/phone_cursor.py --rtt 600 --throttle 1,4 --out cursor.json
+```

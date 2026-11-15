@@ -5,6 +5,7 @@ import {
   Backlog,
   BACKLOG_RUN,
   followHostCursor,
+  CURSOR_CATCHUP_MS,
   CURSOR_ECHO_MS,
   CURSOR_SNAP_PX,
   FrameTimes,
@@ -634,19 +635,49 @@ describe("whether this browser can show the screen", () => {
 });
 
 describe("the cursor the finger moves", () => {
-  it("is drawn where the finger put it until the computer's positions catch up, and then follows them", () => {
-    const drawn = { shape: 0, visible: true, x: 500, y: 300 };
+  const at = (x: number, y: number, shape = 0) => ({ shape, visible: true, x, y });
+
+  it("is drawn where the finger put it while the computer's positions are older, and then follows them", () => {
+    const drawn = at(500, 300);
+    const echo = { x: 500, y: 300, at: 900 };
     // A round trip old: the computer still says where the cursor was before the finger moved it.
-    const old = { shape: 1, visible: true, x: 420, y: 300 };
-    const held = reconcileCursor(drawn, old, 1000, 900);
-    expect(held, "no jump back during the echo, but the shape is the computer's").toEqual({ shape: 1, visible: true, x: 500, y: 300 });
-    // Past the hold, the computer's place wins: it is where the cursor really is (a program may have moved it).
-    expect(reconcileCursor(drawn, old, 900 + CURSOR_ECHO_MS, 900)).toEqual(old);
-    // Close enough is the same place: no jitter of a pixel or two.
-    const near = { shape: 0, visible: true, x: 500 + CURSOR_SNAP_PX, y: 300 - CURSOR_SNAP_PX };
-    expect(reconcileCursor(drawn, near, 10_000, 0)).toEqual({ ...near, x: 500, y: 300 });
-    expect(reconcileCursor(drawn, { ...near, x: 500 + CURSOR_SNAP_PX + 1 }, 10_000, 0).x).toBe(500 + CURSOR_SNAP_PX + 1);
-    expect(reconcileCursor(drawn, { ...drawn, visible: false }, 1000, 999).visible, "hidden by the computer is hidden").toBe(false);
+    const held = reconcileCursor(drawn, at(420, 300, 1), 1000, echo);
+    expect(held.drawn, "no jump back during the echo, but the shape is the computer's").toEqual(at(500, 300, 1));
+    expect(held.echo, "still waited for").toBe(echo);
+    // The computer comes back to where the finger left it: caught up, and its later positions are followed (a program may move it).
+    const caught = reconcileCursor(drawn, at(501, 299), 900 + CURSOR_ECHO_MS + 100, echo);
+    expect(caught).toEqual({ drawn: at(500, 300), echo: null });
+    expect(reconcileCursor(caught.drawn, at(640, 200), 900 + CURSOR_ECHO_MS + 200, caught.echo)).toEqual({ drawn: at(640, 200), echo: null });
+  });
+
+  it("is not pulled back along its path by positions that come late, after the finger stopped", () => {
+    // The finger stopped at 500 at t=1000; behind the picture on the relay, the computer's positions on the way there come for a while yet.
+    const echo = { x: 500, y: 300, at: 1000 };
+    let drawn = at(500, 300);
+    let waiting: typeof echo | null = echo;
+    for (const [x, t] of [[380, 1450], [430, 1600], [470, 1750]] as const) {
+      ({ drawn, echo: waiting } = reconcileCursor(drawn, at(x, 300), t, waiting));
+      expect(drawn.x, `a late ${x} at ${t} ms leaves it where the finger left it`).toBe(500);
+      expect(waiting).toBe(echo);
+    }
+    ({ drawn, echo: waiting } = reconcileCursor(drawn, at(500, 300), 1900, waiting));
+    expect([drawn.x, waiting]).toEqual([500, null]);
+  });
+
+  it("follows a place the computer never comes back from once the wait is over (the desk's mouse, an edge)", () => {
+    const echo = { x: 500, y: 300, at: 1000 };
+    expect(reconcileCursor(at(500, 300), at(80, 90), 1000 + CURSOR_CATCHUP_MS - 1, echo).drawn.x).toBe(500);
+    expect(reconcileCursor(at(500, 300), at(80, 90), 1000 + CURSOR_CATCHUP_MS, echo)).toEqual({ drawn: at(80, 90), echo: null });
+  });
+
+  it("holds for the first moment even at the place the finger left it, and never jitters by a pixel or two", () => {
+    const drawn = at(500, 300);
+    // While the finger moves, a position equal to the newest echo is old news too: the hold is not ended by it.
+    expect(reconcileCursor(drawn, at(500, 300), 1100, { x: 500, y: 300, at: 1000 }).echo).not.toBeNull();
+    const near = at(500 + CURSOR_SNAP_PX, 300 - CURSOR_SNAP_PX);
+    expect(reconcileCursor(drawn, near, 10_000, null).drawn).toEqual(drawn);
+    expect(reconcileCursor(drawn, { ...near, x: 500 + CURSOR_SNAP_PX + 1 }, 10_000, null).drawn.x).toBe(500 + CURSOR_SNAP_PX + 1);
+    expect(reconcileCursor(drawn, { ...drawn, visible: false }, 1000, { x: 500, y: 300, at: 999 }).drawn.visible, "hidden by the computer is hidden").toBe(false);
   });
 });
 
@@ -682,15 +713,21 @@ describe("a trackpad tap after the finger moved the cursor", () => {
     // The finger moved the cursor to 500 and lifted: the echo draws it there.
     let drawn = { shape: 0, visible: true, x: 500, y: 300 };
     let tapAt = { x: 500, y: 300 };
+    let echo: { x: number; y: number; at: number } | null = { x: 500, y: 300, at: 1000 };
     // The computer's message, a round trip old, still says 440.
-    ({ drawn, tapAt } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 440, y: 300 }, 1100, 1000, true));
+    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 440, y: 300 }, 1100, echo, true));
     expect(drawn.x).toBe(500);
     expect(tapAt, "the tap goes where the cursor is drawn").toEqual({ x: 500, y: 300 });
-    // Once the echo is over, the computer's place is drawn, and the tap follows it there.
-    ({ drawn, tapAt } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 520, y: 310 }, 2000, 1000, true));
+    // Still late after the first moment: the tap stays where the cursor is drawn.
+    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 470, y: 300 }, 1600, echo, true));
+    expect([drawn.x, tapAt.x]).toEqual([500, 500]);
+    // Caught up, then the computer's place is drawn, and the tap follows it there.
+    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 500, y: 300 }, 1700, echo, true));
+    expect(echo).toBeNull();
+    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 520, y: 310 }, 2000, echo, true));
     expect([drawn.x, tapAt.x]).toEqual([520, 520]);
     // With a finger down the gesture's own point is not touched.
-    ({ tapAt } = followHostCursor(drawn, { x: 7, y: 8 }, { shape: 0, visible: true, x: 600, y: 600 }, 5000, 1000, false));
+    ({ tapAt } = followHostCursor(drawn, { x: 7, y: 8 }, { shape: 0, visible: true, x: 600, y: 600 }, 5000, null, false));
     expect(tapAt).toEqual({ x: 7, y: 8 });
   });
 });
