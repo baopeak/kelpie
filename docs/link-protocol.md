@@ -127,6 +127,11 @@ For a screen through the relay that cannot go straight between the phone and the
   phone on its allow-list (`409`, `no_phones`); at most 10 mints an hour and 40 a day per room (`429`, `turn_room_limit`),
   `TURN_MINTS_PER_NETWORK_DAY` (20 unless set) per network (`429`, `turn_network`) and `TURN_MINTS_PER_DAY` (500 unless set) for the whole
   relay (`503`, `turn_full`) per UTC day. Rooms keep whether they were made with the key (`keyed`); a room from before counts as open.
+  With Cloudflare's TURN and the analytics secrets (`TURN_ANALYTICS_TOKEN`, `TURN_ACCOUNT_ID`), also a monthly stop on the account's TURN
+  egress (`relay/src/turn-usage.ts`, read hourly by the router's cron): at `TURN_MONTHLY_STOP_GB` (900 unless set) `503`
+  `turn_month_full` until the UTC month rolls over, and `503` `turn_usage_unknown` while there is no reading under 24 hours old. Both are
+  answered before the room looks at the request, so neither spends a room's or the relay's limits; revokes are never stopped. Today's
+  daemons read both as `turn_failed`.
 - **What**: with secrets `TURN_KEY_ID` and `TURN_API_TOKEN`, Cloudflare's TURN (`generate-ice-servers`, TTL 1,200 s); with `TURN_SECRET` and
   `TURN_URLS` (comma-separated), coturn's time-limited credentials: `username = <expiry, s>:<room>`, `credential = base64(HMAC-SHA1(secret,
   username))`. With neither, `404` with `x-kelpie-reason: turn_not_configured` (a relay from before TURN answers `404` too). URLs on port 53

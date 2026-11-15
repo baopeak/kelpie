@@ -8,14 +8,16 @@
 //   key set (a Worker secret), only its holder may; otherwise, with `OPEN_REGISTRATION = "1"`, anyone, within limits per network and
 //   in all (rate binding, then the Registrar); otherwise nobody. Never a page.
 // - `GET /v1/desktop`, `GET /v1/phone`: WebSockets into a room, `?t=<ticket>` and what the room asks of each (room.ts).
-// - `POST /v1/turn`, `POST /v1/turn/revoke`: TURN credentials for the room's desktop, within limits (turn.ts).
+// - `POST /v1/turn`, `POST /v1/turn/revoke`: TURN credentials for the room's desktop, within limits (turn.ts) and the monthly stop
+//   (turn-usage.ts), whose reading the hourly cron (`scheduled`) takes.
 
 import { decodeBase64Url, encodeBase64Url, hex } from "./encoding";
 import type { Registrar } from "./registrar";
 import type { Room } from "./room";
 import { cloudflareMint, cloudflareRevoke, coturnMint, TURN_FULL, TURN_MINTS_PER_DAY, TURN_MINTS_PER_NETWORK_DAY, TURN_NETWORK, TURN_NO_PHONES, TURN_NOT_CONFIGURED, TURN_NOT_OFFERED, TURN_ROOM_LIMIT, turnMode, validUsername, type TurnEnv } from "./turn";
+import { readTurnEgress, TURN_MONTH_FULL, TURN_USAGE_UNKNOWN, usageStopBytes, utcMonth, type TurnUsageEnv } from "./turn-usage";
 
-export interface Env extends TurnEnv {
+export interface Env extends TurnEnv, TurnUsageEnv {
   ROOM: DurableObjectNamespace<Room>;
   REGISTRAR: DurableObjectNamespace<Registrar>;
   TICKET_SECRET: string;
@@ -238,6 +240,16 @@ async function turn(request: Request, env: Env, kind: "turn" | "revoke", ticket:
   const sig = typeof body?.sig === "string" ? body.sig : "";
   if (kind === "revoke" && !validUsername(body?.username)) return plain(400, "username\n");
   const username = kind === "revoke" ? (body?.username as string) : "";
+  const registrar = env.REGISTRAR.get(env.REGISTRAR.idFromName("registrar"));
+  // The monthly stop before the room counts the request, so that a refusal never spends the room's own limits. Revokes are never stopped.
+  const stopBytes = kind === "turn" ? usageStopBytes(env) : null;
+  if (stopBytes !== null) {
+    let verdict = await registrar.turnStop(now, stopBytes);
+    // No good reading (the stop was just turned on, or the cron has failed for a day): read it now, at most every few minutes for the relay.
+    if (verdict === "unknown" && (await registrar.claimUsageRetry(now)) && (await refreshTurnUsage(env, now, fetchFn)) === "ok") verdict = await registrar.turnStop(now, stopBytes);
+    if (verdict === "month_full") return plain(503, "no more TURN this month\n", TURN_MONTH_FULL);
+    if (verdict === "unknown") return plain(503, "TURN usage unknown\n", TURN_USAGE_UNKNOWN);
+  }
   const admitted = await env.ROOM.get(env.ROOM.idFromName(room)).turnAdmit(kind, ts, sig, username, env.TURN_OPEN_ROOMS === "1");
   if (admitted === "stale" || admitted === "bad" || admitted === "gone") {
     admissions.note(who, now);
@@ -251,7 +263,6 @@ async function turn(request: Request, env: Env, kind: "turn" | "revoke", ticket:
     const status = await cloudflareRevoke(env, username, fetchFn);
     return status === 204 ? new Response(null, { status: 204, headers: NO_SNIFF }) : plain(502, "upstream\n");
   }
-  const registrar = env.REGISTRAR.get(env.REGISTRAR.idFromName("registrar"));
   const network = await failureKey(request);
   const day = await registrar.admitTurn(network, now, limit(env.TURN_MINTS_PER_NETWORK_DAY, TURN_MINTS_PER_NETWORK_DAY), limit(env.TURN_MINTS_PER_DAY, TURN_MINTS_PER_DAY));
   if (day === "network") return plain(429, "too many credentials from this network today\n", TURN_NETWORK);
@@ -261,7 +272,23 @@ async function turn(request: Request, env: Env, kind: "turn" | "revoke", ticket:
   return new Response(JSON.stringify(out.minted), { status: 200, headers: { "content-type": "application/json", ...NO_SNIFF } });
 }
 
+/** Reads the month's TURN egress and keeps it in the Registrar: "off" when the monthly stop is not configured, "failed" when the API did
+ *  not answer (the last good reading stays). */
+export async function refreshTurnUsage(env: Env, now: number, fetchFn: typeof fetch = fetch): Promise<"ok" | "off" | "failed"> {
+  if (usageStopBytes(env) === null) return "off";
+  const bytes = await readTurnEgress(env, now, fetchFn);
+  if (bytes === null || !Number.isSafeInteger(bytes)) return "failed";
+  await env.REGISTRAR.get(env.REGISTRAR.idFromName("registrar")).recordTurnUsage(utcMonth(now), bytes, now);
+  return "ok";
+}
+
 export default {
+  /** The hourly cron (wrangler.toml `[triggers]`): the monthly stop's reading. A failed reading fails the run, which Cloudflare's cron
+   *  events show, and says nothing about the bytes or the account; the last good reading stays. */
+  async scheduled(_controller: ScheduledController, env: Env, _ctx?: unknown, fetchFn: typeof fetch = fetch): Promise<void> {
+    if ((await refreshTurnUsage(env, Date.now(), fetchFn)) === "failed") throw new Error("TURN usage reading failed");
+  },
+
   async fetch(request: Request, env: Env, _ctx?: unknown, fetchFn: typeof fetch = fetch): Promise<Response> {
     const { pathname, searchParams } = new URL(request.url);
     if (pathname === "/v1/health") return plain(200, "ok\n");

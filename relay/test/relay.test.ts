@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import registrarSource from "../src/registrar.ts?raw";
 import roomSource from "../src/room.ts?raw";
 import workerSource from "../src/worker.ts?raw";
+import turnUsageSource from "../src/turn-usage.ts?raw";
+import routerConfig from "../wrangler.toml?raw";
 import { encodeBase64Url, hex } from "../src/encoding";
 import { TOTAL, utcDay, type Registrar } from "../src/registrar";
 import {
@@ -20,6 +22,7 @@ import {
 } from "../src/room";
 import worker, { ADMISSION_REFUSALS, makeTicket, network, ROOMS_FULL, ROOMS_NETWORK, ROOMS_RATE, Strikes, TOO_MANY_REFUSED, type Env } from "../src/worker";
 import vectors from "./vectors.json";
+import { readTurnEgress, TURN_MONTH_FULL, TURN_USAGE_UNKNOWN, USAGE_RETRY_MS, USAGE_STALE_MS, usageStopBytes, usageVerdict, utcMonth } from "../src/turn-usage";
 import { cleanServers, coturnMint, revokeStatement, TURN_FULL, TURN_MINTS_PER_HOUR, TURN_NETWORK, TURN_NO_PHONES, TURN_NOT_CONFIGURED, TURN_NOT_OFFERED, TURN_ROOM_LIMIT, TURN_TTL_S, TURN_UPSTREAM, turnMode, turnStatement } from "../src/turn";
 
 const relayEnv = env as unknown as Env;
@@ -1094,6 +1097,7 @@ describe("hibernation", () => {
 
   it("keeps timers, plain accept and looping alarms out of the source", () => {
     expect(registrarSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")).not.toMatch(/\bsetTimeout\b|\bsetInterval\b|setAlarm|\balarm\b|console\./);
+    expect(turnUsageSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")).not.toMatch(/\bsetTimeout\b|\bsetInterval\b|setAlarm|console\./);
     for (const source of [roomSource, workerSource]) {
       const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
       expect(code).not.toMatch(/\bsetTimeout\b|\bsetInterval\b/);
@@ -1267,5 +1271,167 @@ describe("TURN credentials for the room's desktop", () => {
     const out = await coturnMint({ TURN_SECRET: vectors.coturn_secret, TURN_URLS: "turn:x.test:3478" }, vectors.revoke_username.split(":")[1], Number(expiry) * 1000 - TURN_TTL_S * 1000);
     expect(out.ok && out.minted.ice_servers[0].credential).toBe(vectors.coturn_credential);
     expect(cleanServers([{ urls: "turn:a:53" }, { urls: ["javascript:x", "stun:b:3478"] }, null])).toEqual([{ urls: ["stun:b:3478"] }]);
+  });
+
+  describe("the monthly stop", () => {
+    const CLOUDFLARE_TURN = { TURN_KEY_ID: "key-1", TURN_API_TOKEN: "test-only-api-token" };
+    const STOP = { ...CLOUDFLARE_TURN, TURN_ANALYTICS_TOKEN: "test-only-analytics-token", TURN_ACCOUNT_ID: "test-only-account" };
+    const GRAPHQL = "https://api.cloudflare.com/client/v4/graphql";
+    const SERVERS = { iceServers: [{ urls: ["turn:turn.cloudflare.com:3478?transport=udp"], username: "u-1", credential: "c-1" }] };
+    const hour = 3600 * 1000;
+
+    /** Cloudflare as the relay sees it: the TURN API mints, and the analytics API answers `analytics` (status and body, or a throw). */
+    function cloudflare(analytics: { status?: number; body?: unknown } | "throw" = { body: egress([]) }) {
+      const calls: { url: string; auth: string | null; body: string }[] = [];
+      const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), auth: new Headers(init?.headers).get("authorization"), body: String(init?.body ?? "") });
+        if (String(input) !== GRAPHQL) return new Response(JSON.stringify(SERVERS), { status: 201 });
+        if (analytics === "throw") throw new Error("network");
+        return new Response(JSON.stringify(analytics.body ?? {}), { status: analytics.status ?? 200 });
+      }) as typeof fetch;
+      return { fetchFn, calls, analyticsCalls: () => calls.filter((c) => c.url === GRAPHQL) };
+    }
+
+    /** The analytics API's answer: one group per number (none when nothing went through TURN). */
+    function egress(bytes: number[]) {
+      return { data: { viewer: { accounts: [{ callsTurnUsageAdaptiveGroups: bytes.map((b) => ({ sum: { egressBytes: b } })) }] } }, errors: null };
+    }
+
+    async function forgetUsage(): Promise<void> {
+      await runInDurableObject(registrar(), (_r: Registrar, state) => void state.storage.sql.exec("DELETE FROM turn_usage"));
+    }
+
+    async function reading(month: string, bytes: number, readAt: number): Promise<void> {
+      await forgetUsage();
+      await registrar().recordTurnUsage(month, bytes, readAt);
+    }
+
+    async function mintsToday(): Promise<number> {
+      return runInDurableObject(registrar(), (_o, state) => state.storage.sql.exec<{ count: number }>("SELECT count FROM turn_mints WHERE day = ? AND key = ?", utcDay(Date.now()), TOTAL).toArray()[0]?.count ?? 0);
+    }
+
+    function cron(relay: Env, fetchFn: typeof fetch): Promise<void> {
+      return worker.scheduled({ scheduledTime: Date.now(), cron: "0 * * * *", noRetry() {} } as ScheduledController, relay, undefined, fetchFn);
+    }
+
+    it("is off without the analytics token or the account, or with coturn: minting and the cron are as before", async () => {
+      const r = await withPhone();
+      // A reading over any ceiling, which a relay without the stop never looks at.
+      await reading(utcMonth(Date.now()), 5000e9, Date.now());
+      for (const relay of [{ ...relayEnv, ...CLOUDFLARE_TURN }, { ...relayEnv, ...STOP, TURN_ACCOUNT_ID: undefined }, { ...relayEnv, ...STOP, TURN_ANALYTICS_TOKEN: undefined }]) {
+        const cf = cloudflare();
+        expect((await ask(relay, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(200);
+        await cron(relay, cf.fetchFn);
+        expect(cf.analyticsCalls()).toEqual([]);
+      }
+      expect(usageStopBytes({ ...STOP, TURN_KEY_ID: undefined })).toBeNull();
+      expect(usageStopBytes(STOP)).toBe(900e9);
+      expect(usageStopBytes({ ...STOP, TURN_MONTHLY_STOP_GB: "2.5" })).toBe(2.5e9);
+      expect(usageStopBytes({ ...STOP, TURN_MONTHLY_STOP_GB: "nonsense" })).toBe(900e9);
+    });
+
+    it("mints under the month's ceiling and refuses at it, counting nothing for the refusal", async () => {
+      const r = await withPhone();
+      const relay = { ...relayEnv, ...STOP };
+      const month = utcMonth(Date.now());
+      await reading(month, 899e9, Date.now());
+      const cf = cloudflare();
+      expect((await ask(relay, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(200);
+      await reading(month, 900e9, Date.now());
+      const before = await mintsToday();
+      const refused = await ask(relay, r, "/v1/turn", undefined, cf.fetchFn);
+      expect([refused.status, refused.headers.get("x-kelpie-reason"), await refused.text()]).toEqual([503, TURN_MONTH_FULL, "no more TURN this month\n"]);
+      expect(await mintsToday(), "a refused mint counts nothing").toBe(before);
+      expect(cf.analyticsCalls(), "a good reading needs no new one").toEqual([]);
+      // Nor does it spend the room's own hour: past more refusals than the room may mint in one, the room still mints once the stop lifts.
+      for (let i = 0; i < TURN_MINTS_PER_HOUR; i++) expect((await ask(relay, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(503);
+      await reading(month, 1e9, Date.now());
+      expect((await ask(relay, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(200);
+      // The ceiling is a var; a revoke is never stopped.
+      expect((await ask({ ...relay, TURN_MONTHLY_STOP_GB: "1000" }, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(200);
+      const ts = nextTs();
+      const ended = await ask(relay, r, "/v1/turn/revoke", { ts, sig: await signed(r, revokeStatement(r.room, ts, "u-1")), username: "u-1" }, (async () => new Response(null, { status: 204 })) as typeof fetch);
+      expect(ended.status).toBe(204);
+    });
+
+    it("starts a new month from nothing", async () => {
+      const r = await withPhone();
+      const now = Date.now();
+      // Last month's reading, over the ceiling, taken an hour ago: this month has not been read yet.
+      const lastMonth = utcMonth(Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), 0));
+      await reading(lastMonth, 950e9, now - hour);
+      expect((await ask({ ...relayEnv, ...STOP }, r, "/v1/turn", undefined, cloudflare().fetchFn)).status).toBe(200);
+      const evening = Date.UTC(2026, 9, 31, 23, 0);
+      const spent = { month: "2026-10", bytes: 950e9, readAt: evening };
+      expect(usageVerdict(spent, evening + 30 * 60 * 1000, 900e9)).toBe("month_full");
+      expect(usageVerdict(spent, Date.UTC(2026, 10, 1, 0, 10), 900e9)).toBe("ok");
+      expect(utcMonth(Date.UTC(2026, 10, 1, 0, 10))).toBe("2026-11");
+    });
+
+    it("keeps the last reading when one fails, and stops minting once it is a day old, until a reading succeeds", async () => {
+      const r = await withPhone();
+      const relay = { ...relayEnv, ...STOP };
+      const month = utcMonth(Date.now());
+      // A failed hour (an error, a refused token, no account, a bad number, no answer): the last reading stays, and minting goes on with it.
+      await reading(month, 10e9, Date.now() - 2 * hour);
+      const failures = [{ status: 500 }, { body: { data: null, errors: [{ message: "authentication" }] } }, { body: { data: { viewer: { accounts: [] } }, errors: null } }, { body: egress([-1]) }, "throw"] as const;
+      for (const failure of failures) {
+        const cf = cloudflare(failure);
+        await expect(cron(relay, cf.fetchFn), "a failed reading fails the cron run").rejects.toThrow("TURN usage reading failed");
+        expect(cf.analyticsCalls().length).toBe(1);
+        expect((await registrar().turnUsage())?.bytes).toBe(10e9);
+        expect((await ask(relay, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(200);
+      }
+      // Older than a day: closed, and a refused mint reads the usage itself at most every few minutes.
+      await reading(month, 10e9, Date.now() - USAGE_STALE_MS - hour);
+      const failing = cloudflare({ status: 500 });
+      for (let i = 0; i < 3; i++) {
+        const refused = await ask(relay, r, "/v1/turn", undefined, failing.fetchFn);
+        expect([refused.status, refused.headers.get("x-kelpie-reason")]).toEqual([503, TURN_USAGE_UNKNOWN]);
+      }
+      expect(failing.analyticsCalls().length, "one read for three refusals").toBe(1);
+      // The cron's next good reading opens minting again.
+      await cron(relay, cloudflare({ body: egress([3e9]) }).fetchFn);
+      expect((await ask(relay, r, "/v1/turn", undefined, failing.fetchFn)).status).toBe(200);
+      // So does a refused mint's own reading, once the retry is due: as when the stop has just been turned on and nothing was read yet.
+      await forgetUsage();
+      const first = cloudflare({ body: egress([]) });
+      expect((await ask(relay, r, "/v1/turn", undefined, first.fetchFn)).status).toBe(200);
+      expect(first.analyticsCalls().length).toBe(1);
+      expect(await registrar().turnUsage()).toMatchObject({ month, bytes: 0 });
+      expect(await registrar().claimUsageRetry(Date.now() + USAGE_RETRY_MS + 1)).toBe(true);
+    });
+
+    it("the cron asks for this account's TURN egress this UTC month with the analytics token, and keeps the sum", async () => {
+      const relay = { ...relayEnv, ...STOP };
+      await forgetUsage();
+      const cf = cloudflare({ body: egress([12345, 678]) });
+      await cron(relay, cf.fetchFn);
+      const [call] = cf.analyticsCalls();
+      expect(call.auth).toBe("Bearer test-only-analytics-token");
+      const sent = JSON.parse(call.body) as { query: string; variables: Record<string, string> };
+      const today = new Date().toISOString().slice(0, 10);
+      expect(sent.variables).toEqual({ account: "test-only-account", from: `${today.slice(0, 7)}-01`, to: today });
+      expect(sent.query).toContain("callsTurnUsageAdaptiveGroups(limit: 1, filter: { date_geq: $from, date_leq: $to }) { sum { egressBytes } }");
+      expect(sent.query).toContain("accounts(filter: { accountTag: $account })");
+      expect(await registrar().turnUsage()).toMatchObject({ month: utcMonth(Date.now()), bytes: 13023 });
+      expect(cf.calls.length, "nothing but the analytics API").toBe(1);
+      // A slower reading that finishes last never replaces a later one.
+      const later = (await registrar().turnUsage())!.readAt;
+      await registrar().recordTurnUsage(utcMonth(Date.now()), 1, later - 1000);
+      expect(await registrar().turnUsage()).toEqual({ month: utcMonth(Date.now()), bytes: 13023, readAt: later });
+      expect(await readTurnEgress(STOP, Date.now(), cloudflare({ body: egress([]) }).fetchFn), "nothing through TURN yet").toBe(0);
+      expect(await readTurnEgress(STOP, Date.now(), cloudflare({ body: { data: { viewer: { accounts: [{}] } } } }).fetchFn)).toBeNull();
+    });
+
+    it("runs hourly from the router's script, in production and staging, and its handler is wired", async () => {
+      expect(routerConfig.match(/^crons = \["0 \* \* \* \*"\]$/gm)?.length).toBe(2);
+      expect(routerConfig).toMatch(/^\[triggers\]$/m);
+      expect(routerConfig).toMatch(/^\[env\.staging\.triggers\]$/m);
+      // Through the test entry's own export (a missing handler would throw): the test relay has no analytics token, so it reads nothing.
+      const entry = (exports as unknown as { default: { scheduled(options: { cron: string }): Promise<unknown> } }).default;
+      expect(typeof entry.scheduled).toBe("function");
+      await expect(entry.scheduled({ cron: "0 * * * *" })).resolves.toBeUndefined();
+    });
   });
 });
