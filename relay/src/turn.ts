@@ -9,8 +9,9 @@
 // - Who: a room made with the registration key, or any room where `TURN_OPEN_ROOMS = "1"` (the limits count credentials, not bytes: on a relay
 //   with open registration a stranger could otherwise spend the operator's TURN). Refused rooms hear 404 `turn_not_offered`.
 // - Limits: per room `TURN_MINTS_PER_HOUR` and `TURN_MINTS_PER_ROOM_DAY` (the room counts), per network `TURN_MINTS_PER_NETWORK_DAY` and per
-//   relay `TURN_MINTS_PER_DAY` a UTC day (the Registrar; vars may change them). Nothing about a credential is logged. The relay cannot read
-//   the bytes TURN carried: the operator sets a usage notification at the provider, and removes the secrets to stop at once.
+//   relay `TURN_MINTS_PER_DAY` a UTC day (the Registrar; vars may change them). Nothing about a credential is logged. With Cloudflare's TURN
+//   and an analytics token, minting also stops at the month's byte ceiling (turn-usage.ts); otherwise the relay cannot read the bytes TURN
+//   carried, and the operator sets a usage notification at the provider. Removing the secrets stops minting at once.
 
 export interface TurnEnv {
   TURN_KEY_ID?: string;

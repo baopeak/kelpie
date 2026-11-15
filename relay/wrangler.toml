@@ -46,6 +46,11 @@ script_name = "kelpie-link-relay-room"
 # and TURN_URLS for a coturn server. With neither, `/v1/turn` answers 404 `turn_not_configured`. Vars: TURN_MINTS_PER_DAY (500) and
 # TURN_MINTS_PER_NETWORK_DAY (20) cap the credentials minted in a UTC day; TURN_OPEN_ROOMS = "1" gives rooms made without a registration
 # key TURN too, which on this open relay means accepting what strangers' TURN traffic may cost (set a Cloudflare usage notification first).
+# The monthly stop (src/turn-usage.ts): with secrets TURN_ANALYTICS_TOKEN (Account -> Account Analytics -> Read) and TURN_ACCOUNT_ID, the
+# hourly cron below reads the account's TURN egress this UTC month, and minting stops at TURN_MONTHLY_STOP_GB (var, 900 unless set) until the
+# month rolls over. Without them the cron does nothing and minting is as before.
+[triggers]
+crons = ["0 * * * *"]
 
 # Staging (`--env staging`): the same router, assets and limits under its own name and origin, bound to the staging room script.
 # Bindings and vars are not inherited by an environment, so they are repeated here. Its TICKET_SECRET is its own
@@ -59,6 +64,9 @@ preview_urls = false
 OPEN_REGISTRATION = "1"
 ROOMS_PER_NETWORK_DAY = "20"
 ROOMS_PER_DAY = "1000"
+
+[env.staging.triggers]
+crons = ["0 * * * *"]
 
 [[env.staging.ratelimits]]
 name = "ROOM_RATE"

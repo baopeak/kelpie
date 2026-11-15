@@ -986,7 +986,9 @@ sealed; use in `screen_turn_day` / `screen_turn_month`), and past one the creden
 screen ends (`turn_budget_spent`). A refused mint keeps the way off for a while: the relay's own answer (`turn_not_configured`, `turn_full`) 10 minutes, a failure (`turn_failed`) one.
 A peer offered through TURN alone is held to TURN's rule until its first stats say which pair it took, then by that pair. Limits at
 the relay: a room made with the registration key (or `TURN_OPEN_ROOMS`), a phone on its allow-list, 10 mints an hour and 40 a day per room,
-`TURN_MINTS_PER_NETWORK_DAY` and `TURN_MINTS_PER_DAY` a day; port-53 URLs left out. TURN requests are sent one at a time (the room takes only a later
+`TURN_MINTS_PER_NETWORK_DAY` and `TURN_MINTS_PER_DAY` a day, and with Cloudflare's TURN and an analytics token a monthly stop on the account's
+TURN egress (`TURN_MONTHLY_STOP_GB`, read hourly by the router's cron into the Registrar; `turn_month_full`, or `turn_usage_unknown` with no
+reading in 24 hours); port-53 URLs left out. TURN requests are sent one at a time (the room takes only a later
 `ts`). Renewed credentials go to a new peer, never `setConfiguration` (a live TURN allocation is not known to take new ones).
 
 A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29, Windows; macOS later). The same rules as a
