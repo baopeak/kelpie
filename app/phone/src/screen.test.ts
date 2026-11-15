@@ -46,6 +46,13 @@ import {
   type ScOp,
   type ScreenPort,
   type ScreenState,
+  accel,
+  DOUBLE_TAP_MS,
+  DOUBLE_TAP_PX,
+  keepInView,
+  KEEP_IN_VIEW_PX,
+  TRACKPAD_CURVE,
+  TRACKPAD_GAIN,
 } from "./screen";
 import { pathRows, type ViaId } from "./screen-paths";
 import type { PeerEvents, PeerSetup } from "./screen-rtc";
@@ -177,10 +184,10 @@ describe("what fingers do", () => {
     g.cursor = { x: 800, y: 450 };
     g.down({ id: 1, x: 100, y: 100 }, 0, f());
     expect(g.move({ id: 1, x: 105, y: 100 }, 30, f()).ops, "within the slop: nothing").toEqual([]);
-    const moved = g.move({ id: 1, x: 120, y: 100 }, 60, f()).ops;
-    // 20 px of finger at 4 source px a screen px and a gain of 1.2: 96 px.
+    const moved = g.move({ id: 1, x: 120, y: 100 }, 80, f()).ops;
+    // 20 px of finger at 4 source px a screen px and a gain of 1.2 (an ordinary speed, 0.3 px a ms): 96 px.
     expect(moved).toEqual([{ k: "move", x: 896, y: 450 }]);
-    expect(g.up({ id: 1, x: 120, y: 100 }, 80, f()).ops).toEqual([]);
+    expect(g.up({ id: 1, x: 120, y: 100 }, 90, f()).ops).toEqual([]);
     g.down({ id: 1, x: 300, y: 10 }, 100, f());
     expect(g.up({ id: 1, x: 301, y: 11 }, 150, f()).ops, "a tap is where the cursor is, not the finger").toEqual([{ k: "click", x: 896, y: 450, b: "left" }]);
     g.down({ id: 1, x: 300, y: 10 }, 200, f());
@@ -243,7 +250,7 @@ describe("what fingers do", () => {
     expect(g.idle()).toBe(false);
     g.down({ id: 2, x: 300, y: 200 }, 40, f());
     expect(g.move({ id: 2, x: 390, y: 200 }, 50, f()).ops, "the second finger moves nothing").toEqual([]);
-    expect(g.move({ id: 1, x: 80, y: 50 }, 60, f()).ops).toEqual([{ k: "move", x: 244, y: 100 }]);
+    expect(g.move({ id: 1, x: 80, y: 50 }, 63, f()).ops).toEqual([{ k: "move", x: 244, y: 100 }]);
     expect(g.up({ id: 1, x: 80, y: 50 }, 70, f()).ops).toEqual([]);
     expect(g.move({ id: 2, x: 395, y: 200 }, 80, f()).ops, "nor after the first lifted").toEqual([]);
     expect(g.up({ id: 2, x: 395, y: 200 }, 90, f()).ops).toEqual([]);
@@ -633,6 +640,141 @@ describe("whether this browser can show the screen", () => {
     expect(await canDecode({ VideoDecoder: { isConfigSupported: async () => ({ supported: false }) } })).toBe(false);
     expect(await canDecode({ VideoDecoder: { isConfigSupported: async () => { throw new Error("no"); } } })).toBe(false);
     expect(await canDecode({ VideoDecoder: { isConfigSupported: async (c: unknown) => ({ supported: (c as { optimizeForLatency?: boolean }).optimizeForLatency === true }) } })).toBe(true);
+  });
+});
+
+describe("gestures made for a phone", () => {
+  const el = { left: 0, top: 0, width: 400, height: 225 };
+  const f = (zoom = 1, cx = 800, cy = 450): Frame => ({ el, srcW: 1600, srcH: 900, view: { zoom, cx, cy } });
+  const tap = (g: Gestures, x: number, y: number, at: number, frame = f()) => {
+    g.down({ id: 1, x, y }, at, frame);
+    return g.up({ id: 1, x, y }, at + 60, frame);
+  };
+
+  it("a double tap is a double click at one point: the second click goes where the first did, in either mode", () => {
+    const g = new Gestures();
+    g.mode = "direct";
+    const first = tap(g, 100, 100, 0);
+    expect(first).toEqual({ ops: [{ k: "click", x: 400, y: 400, b: "left" }], feel: "click" });
+    // A finger never lands twice on the same pixel: 6 px away on the glass is 24 source px, still the first one's point.
+    const second = tap(g, 106, 104, 200);
+    expect(second).toEqual({ ops: [{ k: "click", x: 400, y: 400, b: "left" }], feel: "double" });
+    // A third tap is a click of its own, where the finger is.
+    expect(tap(g, 120, 100, 400).feel).toBe("click");
+    // Too far apart, or too late: two clicks, each where it was.
+    expect(tap(g, 100 + DOUBLE_TAP_PX + 1, 100, 2000).ops[0]).toMatchObject({ x: 4 * (100 + DOUBLE_TAP_PX + 1) });
+    const late = new Gestures();
+    late.mode = "direct";
+    tap(late, 100, 100, 0);
+    expect(tap(late, 104, 100, 60 + DOUBLE_TAP_MS + 1)).toMatchObject({ ops: [{ x: 416 }], feel: "click" });
+    // Trackpad: both at the cursor, the second one marked a double click.
+    const pad = new Gestures();
+    pad.cursor = { x: 50, y: 60 };
+    tap(pad, 200, 100, 0);
+    expect(tap(pad, 230, 120, 150)).toEqual({ ops: [{ k: "click", x: 50, y: 60, b: "left" }], feel: "double" });
+  });
+
+  it("a tap after the system took the touches, or in the other mode, is a click of its own", () => {
+    const g = new Gestures();
+    g.mode = "direct";
+    tap(g, 100, 100, 0);
+    g.cancel();
+    expect(tap(g, 102, 100, 150).feel, "after a cancel").toBe("click");
+    const m = new Gestures();
+    m.cursor = { x: 50, y: 60 };
+    tap(m, 100, 100, 0);
+    m.mode = "direct";
+    expect(tap(m, 102, 100, 150), "trackpad, then direct").toEqual({ ops: [{ k: "click", x: 408, y: 400, b: "left" }], feel: "click" });
+  });
+
+  it("a trackpad pinch with the cursor out of the picture shown zooms around the fingers", () => {
+    const p = new Gestures();
+    p.cursor = { x: 1500, y: 100 };
+    // Zoomed in at the top left: the cursor is off to the right.
+    const v = f(2, 400, 225);
+    const mid = { x: 200, y: 100 };
+    const under = { x: v.view.cx + (mid.x - 200) / 0.5, y: v.view.cy + (mid.y - 112.5) / 0.5 };
+    p.down({ id: 1, x: 150, y: 100 }, 0, v);
+    p.down({ id: 2, x: 250, y: 100 }, 5, v);
+    p.move({ id: 1, x: 120, y: 100 }, 30, v);
+    const z = p.move({ id: 2, x: 280, y: 100 }, 40, v);
+    const after = toClient(under.x, under.y, el, 1600, 900, z.view!);
+    expect(Math.abs(after.x - mid.x) + Math.abs(after.y - mid.y), "the point under the fingers stays under them").toBeLessThan(1);
+  });
+
+  it("a long press is shown as held where its right click would be, and a move then picks up a drag", () => {
+    const g = new Gestures();
+    g.cursor = { x: 300, y: 200 };
+    g.down({ id: 1, x: 100, y: 100 }, 0, f());
+    expect(g.held(LONG_PRESS_MS - 1, f()), "not yet").toBeNull();
+    expect(g.held(LONG_PRESS_MS, f()), "trackpad: at the cursor").toEqual({ x: 300, y: 200 });
+    const drag = g.move({ id: 1, x: 120, y: 100 }, LONG_PRESS_MS + 20, f());
+    expect(drag.feel).toBe("drag");
+    expect(drag.ops[0]).toEqual({ k: "down", x: 300, y: 200, b: "left" });
+    expect([g.dragging(), g.held(LONG_PRESS_MS + 30, f())]).toEqual([true, null]);
+    expect(g.up({ id: 1, x: 120, y: 100 }, LONG_PRESS_MS + 60, f()).ops[0].k).toBe("up");
+    expect(g.dragging()).toBe(false);
+    // Direct: under the finger, which the magnifier follows.
+    const d = new Gestures();
+    d.mode = "direct";
+    d.down({ id: 1, x: 50, y: 40 }, 0, f());
+    expect([d.held(LONG_PRESS_MS, f()), d.finger()]).toEqual([{ x: 200, y: 160 }, { x: 50, y: 40 }]);
+    expect(d.up({ id: 1, x: 50, y: 40 }, LONG_PRESS_MS + 10, f())).toEqual({ ops: [{ k: "click", x: 200, y: 160, b: "right" }], feel: "right" });
+    expect(d.finger()).toBeNull();
+  });
+
+  it("a slow finger points finely and a quick one goes far; a slow finger still moves the cursor", () => {
+    expect(accel(0)).toBe(TRACKPAD_CURVE[0][1]);
+    expect(accel(0.3)).toBe(1);
+    expect(accel(9)).toBe(TRACKPAD_CURVE[TRACKPAD_CURVE.length - 1][1]);
+    expect(accel(0.1)).toBeLessThan(accel(0.2));
+    const far = (ms: number) => {
+      const g = new Gestures();
+      g.cursor = { x: 800, y: 450 };
+      g.down({ id: 1, x: 100, y: 100 }, 0, f());
+      let t = 0;
+      // 60 px in 6 steps of 10 px, `ms` apart.
+      for (let x = 110; x <= 160; x += 10) g.move({ id: 1, x, y: 100 }, (t += ms), f());
+      return g.cursor.x - 800;
+    };
+    expect(far(100), "slow: finer than the plain gain").toBeLessThan(60 * 4 * TRACKPAD_GAIN);
+    expect(far(5), "quick: further").toBeGreaterThan(60 * 4 * TRACKPAD_GAIN);
+    // Zoomed in six times, a slow one-pixel move is under a source pixel: it adds up instead of being lost.
+    const fine = new Gestures();
+    fine.cursor = { x: 800, y: 450 };
+    fine.down({ id: 1, x: 100, y: 100 }, 0, f(6));
+    fine.move({ id: 1, x: 112, y: 100 }, 100, f(6));
+    const before = fine.cursor.x;
+    for (let i = 1; i <= 10; i++) fine.move({ id: 1, x: 112 + i, y: 100 }, 100 + i * 100, f(6));
+    expect(fine.cursor.x - before).toBeGreaterThanOrEqual(2);
+  });
+
+  it("zoomed in, the view keeps the cursor in it: a trackpad move near an edge, and a pinch that zooms around the cursor", () => {
+    expect(keepInView(el, 1600, 900, f().view, { x: 0, y: 0 }), "at zoom 1 all is shown").toEqual(f().view);
+    // Zoom 2 at the centre shows 400..1200 × 225..675 at half a screen px a source px; a point at 1190 is within 40 screen px (80 source
+    // px) of the right edge, so the view moves right until it is not.
+    const moved = keepInView(el, 1600, 900, f(2).view, { x: 1190, y: 450 });
+    expect(moved.cx).toBe(800 + (1190 + 80 - 1200));
+    expect(keepInView(el, 1600, 900, f(2).view, { x: 800, y: 450 }), "inside: unchanged").toEqual(f(2).view);
+    const g = new Gestures();
+    g.cursor = { x: 1150, y: 450 };
+    g.down({ id: 1, x: 100, y: 100 }, 0, f(2));
+    const out = g.move({ id: 1, x: 130, y: 100 }, 100, f(2));
+    expect(out.view, "the view goes with the cursor").toBeDefined();
+    const shown = toClient(g.cursor.x, g.cursor.y, el, 1600, 900, out.view!);
+    expect(shown.x).toBeLessThanOrEqual(el.width - KEEP_IN_VIEW_PX + 0.001);
+    // A pinch in trackpad mode: the cursor stays where it is on the glass while the picture grows around it.
+    const p = new Gestures();
+    p.cursor = { x: 1200, y: 300 };
+    const at = toClient(1200, 300, el, 1600, 900, f().view);
+    p.down({ id: 1, x: 150, y: 100 }, 0, f());
+    p.down({ id: 2, x: 250, y: 100 }, 5, f());
+    // Both fingers spread (the pair's middle stays): a zoom with no pan.
+    p.move({ id: 1, x: 110, y: 100 }, 30, f());
+    const z = p.move({ id: 2, x: 290, y: 100 }, 40, f());
+    expect(z.view!.zoom).toBeGreaterThan(1.5);
+    const after = toClient(1200, 300, el, 1600, 900, z.view!);
+    expect(Math.abs(after.x - at.x) + Math.abs(after.y - at.y), "the cursor did not move on the glass").toBeLessThan(1);
   });
 });
 

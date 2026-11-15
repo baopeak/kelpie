@@ -37,6 +37,9 @@ export function flag(key: string, fallback: boolean): Pref<boolean> {
   return pref<boolean>(key, fallback, (raw) => (raw === "1" ? true : raw === "0" ? false : undefined), (on) => (on ? "1" : "0"));
 }
 
+/** The computer's screen showed its gestures once (a first screen opens with them; the ? button shows them again). */
+export const screenGesturesSeen = flag("kelpie-screen-gestures-seen", false);
+
 /** How long the app may stay out of sight before coming back asks for the passkey again, in seconds. 0 is "Immediately". */
 export const LOCK_GRACE_CHOICES = [0, 60, 300, 900] as const;
 export type LockGrace = (typeof LOCK_GRACE_CHOICES)[number];

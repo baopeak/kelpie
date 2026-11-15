@@ -1149,9 +1149,13 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   read by a test driver as `__kelpieScreenTimes()`. Under the quality line a details line says the way (Tailscale, this network, the relay), the round trip,
   the rate, frames a second, the size and how old the pictures were when shown (median, from `t0` and their capture times). A picture frozen for 3 s checks
   the connection every 2 s (`Link.kick`: a probe, then a new connection that asks for the screen again) and counts down the 45 s the computer keeps it;
-  input is dropped meanwhile. Trackpad (default) or direct touch, two-finger scroll,
-  pinch zoom and pan of the view only, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`, alone for Start or held), text with an answer of its
-  own. The entry is in the inbox and in a session's view. Input older than 1 s by the
+  input is dropped meanwhile. Trackpad (default, with pointer acceleration `accel` and sub-pixel carry) or direct touch (`Gestures`), two-finger scroll,
+  pinch zoom and pan of the view only (around the cursor in trackpad mode; `keepInView` keeps the cursor in a zoomed view, also when the keyboard shrinks
+  the box), a double tap sent as a second click at the first tap's point (`DOUBLE_TAP_MS`, `DOUBLE_TAP_PX`; single taps are never delayed), feedback
+  marks, a long-press hint, a drag chip and a direct-mode magnifier drawn from the canvas, a key bar with Ctrl, Shift, Alt and the Windows key (`meta`,
+  alone for Start or held), text typed in a visible field (Hide makes it a password field; Enter while composing does not send) with an answer of its
+  own; while that field has the focus and the visual viewport is shorter than the window, the screen is fitted to the visual viewport (iOS keyboard).
+  `scripts/e2e/screen_phone.py` drives every gesture from the real page. The entry is in the inbox and in a session's view. Input older than 1 s by the
   computer's clock is dropped by the daemon and by the helper; 3 s without media or heartbeat dims the picture; frames that come and do not decode for 1 s
   ask for a keyframe. In trackpad mode a tap clicks where the computer's cursor is drawn: with no finger down the page takes the computer's position.
 - **What `control` of the screen allows.** It is the person's whole session: Win+R and a command runs anything as the user, so a phone given `control` can
