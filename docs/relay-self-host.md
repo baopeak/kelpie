@@ -129,20 +129,22 @@ remove a phone (or once the relay has been slow for a day); until the room is re
 phone says *This relay offers no TURN*. Each computer also holds
 its screens to its own TURN caps (1 GB a screen, 3 GB a day, 30 GB a month by default; Settings → Mobile → Advanced). Remove the secrets
 to stop minting at once.
-
-**Monthly stop (Cloudflare's TURN on Cloudflare Workers only).** Create an API token with only *Account → Account Analytics → Read*, then
-`wrangler secret put TURN_ANALYTICS_TOKEN` and `wrangler secret put TURN_ACCOUNT_ID` (your account id). The router's hourly cron
-(`[triggers]` in `wrangler.toml`) then reads the account's TURN egress this UTC month from Cloudflare's GraphQL Analytics API
-(`callsTurnUsageAdaptiveGroups`, `sum.egressBytes`: what Cloudflare bills, for every TURN key of the account) and keeps it in the Registrar;
-at `TURN_MONTHLY_STOP_GB` (a var, 900 unless set; GB = 10^9 bytes) the relay mints no more credentials until the month rolls over
-(`503 turn_month_full`). A failed reading keeps the last good one, and minting goes on with it for 24 hours after it was taken; after
-that, or before the first reading, minting stops (`503 turn_usage_unknown`) until a reading succeeds (a refused mint tries one itself, at
-most every 5 minutes). The cron runs only on Cloudflare, so a workerd relay has no monthly stop. The reading lags (analytics come minutes
-late, the cron is hourly, credentials already minted last 20 minutes): keep the ceiling under your allowance, and keep a usage notification
-in Cloudflare's dashboard too. Without the two secrets, or with coturn, the cron does nothing and minting is as before: set a usage
-notification in your TURN provider's dashboard instead.
 With no TURN secret set, `/v1/turn` answers `404 turn_not_configured` and the phone shows the TURN way as unavailable (*This relay offers no TURN*), asking again after ten
 minutes.
+
+**Monthly stop (Cloudflare's TURN on Cloudflare Workers only).** Create an API token with only *Account → Account Analytics → Read*, then
+`wrangler secret put TURN_ANALYTICS_TOKEN` and `wrangler secret put TURN_ACCOUNT_ID` (your account id); deploy the room script before the
+router, as always. The router's hourly cron (`[triggers]` in `wrangler.toml`; it counts against your account's cron triggers) then reads
+the account's TURN egress this UTC calendar month from Cloudflare's GraphQL Analytics API (`callsTurnUsageAdaptiveGroups`,
+`sum.egressBytes`, the direction Cloudflare bills, for every TURN key of the account) and keeps it in the Registrar; at
+`TURN_MONTHLY_STOP_GB` (a var, a positive number, 900 unless set; GB = 10^9 bytes) the relay mints no more credentials until the month
+rolls over (`503 turn_month_full`). A failed reading keeps the last good one, and minting goes on with it for 24 hours after it was taken;
+after that, or before the first reading, minting stops (`503 turn_usage_unknown`) until a reading succeeds (a refused mint tries one
+itself, at most every 5 minutes). Refusals spend none of the room's or the relay's credential limits, and revokes are never stopped. The
+cron runs only on Cloudflare, so a workerd relay has no monthly stop. The reading lags (analytics come minutes late, the cron is hourly,
+credentials already minted last 20 minutes), and it counts the calendar month, which may not be your billing period: keep the ceiling
+under your allowance, and keep a usage notification in Cloudflare's dashboard too. Without the two secrets, or with coturn, the cron does
+nothing and minting is as before: set a usage notification in your TURN provider's dashboard instead.
 
 ## Serving the phone app from your own Cloudflare account
 

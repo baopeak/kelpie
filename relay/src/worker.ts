@@ -240,6 +240,16 @@ async function turn(request: Request, env: Env, kind: "turn" | "revoke", ticket:
   const sig = typeof body?.sig === "string" ? body.sig : "";
   if (kind === "revoke" && !validUsername(body?.username)) return plain(400, "username\n");
   const username = kind === "revoke" ? (body?.username as string) : "";
+  const registrar = env.REGISTRAR.get(env.REGISTRAR.idFromName("registrar"));
+  // The monthly stop before the room counts the request, so that a refusal never spends the room's own limits. Revokes are never stopped.
+  const stopBytes = kind === "turn" ? usageStopBytes(env) : null;
+  if (stopBytes !== null) {
+    let verdict = await registrar.turnStop(now, stopBytes);
+    // No good reading (the stop was just turned on, or the cron has failed for a day): read it now, at most every few minutes for the relay.
+    if (verdict === "unknown" && (await registrar.claimUsageRetry(now)) && (await refreshTurnUsage(env, now, fetchFn)) === "ok") verdict = await registrar.turnStop(now, stopBytes);
+    if (verdict === "month_full") return plain(503, "no more TURN this month\n", TURN_MONTH_FULL);
+    if (verdict === "unknown") return plain(503, "TURN usage unknown\n", TURN_USAGE_UNKNOWN);
+  }
   const admitted = await env.ROOM.get(env.ROOM.idFromName(room)).turnAdmit(kind, ts, sig, username, env.TURN_OPEN_ROOMS === "1");
   if (admitted === "stale" || admitted === "bad" || admitted === "gone") {
     admissions.note(who, now);
@@ -253,15 +263,8 @@ async function turn(request: Request, env: Env, kind: "turn" | "revoke", ticket:
     const status = await cloudflareRevoke(env, username, fetchFn);
     return status === 204 ? new Response(null, { status: 204, headers: NO_SNIFF }) : plain(502, "upstream\n");
   }
-  const registrar = env.REGISTRAR.get(env.REGISTRAR.idFromName("registrar"));
   const network = await failureKey(request);
-  const stopBytes = usageStopBytes(env);
-  const admitTurn = () => registrar.admitTurn(network, now, limit(env.TURN_MINTS_PER_NETWORK_DAY, TURN_MINTS_PER_NETWORK_DAY), limit(env.TURN_MINTS_PER_DAY, TURN_MINTS_PER_DAY), stopBytes);
-  let day = await admitTurn();
-  // No good reading (the stop was just turned on, or the cron has failed for a day): read it now, at most every few minutes for the relay.
-  if (day === "usage_unknown" && (await registrar.claimUsageRetry(now)) && (await refreshTurnUsage(env, now, fetchFn)) === "ok") day = await admitTurn();
-  if (day === "month_full") return plain(503, "no more TURN this month\n", TURN_MONTH_FULL);
-  if (day === "usage_unknown") return plain(503, "TURN usage unknown\n", TURN_USAGE_UNKNOWN);
+  const day = await registrar.admitTurn(network, now, limit(env.TURN_MINTS_PER_NETWORK_DAY, TURN_MINTS_PER_NETWORK_DAY), limit(env.TURN_MINTS_PER_DAY, TURN_MINTS_PER_DAY));
   if (day === "network") return plain(429, "too many credentials from this network today\n", TURN_NETWORK);
   if (day === "full") return plain(503, "no more credentials today\n", TURN_FULL);
   const out = mode === "cloudflare" ? await cloudflareMint(env, now, fetchFn) : await coturnMint(env, room, now);

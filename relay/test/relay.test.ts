@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import registrarSource from "../src/registrar.ts?raw";
 import roomSource from "../src/room.ts?raw";
 import workerSource from "../src/worker.ts?raw";
+import turnUsageSource from "../src/turn-usage.ts?raw";
 import routerConfig from "../wrangler.toml?raw";
 import { encodeBase64Url, hex } from "../src/encoding";
 import { TOTAL, utcDay, type Registrar } from "../src/registrar";
@@ -1096,6 +1097,7 @@ describe("hibernation", () => {
 
   it("keeps timers, plain accept and looping alarms out of the source", () => {
     expect(registrarSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")).not.toMatch(/\bsetTimeout\b|\bsetInterval\b|setAlarm|\balarm\b|console\./);
+    expect(turnUsageSource.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")).not.toMatch(/\bsetTimeout\b|\bsetInterval\b|setAlarm|console\./);
     for (const source of [roomSource, workerSource]) {
       const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
       expect(code).not.toMatch(/\bsetTimeout\b|\bsetInterval\b/);
@@ -1341,6 +1343,10 @@ describe("TURN credentials for the room's desktop", () => {
       expect([refused.status, refused.headers.get("x-kelpie-reason"), await refused.text()]).toEqual([503, TURN_MONTH_FULL, "no more TURN this month\n"]);
       expect(await mintsToday(), "a refused mint counts nothing").toBe(before);
       expect(cf.analyticsCalls(), "a good reading needs no new one").toEqual([]);
+      // Nor does it spend the room's own hour: past more refusals than the room may mint in one, the room still mints once the stop lifts.
+      for (let i = 0; i < TURN_MINTS_PER_HOUR; i++) expect((await ask(relay, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(503);
+      await reading(month, 1e9, Date.now());
+      expect((await ask(relay, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(200);
       // The ceiling is a var; a revoke is never stopped.
       expect((await ask({ ...relay, TURN_MONTHLY_STOP_GB: "1000" }, r, "/v1/turn", undefined, cf.fetchFn)).status).toBe(200);
       const ts = nextTs();
@@ -1410,6 +1416,10 @@ describe("TURN credentials for the room's desktop", () => {
       expect(sent.query).toContain("accounts(filter: { accountTag: $account })");
       expect(await registrar().turnUsage()).toMatchObject({ month: utcMonth(Date.now()), bytes: 13023 });
       expect(cf.calls.length, "nothing but the analytics API").toBe(1);
+      // A slower reading that finishes last never replaces a later one.
+      const later = (await registrar().turnUsage())!.readAt;
+      await registrar().recordTurnUsage(utcMonth(Date.now()), 1, later - 1000);
+      expect(await registrar().turnUsage()).toEqual({ month: utcMonth(Date.now()), bytes: 13023, readAt: later });
       expect(await readTurnEgress(STOP, Date.now(), cloudflare({ body: egress([]) }).fetchFn), "nothing through TURN yet").toBe(0);
       expect(await readTurnEgress(STOP, Date.now(), cloudflare({ body: { data: { viewer: { accounts: [{}] } } } }).fetchFn)).toBeNull();
     });

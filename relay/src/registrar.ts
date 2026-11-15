@@ -5,11 +5,9 @@
 // last good reading of the month's TURN egress (turn-usage.ts), which the router's hourly cron writes. Nothing runs on a timer here.
 
 import { DurableObject } from "cloudflare:workers";
-import { USAGE_RETRY_MS, usageVerdict, type UsageReading } from "./turn-usage";
+import { USAGE_RETRY_MS, usageVerdict, type UsageReading, type UsageVerdict } from "./turn-usage";
 
 export type Admission = "ok" | "network" | "full";
-/** A TURN admission can also be refused by the monthly stop: the month's TURN is spent, or how much is spent is unknown. */
-export type TurnAdmission = Admission | "month_full" | "usage_unknown";
 
 /** The row that counts every room of a day, beside the networks' rows (which are 64 hex characters). */
 export const TOTAL = "total";
@@ -44,15 +42,10 @@ export class Registrar extends DurableObject<object> {
     return "ok";
   }
 
-  /** Counts one more TURN credential minted today for `network`, unless the monthly stop is on (`stopBytes`) and refuses it, or that network
-   *  (`perNetwork`) or the whole relay (`perDay`) has minted its day's. A refusal counts nothing. */
-  admitTurn(network: string, now: number, perNetwork: number, perDay: number, stopBytes?: number | null): TurnAdmission {
+  /** Counts one more TURN credential minted today for `network`, unless that network (`perNetwork`) or the whole relay (`perDay`) has minted
+   *  its day's. */
+  admitTurn(network: string, now: number, perNetwork: number, perDay: number): Admission {
     if (!NETWORK_KEY.test(network)) throw new Error("not a network key");
-    if (typeof stopBytes === "number") {
-      const verdict = usageVerdict(this.turnUsage(), now, stopBytes);
-      if (verdict === "month_full") return "month_full";
-      if (verdict === "unknown") return "usage_unknown";
-    }
     const day = utcDay(now);
     const sql = this.ctx.storage.sql;
     const count = (key: string) => sql.exec<{ count: number }>("SELECT count FROM turn_mints WHERE day = ? AND key = ?", day, key).toArray()[0]?.count ?? 0;
@@ -73,11 +66,17 @@ export class Registrar extends DurableObject<object> {
     return row && row.month !== null && row.bytes !== null && row.read_at !== null ? { month: row.month, bytes: row.bytes, readAt: row.read_at } : null;
   }
 
-  /** Keeps a good reading: `bytes` of TURN egress in `month`, read at `now`. */
+  /** Whether the monthly stop lets a credential be minted at `now` (the stop at `stopBytes`). Counts nothing. */
+  turnStop(now: number, stopBytes: number): UsageVerdict {
+    return usageVerdict(this.turnUsage(), now, stopBytes);
+  }
+
+  /** Keeps a good reading: `bytes` of TURN egress in `month`, read at `now`; never over a reading taken later (a slow one finishing last). */
   recordTurnUsage(month: string, bytes: number, now: number): void {
     if (!/^\d{4}-\d{2}$/.test(month) || !Number.isSafeInteger(bytes) || bytes < 0) throw new Error("not a reading");
     this.ctx.storage.sql.exec(
-      "INSERT INTO turn_usage (id, month, bytes, read_at) VALUES (1, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET month = excluded.month, bytes = excluded.bytes, read_at = excluded.read_at",
+      "INSERT INTO turn_usage (id, month, bytes, read_at) VALUES (1, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET month = excluded.month, bytes = excluded.bytes, read_at = excluded.read_at " +
+        "WHERE turn_usage.read_at IS NULL OR excluded.read_at >= turn_usage.read_at",
       month,
       bytes,
       now,
