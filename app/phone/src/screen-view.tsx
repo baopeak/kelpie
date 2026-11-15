@@ -5,7 +5,7 @@
 // browser offers one, and a frame the decoder is too far behind for is skipped. The cursor is a layer of its own over the picture: moving it
 // never draws the picture again, so it follows the finger at the screen's own rate, at once where the finger puts it (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, Backlog, canDecode, clampView, detailsText, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { avcChunk, Backlog, canDecode, clampView, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
 import { pathText } from "./conn-path";
 import { needsProof, pathRows, type ViaId } from "./screen-paths";
@@ -100,16 +100,16 @@ function Picker() {
   );
 }
 
-/** A small cursor shown where the computer's is, its point at (0, 0) in CSS pixels: an arrow, or an I-beam over text. Vector, so it is crisp at
- *  any pixel ratio. */
+/** A small cursor shown where the computer's is, its point at the centre (24, 24) of its 48×48 box (`.screen-cursor`): an arrow, or an I-beam
+ *  over text. Vector, so it is crisp at any pixel ratio. */
 function CursorShape(props: { shape: number }) {
   return (
     <Show when={props.shape === 1} fallback={
-      <svg width="14" height="22" viewBox="-1 -1 14 22" style={{ left: "-1px", top: "-1px" }}>
+      <svg width="14" height="22" viewBox="-1 -1 14 22" style={{ left: "23px", top: "23px" }}>
         <path d="M0 0 L0 16 L4.5 12 L8 19 L10.5 18 L7 11 L12 11 Z" fill="#fff" stroke="#000" stroke-width="1.5" />
       </svg>
     }>
-      <svg width="6" height="20" viewBox="-3 -10 6 20" style={{ left: "-3px", top: "-10px" }}>
+      <svg width="6" height="20" viewBox="-3 -10 6 20" style={{ left: "21px", top: "14px" }}>
         <rect x="-1.5" y="-9" width="3" height="18" fill="#fff" stroke="#000" stroke-width="1.5" />
       </svg>
     </Show>
@@ -142,8 +142,8 @@ function Live() {
   let shownSeq = 0;
   let drawFrame = 0;
   let ctx2d: CanvasRenderingContext2D | null = null;
-  // Where and when the finger last put the cursor: the computer's cursor messages (a round trip old) leave its position alone until they
-  // come back there (`reconcileCursor`).
+  // Where and when the phone last put the cursor, and the places it sent before: the computer's cursor messages (a round trip old, or
+  // later) never pull it back to one of those (`reconcileCursor`).
   let echo: CursorEcho | null = null;
   const times = new FrameTimes();
   const backlog = new Backlog();
@@ -300,15 +300,19 @@ function Live() {
 
   onMount(() => {
     onScreenMedia(onMedia);
-    const resize = () => redraw();
-    window.addEventListener("resize", resize);
-    onCleanup(() => window.removeEventListener("resize", resize));
+    // The box changes size with the window and with the lines around it (a status, the way's choice): the picture and the cursor follow.
+    const sized = new ResizeObserver(() => redraw());
+    sized.observe(box);
+    onCleanup(() => sized.disconnect());
   });
   onCleanup(() => {
     delete (globalThis as { __kelpieScreenTimes?: unknown }).__kelpieScreenTimes;
+    if (drawFrame) cancelAnimationFrame(drawFrame);
+    drawFrame = 0;
     onScreenMedia(null);
     decoder?.close();
     latest?.close();
+    latest = null;
     overlay.clear();
     gestures.cancel();
   });
@@ -321,11 +325,14 @@ function Live() {
       setView(o.view);
       redraw();
     }
+    const sent = o.ops.length > 0 && live();
     send(o.ops);
-    // The finger moved the cursor: shown there at once (local echo), the computer's next positions reconciled to it.
-    if (o.ops.some((op) => op.k === "move")) {
-      cursor = { ...cursor, x: gestures.cursor.x, y: gestures.cursor.y };
-      echo = { x: cursor.x, y: cursor.y, at: performance.now() };
+    // What was sent puts the computer's cursor somewhere (a move, or a click, press or wheel at the finger in direct mode): shown there at
+    // once (local echo), the computer's next positions reconciled to it. Nothing sent, nothing echoed.
+    const at = sent ? echoPoint(o.ops) : null;
+    if (at) {
+      cursor = { ...cursor, x: at.x, y: at.y };
+      echo = echoAt(echo, at, performance.now());
       placeCursor();
     }
   };

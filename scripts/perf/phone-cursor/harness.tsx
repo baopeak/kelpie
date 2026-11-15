@@ -19,8 +19,13 @@ render(() => <ScreenView />, document.getElementById("root")!);
 // ---------- the computer's cursor ----------
 const host = { x: W / 2, y: H / 2 };
 let told: string | null = null;
+// Every op the page sends, as the computer would get it (for the gesture checks).
+const sent: { at: number; op: unknown }[] = [];
 onInput((ops) => {
-  for (const op of ops) if (op.k === "move") setTimeout(() => Object.assign(host, { x: op.x, y: op.y }), RTT / 2);
+  for (const op of ops) {
+    sent.push({ at: performance.now(), op });
+    if ("x" in op && op.k !== "wheel") setTimeout(() => Object.assign(host, { x: op.x, y: op.y }), RTT / 2);
+  }
 });
 const cursorMessage = (x: number, y: number) => {
   const b = new Uint8Array(12);
@@ -94,6 +99,8 @@ const spread = (v: number[]) => ({ n: v.length, p50: q(v, 0.5), p95: q(v, 0.95),
 (window as unknown as { __harness: unknown }).__harness = {
   ready: () => rec.videoDraws.length > 10 && shownCursor() !== null,
   now: () => performance.now(),
+  /** The ops sent since `from` (performance.now() ms). */
+  ops: (from = 0) => sent.filter((s) => s.at >= from).map((s) => s.op),
   /** The stroke from `from` to `to` (performance.now() ms), and the settle window after it until `settle`. */
   stats(from: number, to: number, settle: number) {
     const moves = rec.moves.filter((m) => m.start >= from && m.start <= to);

@@ -6,6 +6,8 @@ import {
   BACKLOG_RUN,
   followHostCursor,
   CURSOR_CATCHUP_MS,
+  echoAt,
+  echoPoint,
   CURSOR_ECHO_MS,
   CURSOR_SNAP_PX,
   FrameTimes,
@@ -636,48 +638,63 @@ describe("whether this browser can show the screen", () => {
 
 describe("the cursor the finger moves", () => {
   const at = (x: number, y: number, shape = 0) => ({ shape, visible: true, x, y });
+  /** A stroke: the places the phone sent, one every 16 ms, the last at `end`. */
+  const stroke = (places: [number, number][], end: number) =>
+    places.reduce<ReturnType<typeof echoAt> | null>((e, [x, y], i) => echoAt(e, { x, y }, end - (places.length - 1 - i) * 16), null)!;
 
-  it("is drawn where the finger put it while the computer's positions are older, and then follows them", () => {
-    const drawn = at(500, 300);
-    const echo = { x: 500, y: 300, at: 900 };
+  it("is drawn where the finger put it while the computer's positions are older, and then follows the computer", () => {
+    const echo = stroke([[420, 300], [460, 300], [500, 300]], 1000);
     // A round trip old: the computer still says where the cursor was before the finger moved it.
-    const held = reconcileCursor(drawn, at(420, 300, 1), 1000, echo);
-    expect(held.drawn, "no jump back during the echo, but the shape is the computer's").toEqual(at(500, 300, 1));
-    expect(held.echo, "still waited for").toBe(echo);
-    // The computer comes back to where the finger left it: caught up, and its later positions are followed (a program may move it).
-    const caught = reconcileCursor(drawn, at(501, 299), 900 + CURSOR_ECHO_MS + 100, echo);
-    expect(caught).toEqual({ drawn: at(500, 300), echo: null });
-    expect(reconcileCursor(caught.drawn, at(640, 200), 900 + CURSOR_ECHO_MS + 200, caught.echo)).toEqual({ drawn: at(640, 200), echo: null });
+    const held = reconcileCursor(at(500, 300), at(420, 300, 1), 1100, echo);
+    expect(held.drawn, "no jump back, but the shape is the computer's").toEqual(at(500, 300, 1));
+    // Caught up, then a program moves it: followed at once (a place the phone never sent).
+    const caught = reconcileCursor(held.drawn, at(501, 299), 1000 + CURSOR_ECHO_MS + 100, held.echo);
+    expect(caught.drawn).toEqual(at(500, 300));
+    expect(reconcileCursor(caught.drawn, at(640, 200), 1000 + CURSOR_ECHO_MS + 200, caught.echo).drawn).toEqual(at(640, 200));
   });
 
-  it("is not pulled back along its path by positions that come late, after the finger stopped", () => {
-    // The finger stopped at 500 at t=1000; behind the picture on the relay, the computer's positions on the way there come for a while yet.
-    const echo = { x: 500, y: 300, at: 1000 };
+  it("is not pulled back along its path by positions that come late, even past where the finger left it", () => {
+    // A zigzag that passes where it ends several times, as a finger's fine adjustments do; behind the picture on the relay the computer's
+    // positions come for a while yet, the end's own place among them before older ones.
+    const echo = stroke([[500, 300], [500, 350], [500, 300], [500, 350], [500, 300]], 1000);
     let drawn = at(500, 300);
-    let waiting: typeof echo | null = echo;
-    for (const [x, t] of [[380, 1450], [430, 1600], [470, 1750]] as const) {
-      ({ drawn, echo: waiting } = reconcileCursor(drawn, at(x, 300), t, waiting));
-      expect(drawn.x, `a late ${x} at ${t} ms leaves it where the finger left it`).toBe(500);
-      expect(waiting).toBe(echo);
+    let kept: typeof echo | null = echo;
+    for (const [y, t] of [[300, 1450], [350, 1500], [300, 1600], [350, 1750]] as const) {
+      ({ drawn, echo: kept } = reconcileCursor(drawn, at(500, y), t, kept));
+      expect(drawn.y, `a late ${y} at ${t} ms leaves it where the finger left it`).toBe(300);
     }
-    ({ drawn, echo: waiting } = reconcileCursor(drawn, at(500, 300), 1900, waiting));
-    expect([drawn.x, waiting]).toEqual([500, null]);
   });
 
-  it("follows a place the computer never comes back from once the wait is over (the desk's mouse, an edge)", () => {
-    const echo = { x: 500, y: 300, at: 1000 };
-    expect(reconcileCursor(at(500, 300), at(80, 90), 1000 + CURSOR_CATCHUP_MS - 1, echo).drawn.x).toBe(500);
-    expect(reconcileCursor(at(500, 300), at(80, 90), 1000 + CURSOR_CATCHUP_MS, echo)).toEqual({ drawn: at(80, 90), echo: null });
+  it("follows a place the phone never sent once the first moment is over, and any place once the wait is over", () => {
+    const echo = stroke([[480, 300], [500, 300]], 1000);
+    expect(reconcileCursor(at(500, 300), at(80, 90), 1000 + CURSOR_ECHO_MS - 1, echo).drawn.x, "never during the first moment").toBe(500);
+    expect(reconcileCursor(at(500, 300), at(80, 90), 1000 + CURSOR_ECHO_MS, echo).drawn, "the desk's mouse, at once after it").toEqual(at(80, 90));
+    expect(reconcileCursor(at(500, 300), at(480, 300), 1000 + CURSOR_CATCHUP_MS - 1, echo).drawn.x, "a place it sent: late").toBe(500);
+    expect(reconcileCursor(at(500, 300), at(480, 300), 1000 + CURSOR_CATCHUP_MS, echo)).toEqual({ drawn: at(480, 300), echo: null });
   });
 
-  it("holds for the first moment even at the place the finger left it, and never jitters by a pixel or two", () => {
+  it("keeps the places sent for as long as they may come back, and never jitters by a pixel or two", () => {
+    let e = echoAt(null, { x: 1, y: 1 }, 0);
+    e = echoAt(e, { x: 2, y: 2 }, CURSOR_CATCHUP_MS - 1);
+    e = echoAt(e, { x: 3, y: 3 }, CURSOR_CATCHUP_MS + 10);
+    expect(e.trail.map((t) => t.x)).toEqual([2, 3]);
+    expect([e.x, e.y, e.at]).toEqual([3, 3, CURSOR_CATCHUP_MS + 10]);
     const drawn = at(500, 300);
-    // While the finger moves, a position equal to the newest echo is old news too: the hold is not ended by it.
-    expect(reconcileCursor(drawn, at(500, 300), 1100, { x: 500, y: 300, at: 1000 }).echo).not.toBeNull();
     const near = at(500 + CURSOR_SNAP_PX, 300 - CURSOR_SNAP_PX);
     expect(reconcileCursor(drawn, near, 10_000, null).drawn).toEqual(drawn);
     expect(reconcileCursor(drawn, { ...near, x: 500 + CURSOR_SNAP_PX + 1 }, 10_000, null).drawn.x).toBe(500 + CURSOR_SNAP_PX + 1);
-    expect(reconcileCursor(drawn, { ...drawn, visible: false }, 1000, { x: 500, y: 300, at: 999 }).drawn.visible, "hidden by the computer is hidden").toBe(false);
+    expect(reconcileCursor(drawn, { ...drawn, visible: false }, 1000, echoAt(null, drawn, 999)).drawn.visible, "hidden by the computer is hidden").toBe(false);
+  });
+
+  it("is echoed where the ops sent put the computer's cursor", () => {
+    expect(echoPoint([{ k: "move", x: 1, y: 2 }, { k: "move", x: 3, y: 4 }])).toEqual({ x: 3, y: 4 });
+    // A tap in direct mode clicks under the finger: the computer's cursor goes there, and so is it shown, at once.
+    expect(echoPoint([{ k: "click", x: 90, y: 80, b: "left" }])).toEqual({ x: 90, y: 80 });
+    expect(echoPoint([{ k: "up", x: 5, y: 6, b: "left" }, { k: "key", key: "Enter", mods: [] }])).toEqual({ x: 5, y: 6 });
+    expect(echoPoint([{ k: "key", key: "Tab", mods: [] }])).toBeNull();
+    // A drag to 500 then a tap at 90: the computer's late 500 does not take the cursor back from where the tap put it.
+    const echo = echoAt(echoAt(null, { x: 500, y: 300 }, 1000), { x: 90, y: 80 }, 1200);
+    expect(reconcileCursor(at(90, 80), at(500, 300), 1700, echo).drawn).toEqual(at(90, 80));
   });
 });
 
@@ -710,21 +727,19 @@ describe("what the phone measures of each frame", () => {
 });
 describe("a trackpad tap after the finger moved the cursor", () => {
   it("clicks where the cursor is drawn, not where a message a round trip old says it was", () => {
-    // The finger moved the cursor to 500 and lifted: the echo draws it there.
+    // The finger moved the cursor from 440 to 500 and lifted: the echo draws it there.
     let drawn = { shape: 0, visible: true, x: 500, y: 300 };
     let tapAt = { x: 500, y: 300 };
-    let echo: { x: number; y: number; at: number } | null = { x: 500, y: 300, at: 1000 };
+    let echo: ReturnType<typeof echoAt> | null = echoAt(echoAt(null, { x: 440, y: 300 }, 980), { x: 500, y: 300 }, 1000);
     // The computer's message, a round trip old, still says 440.
     ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 440, y: 300 }, 1100, echo, true));
     expect(drawn.x).toBe(500);
     expect(tapAt, "the tap goes where the cursor is drawn").toEqual({ x: 500, y: 300 });
     // Still late after the first moment: the tap stays where the cursor is drawn.
-    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 470, y: 300 }, 1600, echo, true));
+    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 440, y: 300 }, 1600, echo, true));
     expect([drawn.x, tapAt.x]).toEqual([500, 500]);
-    // Caught up, then the computer's place is drawn, and the tap follows it there.
-    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 500, y: 300 }, 1700, echo, true));
-    expect(echo).toBeNull();
-    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 520, y: 310 }, 2000, echo, true));
+    // A place the phone never sent (moved at the desk): drawn, and the tap follows it there.
+    ({ drawn, tapAt, echo } = followHostCursor(drawn, tapAt, { shape: 0, visible: true, x: 520, y: 310 }, 1700, echo, true));
     expect([drawn.x, tapAt.x]).toEqual([520, 520]);
     // With a finger down the gesture's own point is not touched.
     ({ tapAt } = followHostCursor(drawn, { x: 7, y: 8 }, { shape: 0, visible: true, x: 600, y: 600 }, 5000, null, false));

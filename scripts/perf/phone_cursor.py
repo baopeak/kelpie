@@ -8,10 +8,14 @@ has, and lets the page's fake computer send 1080p H.264 at 30 frames a second an
 slowdown in --throttle (Chromium's own emulation; 4 is closer to a phone than a desktop is), --strokes trackpad strokes of 1.5 s with real touch
 events at 60 a second, each followed by 2 s with no finger.
 
-Per stroke it reports: the moves handled, each move's wait before handling and its handling time, the move to the next animation frame
-(when the cursor can be seen there), the frame rate and long frames (> 25 ms), how often the shown cursor changed place a second, the video
-pictures drawn a second and their drawImage time; and after the finger stops, how far the shown cursor went from where the finger left it
-(a snap back to an older place) and for how many frames. Needs Playwright for Python with Chromium and the app's node_modules. Stops the
+Per stroke it reports: the moves handled, each move's wait before handling and its handling time (`handlerMs`: what a move costs the page,
+the number that tells a cursor drawn into the canvas from one on its own layer), the move to the next animation frame (the earliest the cursor
+can be seen there; both ways show it at the next composited frame, so this moves with the main thread's load, not with the way), the frame
+rate and long frames (> 25 ms), how often the cursor's place changed a second (read from what the page set: the transform it drew the cursor
+with, or the cursor layer's transform, not from pixels), the video pictures drawn a second and their drawImage time; and after the finger
+stops, how far the cursor went from where the finger left it (a snap back to an older place) and for how many frames. Only the canvas's
+`desynchronized` flag is made Safari's; the compositor is Chromium's. The fake computer moves its cursor to the places the page sends and
+answers in order, with no loss, reordering or desk mouse. Needs Playwright for Python with Chromium and the app's node_modules. Stops the
 Vite it started (by PID).
 """
 import argparse

@@ -229,7 +229,8 @@ a.btn { display: inline-block; text-decoration: none; color: inherit; }
 .takeover-entry .btn + .btn { margin-left: 8px; }
 .screen-canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
 .screen-live.dim .screen-canvas canvas { opacity: .4; }
-.screen-cursor { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; will-change: transform; }
+/* A box of its own size around the point (its centre), so the layer holds the whole shape without overflowing it. */
+.screen-cursor { position: absolute; left: -24px; top: -24px; width: 48px; height: 48px; pointer-events: none; will-change: transform; }
 .screen-cursor svg { position: absolute; overflow: visible; display: block; }
 .screen-live.dim .screen-cursor { opacity: .4; }
 .screen-quality { margin: 0; padding: 4px 12px; font-size: 12px; min-height: 16px; }

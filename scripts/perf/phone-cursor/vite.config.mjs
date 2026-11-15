@@ -1,5 +1,6 @@
 // The phone's screen view alone, for the cursor measurement (phone_cursor.py): the real screen-view.tsx and screen.ts, with the phone's state
 // and words replaced by stubs here, so no computer, link or dictionary is needed. Served by the app's own Vite (app/node_modules).
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -30,6 +31,8 @@ function stubs() {
 export default {
   root: here,
   configFile: false,
+  // Outside the repository: nothing a run writes is left in the worktree.
+  cacheDir: path.join(os.tmpdir(), "kelpie-phone-cursor-vite"),
   plugins: [stubs(), solid({ hot: false, dev: false })],
   define: { __HOSTED__: "false", __APP_VERSION__: JSON.stringify("harness") },
   optimizeDeps: { noDiscovery: true, include: [] },

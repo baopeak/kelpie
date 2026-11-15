@@ -334,14 +334,14 @@ export function coalesce(ops: ScOp[]): ScOp[] {
   return out;
 }
 
-/** After the phone moved its own cursor, the computer's cursor messages (a round trip old) leave its position alone for at least this long:
- *  while the finger moves, every message is older than the place it put the cursor. */
+/** After the phone moved its own cursor, the computer's cursor messages (a round trip old) leave its position alone for this long: while the
+ *  finger moves, every message is older than the place it put the cursor. */
 export const CURSOR_ECHO_MS = 400;
-/** Past that, they still leave it alone until one comes back to where the finger left the cursor (the computer caught up: older messages,
- *  late behind the picture on the relay, would pull it back along its path), for at most this long. A place the computer never comes back to
- *  (the mouse moved at the desk, a program moved it, an edge held it) is drawn after it. */
+/** After that, for this long from the finger's last move, a message at a place the phone itself sent is taken as late (it would pull the
+ *  cursor back along its path: behind the picture on the relay, the computer's messages come well after a round trip). A place the phone did
+ *  not send (the mouse at the desk, a program, an edge that held the cursor) is followed at once; after this long, any place is. */
 export const CURSOR_CATCHUP_MS = 2000;
-/** A computer position this close (source pixels) to the drawn one is taken as the same, so the cursor does not jitter. */
+/** A computer position this close (source pixels) to another is taken as the same, so the cursor does not jitter. */
 export const CURSOR_SNAP_PX = 3;
 
 export interface CursorPos {
@@ -351,29 +351,43 @@ export interface CursorPos {
   y: number;
 }
 
-/** Where the finger last put the cursor (source pixels) and when. */
+/** Where the phone last put the cursor (source pixels) and when, and every place it sent within `CURSOR_CATCHUP_MS` of that (oldest first,
+ *  the last one included): what the computer may still say late. */
 export interface CursorEcho {
   x: number;
   y: number;
   at: number;
+  trail: { x: number; y: number; at: number }[];
 }
 
-/** Where to draw the cursor when the computer says where it is, and the echo still waited for (null once the computer caught up or the wait
- *  is over). The shape and visibility always follow the computer; the position does too, unless the finger moved the cursor within
- *  `CURSOR_ECHO_MS`, or the computer has not come back to where the finger left it within `CURSOR_CATCHUP_MS`, or it is within `CURSOR_SNAP_PX`. */
+/** The echo once the phone put the cursor at `p` at `now`: the places sent before it kept for as long as they may still come back. */
+export function echoAt(prev: CursorEcho | null, p: { x: number; y: number }, now: number): CursorEcho {
+  const trail = (prev?.trail ?? []).filter((t) => now - t.at < CURSOR_CATCHUP_MS);
+  trail.push({ x: p.x, y: p.y, at: now });
+  return { x: p.x, y: p.y, at: now, trail };
+}
+
+/** Where ops sent put the computer's cursor: the last one with a place (a move, or a click, press, release or wheel, which the computer
+ *  moves the cursor to first), or null for keys alone. */
+export function echoPoint(ops: readonly ScOp[]): { x: number; y: number } | null {
+  const at = ops.findLast((op): op is Exclude<ScOp, { k: "key" }> => op.k !== "key");
+  return at ? { x: at.x, y: at.y } : null;
+}
+
+/** Where to draw the cursor when the computer says where it is, and the echo still kept (null once its time is over). The shape and
+ *  visibility always follow the computer; the position does too, unless the phone put the cursor somewhere within `CURSOR_ECHO_MS`, or the
+ *  computer names a place the phone sent within `CURSOR_CATCHUP_MS` (a late message), or it is within `CURSOR_SNAP_PX` of the drawn one. */
 export function reconcileCursor(drawn: CursorPos, host: CursorPos, now: number, echo: CursorEcho | null): { drawn: CursorPos; echo: CursorEcho | null } {
   const near = (p: { x: number; y: number }) => Math.abs(host.x - p.x) <= CURSOR_SNAP_PX && Math.abs(host.y - p.y) <= CURSOR_SNAP_PX;
   const kept = { ...host, x: drawn.x, y: drawn.y };
-  if (echo) {
-    const since = now - echo.at;
-    if (since < CURSOR_ECHO_MS || (since < CURSOR_CATCHUP_MS && !near(echo))) return { drawn: kept, echo };
-  }
-  return { drawn: near(drawn) ? kept : host, echo: null };
+  const since = echo ? now - echo.at : Infinity;
+  if (since < CURSOR_ECHO_MS || (since < CURSOR_CATCHUP_MS && echo!.trail.some(near))) return { drawn: kept, echo };
+  return { drawn: near(drawn) ? kept : host, echo: since < CURSOR_CATCHUP_MS ? echo : null };
 }
 
-/** A computer cursor message, as the page takes it: the cursor drawn and the echo still waited for (`reconcileCursor`), and, with no finger
- *  down, the point a trackpad tap clicks, which is always where the cursor is drawn (never the message's own position, which a local echo may
- *  be ahead of). */
+/** A computer cursor message, as the page takes it: the cursor drawn and the echo still kept (`reconcileCursor`), and, with no finger down,
+ *  the point a trackpad tap clicks, which is always where the cursor is drawn (never the message's own position, which a local echo may be
+ *  ahead of). */
 export function followHostCursor(drawn: CursorPos, tapAt: { x: number; y: number }, host: CursorPos, now: number, echo: CursorEcho | null, idle: boolean) {
   const next = reconcileCursor(drawn, host, now, echo);
   return { drawn: next.drawn, echo: next.echo, tapAt: idle ? { x: next.drawn.x, y: next.drawn.y } : tapAt };
