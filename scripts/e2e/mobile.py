@@ -100,28 +100,7 @@ def check_no_real_prompt(d):
         raise SystemExit(f"the daemon would raise a real verification prompt (test seam: {seam!r}): use a debug build, with KELPIE_TEST_USER_PRESENCE=approve in tauri-driver's environment.")
 
 
-def certificate_for_loopback(folder):
-    """A certificate for localhost and 127.0.0.1 and its key, made for this run: (certificate file, key file). A passkey needs a name, so the page is opened at `localhost`."""
-    import datetime
-    import ipaddress
-
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.x509.oid import NameOID
-
-    key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
-    now = datetime.datetime.now(datetime.timezone.utc)
-    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key()).serial_number(x509.random_serial_number())
-            .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(days=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False).sign(key, hashes.SHA256()))
-    cert_file, key_file = os.path.join(folder, "loopback.crt"), os.path.join(folder, "loopback.key")
-    with open(cert_file, "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.PEM))
-    with open(key_file, "wb") as f:
-        f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-    return cert_file, key_file
+certificate_for_loopback = ps.certificate_for_loopback
 
 
 REFUSED = []  # set when the app's daemon is not the isolated one: the run ends with an error, not with "0 failed"

@@ -1498,11 +1498,27 @@ computer that tries to stand in for Kelpie's window here is refused, and Kelpie 
 
 **Seeing the computer's screen from the phone** (Windows). When an agent waits on something outside Kelpie — a dialog, an installer, the app it is building,
 an IDE — a phone given *May take control* can see one of the computer's screens or one window and use it: *See the computer's screen* in the inbox or in a session lists the
-screens, then Kelpie and the code editors that are open, then the other windows. On the phone one finger works as a trackpad: it moves the computer's pointer,
-a tap clicks where the pointer is, holding still then moving drags, and a long press right-clicks; *Direct touch* clicks under your finger instead. Two fingers
-scroll, pinching zooms the phone's view (not the computer's), and two fingers tapped together right-click. The key row has Ctrl, Shift, Alt and Win (tap one,
-then a key, or type one letter with it held for a shortcut such as Ctrl+S or Win+E), Esc, Tab, Enter, the arrows, ⊞ (the Windows key alone, for Start) and a few more; the text field types on the computer and
-the phone says *Typed on the computer* or *Not sent*. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`), and a
+screens, then Kelpie and the code editors that are open, then the other windows. The first screen opens with a sheet of the gestures, and **?** at the top shows
+it again. The button next to it switches between the two ways a finger works:
+
+| Gesture | Trackpad (the default) | Direct touch |
+| --- | --- | --- |
+| Slide one finger | Moves the pointer by the finger's move: a slow finger points finely at a small target, a quick one crosses the screen | Scrolls |
+| Tap | Clicks where the pointer is | Clicks under the finger |
+| Tap twice | Double-clicks at the pointer | Double-clicks where the first tap was, even if the second lands a little off |
+| Hold, then lift (or tap with two fingers) | Right-clicks at the pointer | Right-clicks under the finger |
+| Hold until the ring shows, then move | Drags from the pointer; lift to drop | Drags from under the finger, with a magnifier above it; lift to drop |
+| Slide two fingers | Scrolls | Scrolls |
+| Pinch | Zooms the phone's view (not the computer's) around the pointer, which the view then follows | Zooms around the fingers |
+
+A ring shows where each click went (two for a double click, orange for a right click); holding still shows a ring and *Lift for a right click, or move to
+drag* before anything is sent, and *Dragging* stays at the top while the button is held. Android also buzzes for each; Safari on the iPhone cannot. *Fit*
+shows the whole picture again after a zoom. The pointer drawn on the phone follows your finger at once and is never pulled back to where it was a moment ago,
+so a tap right after a move clicks where you see it. The key row has Ctrl, Shift, Alt and Win (tap one,
+then a key, or type one letter with it held for a shortcut such as Ctrl+S or Win+E), Esc, Tab, Enter, the arrows, ⊞ (the Windows key alone, for Start) and a few more.
+The text field shows what you type, in any language your keyboard has (Vietnamese with its marks included); *Hide* masks it while you type a password. Return
+on the phone's keyboard or *Type it* types it on the computer, the keyboard stays up for more, and the phone says *Typed on the computer* or *Not sent*. While the
+keyboard is up the picture fits in the space above it. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`), and a
 second line the way it connects, the round trip, the data rate, the frames a second, the size and how old the picture is (`Tailscale · 85 ms round trip ·
 1200 kbps · 30 fps · 1080p · 120 ms old`); tap the first line for more, and *Copy measurements* under it copies those numbers (sizes, timings and
 the kind of connection, never what the picture shows) to paste into a note or a bug report. When text stands still it is sent once more as a sharp picture (*Crisp text* in

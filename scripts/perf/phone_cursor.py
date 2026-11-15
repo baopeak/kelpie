@@ -114,6 +114,9 @@ def run() -> dict:
             except Exception:
                 print("the page did not get ready:", errors[:10], file=sys.stderr)
                 raise
+            # A first screen opens with the gestures' sheet over the picture: closed, as a person would.
+            if page.locator("[data-screen-help-close]").count():
+                page.click("[data-screen-help-close]")
             box = page.locator(".screen-canvas").bounding_box()
             cx, cy = box["x"] + box["width"] / 2 - 110, box["y"] + box["height"] / 2 - 30
             cdp = ctx.new_cdp_session(page)

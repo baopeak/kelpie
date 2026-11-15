@@ -5,15 +5,51 @@
 // browser offers one, and a frame the decoder is too far behind for is skipped. The cursor is a layer of its own over the picture: moving it
 // never draws the picture again, so it follows the finger at the screen's own rate, at once where the finger puts it (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, Backlog, canDecode, clampView, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, KEYS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Frame, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { avcChunk, Backlog, canDecode, clampView, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, keepInView, KEYS, LONG_PRESS_MS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Feel, type Frame, type GestureOut, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { screenGesturesSeen } from "./prefs";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
 import { pathText } from "./conn-path";
 import { needsProof, pathRows, type ViaId } from "./screen-paths";
 import { HOSTED } from "./hosted";
-import { t } from "./i18n";
+import { msg, t } from "./i18n";
 
 const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", F5: "F5", ContextMenu: "☰", Meta: "⊞" };
 const MOD_LABELS: Record<Mod, string> = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", meta: "Win" };
+
+/** What a finger does in each mode, as the help sheet lists it: the gesture, then what the computer gets. */
+const GESTURE_ROWS: Record<"trackpad" | "direct", [string, string][]> = {
+  trackpad: [
+    [msg("Slide one finger"), msg("Moves the cursor: slowly for a small target, quickly to cross the screen")],
+    [msg("Tap"), msg("Clicks where the cursor is")],
+    [msg("Tap twice"), msg("Double-clicks there")],
+    [msg("Hold, then lift, or tap with two fingers"), msg("Right-clicks")],
+    [msg("Hold until the ring shows, then move"), msg("Drags; lift the finger to drop")],
+    [msg("Slide two fingers"), msg("Scrolls")],
+    [msg("Pinch"), msg("Zooms this phone's view around the cursor; Fit shows all of it again")],
+  ],
+  direct: [
+    [msg("Tap"), msg("Clicks under the finger")],
+    [msg("Tap twice"), msg("Double-clicks there")],
+    [msg("Hold, then lift, or tap with two fingers"), msg("Right-clicks")],
+    [msg("Hold until the ring shows, then move"), msg("Drags, with a magnifier above the finger; lift it to drop")],
+    [msg("Slide one or two fingers"), msg("Scrolls")],
+    [msg("Pinch"), msg("Zooms this phone's view; Fit shows all of it again")],
+  ],
+};
+
+/** A short buzz to confirm a click or a long press, where the browser can (Android; Safari on the iPhone cannot). */
+function buzz(ms: number) {
+  try {
+    navigator.vibrate?.(ms);
+  } catch {
+    /* not allowed here: the ring on the picture says it */
+  }
+}
+const BUZZ: Record<Feel, number> = { click: 8, double: 14, right: 20, drag: 25 };
+const FEEL_TEXT: Record<Feel, string> = { click: "", double: msg("Double click"), right: msg("Right click"), drag: "" };
+/** The magnifier's size (CSS pixels) and how much it enlarges. */
+const LOUPE = 110;
+const LOUPE_ZOOM = 2;
 
 /** The ways the computer lists for the screen, as the rows of Connect through (none from a computer that offers no choice). */
 const connectRows = () => pathRows(remoteScreen()?.paths, remoteScreen()?.relay, { ...remoteScreens.side(remoteScreen()?.p2pFailed ?? false), hosted: HOSTED }, t);
@@ -121,6 +157,8 @@ function Live() {
   let box!: HTMLDivElement;
   let canvas!: HTMLCanvasElement;
   let cursorEl!: HTMLDivElement;
+  let loupeEl: HTMLCanvasElement | undefined;
+  let textField!: HTMLInputElement;
   const gestures = new Gestures();
   const [mode, setMode] = createSignal<"trackpad" | "direct">("trackpad");
   const [mods, setMods] = createSignal<Mod[]>([]);
@@ -128,6 +166,17 @@ function Live() {
   const [debug, setDebug] = createSignal(false);
   const [view, setView] = createSignal<View>({ zoom: 1, cx: 0, cy: 0 });
   const [queue, setQueue] = createSignal(0);
+  // What the fingers did, shown on the picture: rings where clicks went (gone after a moment), the long press held, a drag going on, the
+  // direct mode's magnifier (CSS pixels from the picture box's corner).
+  const [marks, setMarks] = createSignal<{ id: number; x: number; y: number; feel: Feel }[]>([]);
+  const [hold, setHold] = createSignal<{ x: number; y: number } | null>(null);
+  const [dragging, setDragging] = createSignal(false);
+  const [loupe, setLoupe] = createSignal<{ x: number; y: number } | null>(null);
+  const [help, setHelp] = createSignal(!screenGesturesSeen.get());
+  // The text field shows what is typed; hidden (a password) on request.
+  const [hideText, setHideText] = createSignal(false);
+  // The on-screen keyboard is up: the screen fits in what is left above it (the visual viewport), not under it.
+  const [keyboard, setKeyboard] = createSignal<{ top: number; height: number } | null>(null);
   const live = () => s().phase === "live" && connected();
 
   let decoder: VideoDecoder | null = null;
@@ -198,6 +247,7 @@ function Live() {
     }
     // The view or the picture's size may have changed: the cursor goes with the picture.
     placeCursor();
+    drawLoupe();
   };
   /** One whole drawing at the next animation frame, however many things asked for it (a picture drawn meanwhile takes it). */
   const redraw = () => {
@@ -300,15 +350,34 @@ function Live() {
 
   onMount(() => {
     onScreenMedia(onMedia);
-    // The box changes size with the window and with the lines around it (a status, the way's choice): the picture and the cursor follow.
-    const sized = new ResizeObserver(() => redraw());
+    // The box changes size with the window, the keyboard and the lines around it (a status, the way's choice): the picture and the cursor
+    // follow, and a zoomed view keeps the cursor in it (where the person is typing, near enough).
+    const sized = new ResizeObserver(() => {
+      if (src.w && cursor.visible) setView((v) => keepInView(frame().el, src.w, src.h, v, cursor));
+      redraw();
+    });
     sized.observe(box);
     onCleanup(() => sized.disconnect());
+    // The keyboard: Safari shrinks the visual viewport and leaves the page's height alone, so the screen is fitted to the visual viewport
+    // while the text field has the focus, and the picture keeps the part above the keyboard.
+    const vv = window.visualViewport;
+    if (vv) {
+      const fit = () => setKeyboard(document.activeElement === textField && vv.height < document.documentElement.clientHeight - 80 ? { top: vv.offsetTop, height: vv.height } : null);
+      vv.addEventListener("resize", fit);
+      vv.addEventListener("scroll", fit);
+      textField.addEventListener("focus", fit);
+      textField.addEventListener("blur", fit);
+      onCleanup(() => {
+        vv.removeEventListener("resize", fit);
+        vv.removeEventListener("scroll", fit);
+      });
+    }
   });
   onCleanup(() => {
     delete (globalThis as { __kelpieScreenTimes?: unknown }).__kelpieScreenTimes;
     if (drawFrame) cancelAnimationFrame(drawFrame);
     drawFrame = 0;
+    clearTimeout(holdTimer);
     onScreenMedia(null);
     decoder?.close();
     latest?.close();
@@ -320,7 +389,55 @@ function Live() {
   const send = (ops: ScOp[]) => {
     if (ops.length && live()) remoteScreens.input(ops);
   };
-  const out = (o: { ops: ScOp[]; view?: View }) => {
+  /** A source point → CSS pixels from the picture box's corner. */
+  const inBox = (p: { x: number; y: number }) => {
+    const r = box.getBoundingClientRect();
+    return toClient(p.x, p.y, { left: 0, top: 0, width: r.width, height: r.height }, src.w, src.h, view());
+  };
+  let markId = 0;
+  /** A ring where a click, double click, right click or drag went (a drag's where it was picked up), and a short buzz. */
+  const feel = (o: GestureOut) => {
+    const at = o.feel === "drag" ? echoPoint(o.ops.slice(0, 1)) : o.feel ? echoPoint(o.ops) : null;
+    if (!o.feel || !at) return;
+    buzz(BUZZ[o.feel]);
+    const m = { id: ++markId, ...inBox(at), feel: o.feel };
+    setMarks((all) => [...all.slice(-4), m]);
+    setTimeout(() => setMarks((all) => all.filter((x) => x.id !== m.id)), 600);
+  };
+  /** The magnifier above the finger (direct mode): what the picture shows under it, enlarged, with the point marked. */
+  const drawLoupe = () => {
+    const at = loupe();
+    const ctx = at && loupeEl?.getContext("2d");
+    if (!at || !ctx || !loupeEl) return;
+    const dpr = window.devicePixelRatio || 1;
+    const size = Math.round(LOUPE * dpr);
+    if (loupeEl.width !== size) loupeEl.width = loupeEl.height = size;
+    const half = (LOUPE / LOUPE_ZOOM / 2) * dpr;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, size, size);
+    ctx.drawImage(canvas, at.x * dpr - half, at.y * dpr - half, half * 2, half * 2, 0, 0, size, size);
+    ctx.strokeStyle = "rgba(232, 116, 59, .9)";
+    ctx.lineWidth = dpr;
+    ctx.beginPath();
+    ctx.moveTo(size / 2 - 6 * dpr, size / 2);
+    ctx.lineTo(size / 2 + 6 * dpr, size / 2);
+    ctx.moveTo(size / 2, size / 2 - 6 * dpr);
+    ctx.lineTo(size / 2, size / 2 + 6 * dpr);
+    ctx.stroke();
+  };
+  /** The long press, the drag and the magnifier as the gesture is now. */
+  const showHeld = () => {
+    const r = box.getBoundingClientRect();
+    const h = gestures.held(performance.now(), frame());
+    setHold(h ? inBox(h) : null);
+    setDragging(gestures.dragging());
+    const finger = gestures.finger();
+    setLoupe(mode() === "direct" && finger && (h || gestures.dragging()) ? { x: finger.x - r.left, y: finger.y - r.top } : null);
+    drawLoupe();
+  };
+  let holdTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const out = (o: GestureOut) => {
     if (o.view) {
       setView(o.view);
       redraw();
@@ -335,6 +452,8 @@ function Live() {
       echo = echoAt(echo, at, performance.now());
       placeCursor();
     }
+    // Shown and buzzed only when it went to the computer.
+    if (sent) feel(o);
   };
   const touch = (e: PointerEvent) => ({ id: e.pointerId, x: e.clientX, y: e.clientY });
   const down = (e: PointerEvent) => {
@@ -342,10 +461,27 @@ function Live() {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     gestures.mode = mode();
     out(gestures.down(touch(e), e.timeStamp, frame()));
+    // Held still long enough, the press shows what it will do (a ring and a buzz; the magnifier in direct mode).
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => {
+      showHeld();
+      if (hold()) buzz(BUZZ.right);
+    }, LONG_PRESS_MS + 10);
   };
-  const move = (e: PointerEvent) => out(gestures.move(touch(e), e.timeStamp, frame()));
-  const up = (e: PointerEvent) => out(gestures.up(touch(e), e.timeStamp, frame()));
-  const cancel = () => out(gestures.cancel());
+  const move = (e: PointerEvent) => {
+    out(gestures.move(touch(e), e.timeStamp, frame()));
+    if (hold() || dragging() || loupe()) showHeld();
+  };
+  const up = (e: PointerEvent) => {
+    out(gestures.up(touch(e), e.timeStamp, frame()));
+    if (gestures.idle()) clearTimeout(holdTimer);
+    showHeld();
+  };
+  const cancel = () => {
+    out(gestures.cancel());
+    clearTimeout(holdTimer);
+    showHeld();
+  };
 
   const key = (k: string) => {
     send([{ k: "key", key: k, mods: mods() }]);
@@ -377,26 +513,53 @@ function Live() {
       setText("");
       return;
     }
-    if (await remoteScreens.type(value)) setText("");
+    // Only what was sent leaves the field: words typed while it went stay there.
+    if (await remoteScreens.type(value)) setText((now) => (now.startsWith(value) ? now.slice(value.length) : now));
   };
+  /** The field keeps the focus (and the keyboard stays up) after a button next to it: asked again within the tap itself. */
+  const keepTyping = () => textField.focus({ preventScroll: true });
   // The part shown now, sent crisp once (while crisp text is off for a slow connection).
   const sharpen = () => remoteScreens.sharpen(visibleRect(frame().el, src.w, src.h, view()));
   const resetView = () => {
     setView(clampView(frame().el, src.w, src.h, fitView(src.w, src.h)));
     redraw();
   };
+  const closeHelp = () => {
+    screenGesturesSeen.set(true);
+    setHelp(false);
+  };
 
   return (
-    <div class="takeover screen-live" classList={{ dim: !live() }} data-phase={s().phase}>
+    <div class="takeover screen-live" classList={{ dim: !live(), keyboard: !!keyboard() }} data-phase={s().phase} data-keyboard={keyboard() ? "up" : undefined}
+      style={keyboard() ? { position: "fixed", left: "0", right: "0", top: `${keyboard()!.top}px`, height: `${keyboard()!.height}px` } : undefined}>
       <div class="takeover-head">
         <span class="takeover-title">{s().title}</span>
         <button class="btn" data-screen-mode onClick={() => setMode(mode() === "trackpad" ? "direct" : "trackpad")}>{mode() === "trackpad" ? t("Trackpad") : t("Direct touch")}</button>
-        <Show when={view().zoom > 1}><button class="btn" onClick={resetView}>{t("Fit")}</button></Show>
+        <button class="btn" data-screen-help aria-label={t("How the fingers work")} aria-expanded={help()} onClick={() => (help() ? closeHelp() : setHelp(true))}>?</button>
+        <Show when={view().zoom > 1}><button class="btn" data-screen-fit onClick={resetView}>{t("Fit")}</button></Show>
         <button class="btn danger" data-screen-stop onClick={() => void remoteScreens.stop()}>{t("Stop")}</button>
       </div>
       <div class="takeover-screen screen-canvas" ref={box} style={{ "touch-action": "none" }} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}>
         <canvas ref={canvas} aria-label={t("The computer's screen")} />
         <div class="screen-cursor" ref={cursorEl} style={{ display: "none" }} aria-hidden="true" data-screen-cursor><CursorShape shape={cursorShape()} /></div>
+        <For each={marks()}>
+          {(m) => (
+            <div class={`screen-mark ${m.feel}`} style={{ transform: `translate3d(${m.x}px, ${m.y}px, 0)` }} aria-hidden="true" data-screen-mark={m.feel}>
+              <Show when={FEEL_TEXT[m.feel]}><span>{t(FEEL_TEXT[m.feel])}</span></Show>
+            </div>
+          )}
+        </For>
+        <Show when={hold()}>
+          {(h) => (
+            <div class="screen-mark held" style={{ transform: `translate3d(${h().x}px, ${h().y}px, 0)` }} data-screen-held>
+              <span>{t("Lift for a right click, or move to drag")}</span>
+            </div>
+          )}
+        </Show>
+        <Show when={loupe()}>
+          {(l) => <canvas class="screen-loupe" ref={(el) => { loupeEl = el; queueMicrotask(drawLoupe); }} style={{ transform: `translate3d(${l().x - LOUPE / 2}px, ${Math.max(0, l().y - LOUPE - 40)}px, 0)` }} aria-hidden="true" data-screen-loupe />}
+        </Show>
+        <Show when={dragging()}><div class="screen-chip" role="status" data-screen-dragging>{t("Dragging: lift your finger to drop")}</div></Show>
         <Show when={remoteText(s().remote, t)}>{(line) => <div class="takeover-lost" role="status" data-remote-state={s().remote}>{line()}</div>}</Show>
         <Show when={s().phase === "frozen" || !connected()}>
           <div class="takeover-lost" role="status" data-screen-reconnecting>
@@ -424,14 +587,30 @@ function Live() {
         {detailsText(s().stats, connected() ? pathText(livePathNow(), t) : null, s().age, t, s().path === "link" ? (s().usedVia === "p2p" ? null : s().usedVia) : s().usedVia, s().path === "p2p" ? (s().pathStats ?? { path: "p2p", local: "", remote: "", relayProtocol: null, rttMs: null, bytesReceived: 0 }) : null)}
       </p>
       <SwitchWay />
+      <Show when={help()}>
+        <div class="screen-help card" role="dialog" aria-modal="false" aria-label={t("How the fingers work")} data-screen-help-sheet={mode()}>
+          <h3>{mode() === "trackpad" ? t("Trackpad: the finger moves the cursor") : t("Direct touch: the finger is the cursor")}</h3>
+          <table>
+            <tbody>
+              <For each={GESTURE_ROWS[mode()]}>{([g, a]) => <tr><th>{t(g)}</th><td>{t(a)}</td></tr>}</For>
+            </tbody>
+          </table>
+          <p class="muted">{t("The button at the top switches between Trackpad and Direct touch. Text you type below is shown as you type it; Hide covers a password.")}</p>
+          <div class="actions"><button class="btn primary" data-screen-help-close onClick={closeHelp}>{t("Got it")}</button></div>
+        </div>
+      </Show>
       <div class="composer">
         <div class="keybar">
           <For each={MODS}>{(m) => <button class="btn" classList={{ primary: mods().includes(m) }} aria-pressed={mods().includes(m)} disabled={!live()} onClick={() => toggleMod(m)}>{MOD_LABELS[m]}</button>}</For>
           <For each={KEYS}>{(k) => <button class="btn" disabled={!live()} aria-label={k} onClick={() => key(k)}>{KEY_LABELS[k]}</button>}</For>
         </div>
-        <form class="takeover-text" onSubmit={(e) => { e.preventDefault(); void sendText(); }}>
-          <input class="field" type="password" autocomplete="off" autocapitalize="off" spellcheck={false} placeholder={t("Text to type on the computer")} value={text()} onInput={(e) => setText(e.currentTarget.value)} disabled={!live()} />
-          <button class="btn primary" disabled={!live() || !text() || s().text === "sending"}>{t("Type it")}</button>
+        <form class="takeover-text" onSubmit={(e) => { e.preventDefault(); keepTyping(); void sendText(); }}>
+          {/* Shown as typed, so the person sees what goes to the computer (a password field would also force an English keyboard on the
+              iPhone, with no Vietnamese); Hide masks it for a password. Enter while a word is still being composed does not send. */}
+          <input class="field" ref={textField} type={hideText() ? "password" : "text"} autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck={false} enterkeyhint="send" placeholder={t("Text to type on the computer")} value={text()} onInput={(e) => setText(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.isComposing || e.keyCode === 229)) e.preventDefault(); }} disabled={!live()} data-screen-text />
+          <button type="button" class="btn" classList={{ primary: hideText() }} aria-pressed={hideText()} onPointerDown={(e) => e.preventDefault()} onClick={() => { setHideText(!hideText()); keepTyping(); }} data-screen-text-hide>{t("Hide")}</button>
+          {/* Pressed without taking the focus from the field: the keyboard stays up for the next words. */}
+          <button class="btn primary" onPointerDown={(e) => e.preventDefault()} disabled={!live() || !text() || s().text === "sending"} data-screen-type>{t("Type it")}</button>
         </form>
         <Show when={s().text}>
           {(r) => <p class="muted" role="status" data-text-result={r()}>{r() === "sending" ? t("Sending…") : r() === "sent" ? t("Typed on the computer.") : t("Not sent: check the screen, then type it again.")}</p>}

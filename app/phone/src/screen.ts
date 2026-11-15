@@ -28,8 +28,14 @@ export const FLUSH_MS = 33;
 export const LONG_PRESS_MS = 450;
 /** A touch that moves less than this (screen pixels) is a tap. */
 export const TAP_SLOP = 10;
-/** Trackpad mode: the cursor moves this many times as far on the picture as the finger moves on the glass. */
+/** Trackpad mode: the cursor moves this many times as far on the picture as the finger moves on the glass, at an ordinary speed. */
 export const TRACKPAD_GAIN = 1.2;
+/** Pointer acceleration: the gain's factor for the finger's speed (screen pixels a millisecond), straight between these points and flat past
+ *  the ends. A slow finger points finely at a small target; a quick flick crosses the screen. */
+export const TRACKPAD_CURVE: readonly (readonly [number, number])[] = [[0.05, 0.5], [0.3, 1], [1.5, 2]];
+/** Two taps this close in time (ms), and in direct mode in place (screen pixels), are a double click, at the first one's point. */
+export const DOUBLE_TAP_MS = 350;
+export const DOUBLE_TAP_PX = 32;
 export const MAX_ZOOM = 6;
 /** How long the computer keeps a screen whose connection dropped, for this phone's next connection: counted down while the phone reconnects. */
 export const REBIND_GRACE_MS = 45_000;
@@ -288,6 +294,24 @@ export function zoomAt(el: Box, srcW: number, srcH: number, v: View, factor: num
   return clampView(el, srcW, srcH, { zoom, cx, cy });
 }
 
+/** Zoomed in, the view pans just enough to keep source point `p` this far (screen pixels) inside its edges: the cursor never leaves the
+ *  picture shown (a trackpad move, a pinch, the keyboard taking half the screen). At zoom 1 the whole picture is shown already. */
+export const KEEP_IN_VIEW_PX = 40;
+
+export function keepInView(el: Box, srcW: number, srcH: number, v: View, p: { x: number; y: number }, marginPx = KEEP_IN_VIEW_PX): View {
+  const s = scaleOf(el, srcW, srcH, v);
+  if (!s || v.zoom <= 1) return v;
+  // At most half the visible size, so a small box still has a place to put the point.
+  const mx = Math.min(marginPx / s, el.width / s / 2);
+  const my = Math.min(marginPx / s, el.height / s / 2);
+  const halfW = el.width / s / 2;
+  const halfH = el.height / s / 2;
+  const cx = Math.min(Math.max(v.cx, p.x + mx - halfW), p.x - mx + halfW);
+  const cy = Math.min(Math.max(v.cy, p.y + my - halfH), p.y - my + halfH);
+  if (cx === v.cx && cy === v.cy) return v;
+  return clampView(el, srcW, srcH, { ...v, cx, cy });
+}
+
 /** The part of the picture the phone shows now, in source pixels (whole pixels, inside the picture): what Sharpen sends crisp. */
 export function visibleRect(el: Box, srcW: number, srcH: number, v: View): Rect | null {
   const a = toSourceRaw(el.left, el.top, el, srcW, srcH, v);
@@ -523,18 +547,35 @@ export interface Frame {
   view: View;
 }
 
-export type GestureOut = { ops: ScOp[]; view?: View };
+/** What a gesture did, for the page to show and buzz: a click, a double click, a right click, a drag picked up. */
+export type Feel = "click" | "double" | "right" | "drag";
+export type GestureOut = { ops: ScOp[]; view?: View; feel?: Feel };
+
+/** The gain's factor for a finger moving at `speed` (screen pixels a millisecond), along `TRACKPAD_CURVE`. */
+export function accel(speed: number): number {
+  const c = TRACKPAD_CURVE;
+  if (!(speed > c[0][0])) return c[0][1];
+  for (let i = 1; i < c.length; i++) {
+    const [x1, y1] = c[i];
+    if (speed <= x1) {
+      const [x0, y0] = c[i - 1];
+      return y0 + ((y1 - y0) * (speed - x0)) / (x1 - x0);
+    }
+  }
+  return c[c.length - 1][1];
+}
 
 const NONE: GestureOut = { ops: [] };
 
 /**
  * Fingers on the picture.
- * - **Trackpad** (the default): one finger moves the computer's cursor by how far it moves (finer when zoomed in); a tap clicks where the
- *   cursor is, a long press without moving right-clicks there; a long press then a move drags.
+ * - **Trackpad** (the default): one finger moves the computer's cursor by how far it moves, more for a quick move and less for a slow one
+ *   (`accel`; finer when zoomed in, and the zoomed view follows the cursor); a tap clicks where the cursor is, a long press without moving
+ *   right-clicks there; a long press then a move drags. A pinch zooms around the cursor.
  * - **Direct**: a tap clicks under the finger, a long press without moving right-clicks there; a long press then a move drags; a quick
- *   one-finger drag scrolls.
- * - Both: two fingers moving together scroll; two fingers pinching zoom the phone's view (nothing is sent) and pan it; two fingers tapped
- *   together right-click.
+ *   one-finger drag scrolls. A pinch zooms around the fingers.
+ * - Both: a second tap soon after a tap, near it, clicks again at the first tap's point (a double click, never two places); two fingers
+ *   moving together scroll; two fingers pinching zoom the phone's view (nothing is sent) and pan it; two fingers tapped together right-click.
  */
 export class Gestures {
   mode: "trackpad" | "direct" = "trackpad";
@@ -549,8 +590,35 @@ export class Gestures {
   /** The finger a one-finger gesture follows: another one that lands during it is ignored. */
   private first: number | null = null;
   private state: "idle" | "press" | "point" | "drag" | "scroll1" | "two" | "two_up" | "scroll2" | "pinch" = "idle";
-  private pinch0 = { d: 0, view: null as View | null, mid: { x: 0, y: 0 } };
+  private pinch0 = { d: 0, view: null as View | null, mid: { x: 0, y: 0 }, anchor: { x: 0, y: 0 }, follow: false };
   private carry = { x: 0, y: 0 };
+  /** What trackpad moves leave over of a source pixel, so that a slow finger still moves the cursor. */
+  private rest = { x: 0, y: 0 };
+  /** The finger's last move (for its speed). */
+  private lastMove: { time: number; speed: number } | null = null;
+  /** The last tap: when, where on the glass, and the source point it clicked (a second one near it clicks there again). */
+  private lastTap: { time: number; x: number; y: number; at: { x: number; y: number }; b: Button; mode: "trackpad" | "direct" } | null = null;
+
+  /** A long press is held now (one finger, not moved, `LONG_PRESS_MS` or more): where its right click or drag would be (source pixels),
+   *  for the page to show; null otherwise. */
+  held(time: number, f: Frame): { x: number; y: number } | null {
+    if (this.state !== "press" || this.touches.size !== 1 || this.first === null) return null;
+    const t = this.touches.get(this.first)!;
+    if (time - t.t0 < LONG_PRESS_MS) return null;
+    return this.mode === "trackpad" ? { ...this.cursor } : this.src(f, t.x0, t.y0);
+  }
+
+  /** A drag is going on (the button is held on the computer). */
+  dragging(): boolean {
+    return this.state === "drag";
+  }
+
+  /** Where the one finger is now (screen pixels), while one finger presses or drags: for the direct mode's magnifier. */
+  finger(): { x: number; y: number } | null {
+    if ((this.state !== "press" && this.state !== "drag") || this.first === null) return null;
+    const t = this.touches.get(this.first);
+    return t ? { x: t.x, y: t.y } : null;
+  }
 
   private src(f: Frame, x: number, y: number) {
     return toSource(x, y, f.el, f.srcW, f.srcH, f.view);
@@ -566,11 +634,17 @@ export class Gestures {
     if (this.touches.size === 1) {
       this.state = "press";
       this.first = t.id;
+      this.lastMove = null;
     }
     else if (this.touches.size === 2 && (this.state === "press" || this.state === "idle")) {
       this.state = "two";
       const p = this.pair()!;
-      this.pinch0 = { d: p.d, view: f.view, mid: p.mid };
+      // Trackpad mode zooms around the cursor (where the person is working), direct mode around the fingers.
+      const c = toClient(this.cursor.x, this.cursor.y, f.el, f.srcW, f.srcH, f.view);
+      const shown = c.x >= f.el.left && c.x <= f.el.left + f.el.width && c.y >= f.el.top && c.y <= f.el.top + f.el.height;
+      // A cursor out of the picture shown (zoomed away from it) is not chased: the pinch goes around the fingers.
+      const follow = this.mode === "trackpad" && shown;
+      this.pinch0 = { d: p.d, view: f.view, mid: p.mid, anchor: follow ? c : p.mid, follow };
     }
     return NONE;
   }
@@ -578,6 +652,12 @@ export class Gestures {
   move(t: Touch, time: number, f: Frame): GestureOut {
     const was = this.touches.get(t.id);
     if (!was) return NONE;
+    // The finger's speed, smoothed over a few moves (a single event's time is coarse).
+    if (t.id === this.first) {
+      const dt = this.lastMove ? time - this.lastMove.time : 0;
+      const v = dt > 0 ? Math.hypot(t.x - was.x, t.y - was.y) / dt : (this.lastMove?.speed ?? 0.3);
+      this.lastMove = { time, speed: this.lastMove && dt > 0 && dt < 100 ? this.lastMove.speed * 0.5 + v * 0.5 : v };
+    }
     if ((this.state === "point" || this.state === "drag" || this.state === "scroll1") && t.id !== this.first) return NONE;
     let dx = t.x - was.x;
     let dy = t.y - was.y;
@@ -591,7 +671,8 @@ export class Gestures {
         this.state = "drag";
         const at = this.mode === "trackpad" ? { ...this.cursor } : this.src(f, was.x0, was.y0);
         if (!at) return NONE;
-        return { ops: [{ k: "down", x: at.x, y: at.y, b: "left" }, ...this.follow(f, t, t.x - was.x0, t.y - was.y0, s).ops] };
+        const then = this.follow(f, t, t.x - was.x0, t.y - was.y0, s);
+        return { ops: [{ k: "down", x: at.x, y: at.y, b: "left" }, ...then.ops], view: then.view, feel: "drag" };
       }
       this.state = this.mode === "trackpad" ? "point" : "scroll1";
       // The move that went past the slop counts from where the finger started.
@@ -616,9 +697,11 @@ export class Gestures {
         }
         if (this.state === "pinch") {
           if (!this.pinch0.view || this.pinch0.d <= 0) return NONE;
-          const zoomed = zoomAt(f.el, f.srcW, f.srcH, this.pinch0.view, p.d / this.pinch0.d, this.pinch0.mid.x, this.pinch0.mid.y);
+          const zoomed = zoomAt(f.el, f.srcW, f.srcH, this.pinch0.view, p.d / this.pinch0.d, this.pinch0.anchor.x, this.pinch0.anchor.y);
           const zs = scaleOf(f.el, f.srcW, f.srcH, zoomed) || 1;
-          return { ops: [], view: clampView(f.el, f.srcW, f.srcH, { ...zoomed, cx: zoomed.cx - (p.mid.x - this.pinch0.mid.x) / zs, cy: zoomed.cy - (p.mid.y - this.pinch0.mid.y) / zs }) };
+          const view = clampView(f.el, f.srcW, f.srcH, { ...zoomed, cx: zoomed.cx - (p.mid.x - this.pinch0.mid.x) / zs, cy: zoomed.cy - (p.mid.y - this.pinch0.mid.y) / zs });
+          // Panning with the pinch never takes the cursor out of the picture shown in trackpad mode (it would be lost there).
+          return { ops: [], view: this.pinch0.follow ? keepInView(f.el, f.srcW, f.srcH, view, this.cursor) : view };
         }
         // Both fingers move the page with them: each finger's move is half the pair's.
         return this.wheel(f, p.mid.x, p.mid.y, -dx / s / 2, -dy / s / 2);
@@ -636,11 +719,16 @@ export class Gestures {
       this.cursor = p;
       return { ops: [{ k: "move", x: p.x, y: p.y }] };
     }
-    const k = TRACKPAD_GAIN / s;
-    const x = Math.round(Math.min(Math.max(this.cursor.x + dx * k, 0), f.srcW - 1));
-    const y = Math.round(Math.min(Math.max(this.cursor.y + dy * k, 0), f.srcH - 1));
+    const k = (TRACKPAD_GAIN * accel(this.lastMove?.speed ?? 0.3)) / s;
+    const fx = Math.min(Math.max(this.cursor.x + this.rest.x + dx * k, 0), f.srcW - 1);
+    const fy = Math.min(Math.max(this.cursor.y + this.rest.y + dy * k, 0), f.srcH - 1);
+    const x = Math.round(fx);
+    const y = Math.round(fy);
+    this.rest = { x: fx - x, y: fy - y };
     this.cursor = { x, y };
-    return { ops: [{ k: "move", x, y }] };
+    // Zoomed in, the view goes with the cursor near an edge.
+    const view = keepInView(f.el, f.srcW, f.srcH, f.view, this.cursor);
+    return view === f.view ? { ops: [{ k: "move", x, y }] } : { ops: [{ k: "move", x, y }], view };
   }
 
   /** Scroll by a distance in source pixels: whole notches of 120 go, the rest waits for the next move. */
@@ -675,15 +763,26 @@ export class Gestures {
       this.state = "idle";
       this.first = null;
     }
+    // Anything but a tap in between: the next tap is a click of its own.
+    const prev = this.lastTap;
+    this.lastTap = null;
     if (state === "drag") {
       const at = this.mode === "trackpad" ? this.cursor : this.src(f, t.x, t.y);
       return at ? { ops: [{ k: "up", x: at.x, y: at.y, b: "left" }] } : NONE;
     }
     if (state === "press") {
-      const at = this.mode === "trackpad" ? { ...this.cursor } : this.src(f, was.x0, was.y0);
+      const b: Button = time - was.t0 >= LONG_PRESS_MS ? "right" : "left";
+      // A second left tap soon after one (near it, in direct mode; anywhere on the glass in trackpad mode, which clicks at the cursor): a
+      // double click, at exactly the first one's point, so that the computer counts the two as one (Windows wants them within a few pixels
+      // and its double-click time).
+      const near = this.mode === "trackpad" || (prev !== null && Math.hypot(was.x0 - prev.x, was.y0 - prev.y) <= DOUBLE_TAP_PX);
+      const again = b === "left" && prev !== null && prev.b === "left" && prev.mode === this.mode && time - prev.time <= DOUBLE_TAP_MS && near;
+      const at = again ? prev.at : this.mode === "trackpad" ? { ...this.cursor } : this.src(f, was.x0, was.y0);
       if (!at) return NONE;
       if (this.mode === "direct") this.cursor = at;
-      return { ops: [{ k: "click", x: at.x, y: at.y, b: time - was.t0 >= LONG_PRESS_MS ? "right" : "left" }] };
+      // A third tap starts again: a double click, then a click.
+      this.lastTap = again ? null : { time, x: was.x0, y: was.y0, at, b, mode: this.mode };
+      return { ops: [{ k: "click", x: at.x, y: at.y, b }], feel: b === "right" ? "right" : again ? "double" : "click" };
     }
     if (state === "two") {
       // One of two fingers lifted without moving: a right click once the other one is lifted too.
@@ -693,7 +792,7 @@ export class Gestures {
     if (state === "two" || state === "two_up") {
       if (this.touches.size) return NONE;
       const at = this.mode === "trackpad" ? this.cursor : this.src(f, this.pinch0.mid.x, this.pinch0.mid.y);
-      return at ? { ops: [{ k: "click", x: at.x, y: at.y, b: "right" }] } : NONE;
+      return at ? { ops: [{ k: "click", x: at.x, y: at.y, b: "right" }], feel: "right" } : NONE;
     }
     return NONE;
   }
@@ -703,6 +802,9 @@ export class Gestures {
     const dragging = this.state === "drag";
     this.touches.clear();
     this.state = "idle";
+    this.first = null;
+    this.lastTap = null;
+    this.carry = { x: 0, y: 0 };
     return dragging ? { ops: [{ k: "up", x: this.cursor.x, y: this.cursor.y, b: "left" }] } : NONE;
   }
 }
