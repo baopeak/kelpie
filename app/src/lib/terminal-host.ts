@@ -27,6 +27,7 @@ import { deviceQueryGate } from "./device-query-gate";
 import type { Settings } from "./types";
 import type { FileRef } from "../chat/chat-links";
 import { fileLinkProvider } from "./terminal-file-links";
+import { fitChunk } from "./stream-continuity";
 
 /** A session's own terminal theme id (its host's), over the app's; set by lib/ssh-hosts.ts. */
 let themeOf: (sessionId: string) => string | undefined = () => undefined;
@@ -365,9 +366,7 @@ export class TermView {
         this.early.push({ seq, data });
         return;
       }
-      this.write(data);
-      this.lastSeq = seq;
-      outputListener?.(this.sessionId);
+      this.applyLive(handle, seq, data);
     }).catch((e) => {
       console.warn("attach failed", e);
       if (gen === this.attachGen) this.attached = false;
@@ -392,13 +391,29 @@ export class TermView {
     const early = this.early;
     this.early = null;
     this.lastSeq = reply.seq;
-    // Chunks covered by the reply (seq <= reply.seq) were already included in it.
+    // What the reply already holds is dropped; a gap attaches again (and ends this attach's chunks).
     for (const chunk of early ?? []) {
-      if (chunk.seq <= reply.seq) continue;
-      this.write(chunk.data);
-      this.lastSeq = chunk.seq;
+      if (gen !== this.attachGen) break;
+      this.applyLive(handle, chunk.seq, chunk.data);
     }
     this.fitNow();
+  }
+
+  /** A live chunk of output: applied only where it continues what this terminal has. A chunk past a gap would leave the screen
+   *  wrong for as long as the program redraws only what changed, so the view attaches again from where it is instead, and the
+   *  daemon sends what is missing. */
+  private applyLive(handle: number, seq: number, data: Uint8Array) {
+    const fit = this.lastSeq == null ? ({ kind: "apply", data } as const) : fitChunk(this.lastSeq, seq, data);
+    if (fit.kind === "old") return;
+    if (fit.kind === "gap") {
+      console.warn(`terminal ${this.sessionId}: ${fit.missing} bytes of output missing at ${this.lastSeq} (handle ${handle}); attaching again`);
+      // A new attach: chunks still on their way for this one are dropped by their generation.
+      void this.attach(handle);
+      return;
+    }
+    this.write(fit.data);
+    this.lastSeq = seq;
+    outputListener?.(this.sessionId);
   }
 
   detach(): Promise<void> {

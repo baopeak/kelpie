@@ -1,7 +1,7 @@
 //! Tells WebView2 how much memory a view should keep (Windows).
 //!
-//! A view nobody has seen for a few seconds — the main window minimised, or a browser pane hidden —
-//! is asked for the low memory target (`ICoreWebView2_19::SetMemoryUsageTargetLevel`): WebView2
+//! A browser pane nobody has seen for a few seconds — hidden, or in the minimised main window — is
+//! asked for the low memory target (`ICoreWebView2_19::SetMemoryUsageTargetLevel`): WebView2
 //! trims its working set and drops caches. Scripts keep running, so terminals, chat and
 //! notifications behave as before. Shown again, the view goes back to the normal target at once.
 //! The delay keeps a pane that a menu or dialog covers for a moment from being trimmed and paged
@@ -14,8 +14,10 @@ use tauri::Manager;
 #[cfg(windows)]
 const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Follows the main window: minimising it lowers the target of every view inside it, restoring it
-/// brings back each view that is shown. Called once at start-up.
+/// Follows the main window: minimising it lowers the target of the browser panes inside it, restoring
+/// it brings back each pane that is shown. The app's own view (label `main`: terminals, chat) always
+/// keeps the normal target: a window that ran for about a day with it trimmed while minimised showed
+/// stale and misplaced text in terminal and chat panes. Called once at start-up.
 pub fn watch_main_window(app: &tauri::AppHandle) {
     #[cfg(windows)]
     {
@@ -25,7 +27,7 @@ pub fn watch_main_window(app: &tauri::AppHandle) {
             // Minimise and restore arrive as a resize; focus covers a restore reported late.
             if matches!(e, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_)) {
                 for wv in handle.webviews().into_values() {
-                    if wv.window().label() == "main" {
+                    if wv.window().label() == "main" && wv.label() != "main" {
                         fit(&wv);
                     }
                 }

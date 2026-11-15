@@ -242,11 +242,13 @@ writing them.
 - Solid's fine-grained stores mean a status change on one session re-renders only its dot.
 - The file watcher and git status only run for the active project; git commands are capped
   at 3 concurrent processes and debounced (300 ms).
-- A view nobody has seen for 5 s asks WebView2 for its low memory target (Windows,
-  `webview_memory.rs`): every view of the main window while it is minimised, and a hidden
-  browser pane. WebView2 trims its working set; scripts keep running, so terminals, chat and
-  notifications carry on. Shown again, the view returns to the normal target at once. The delay
-  spares a pane that a menu or dialog covers for a moment.
+- A browser pane nobody has seen for 5 s asks WebView2 for its low memory target (Windows,
+  `webview_memory.rs`): hidden, or in the minimised main window. WebView2 trims its working set;
+  shown again, the pane returns to the normal target at once. The delay spares a pane that a menu
+  or dialog covers for a moment. The app's own view (terminals, chat) keeps the normal target: a
+  window that ran for about a day with it trimmed while minimised showed stale text in its panes.
+- Every live chunk of output carries its stream offset; terminal and chat panes apply one only
+  where it continues what they have, and attach again on a gap (`stream-continuity.ts`).
 
 ## Agent status
 
@@ -2350,7 +2352,9 @@ switch p95 over 50 ms that is not the page's own work). Start with a terminal-on
   `perf-261109-webview-memory-ab.md`): working set 525 → 402 MB with the low memory target (the
   page's renderer 161 → 28 MB); private bytes unchanged at ~380 MB, so the pages are trimmed, not
   freed. First frame after a restore 60–159 ms without it, 103–148 ms with it (the second frame,
-  before terminals re-attach). A browser pane hidden for 40 s: its renderer 134 → 29 MB.
+  before terminals re-attach). Measured while the app's own view was trimmed too; it no longer is,
+  so a minimised window keeps about the higher figure. A browser pane hidden for 40 s: its
+  renderer 134 → 29 MB.
 - Cold start (release, idle machine) 1.07–1.80 s, about three fifths of it before the page starts
   loading (process start, Rust set-up, WebView2); the entry module then takes ~300 ms, the font
   ~30 ms, the saved state ~110 ms.
