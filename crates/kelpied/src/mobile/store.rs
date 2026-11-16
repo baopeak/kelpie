@@ -455,15 +455,19 @@ pub struct Loaded {
 }
 
 /// A file damaged by a power cut comes back from its previous version (`<file>.prev`) when that one is whole, with phone access
-/// off: that version is one save behind, and the save it misses may have revoked a phone. A file that was removed stays removed.
+/// off and every phone to be paired again: that version is one save behind, and the save it misses may have revoked a phone (a
+/// record without its MAC never verifies). A file that was removed stays removed.
 pub fn load(dir: &Path) -> Loaded {
     let path = dir.join(FILE);
     match crate::persist::load_state_from(&path, |b| serde_json::from_slice::<Store>(b), true) {
         Ok(Some(l)) if l.value.version == VERSION => {
             let mut store = l.value;
-            if l.source == Source::Previous && store.enabled {
-                tracing::warn!("{FILE} was restored from its previous version: phone access is off until it is turned on again");
+            if l.source == Source::Previous {
+                tracing::warn!("{FILE} was restored from its previous version: phone access is off and every phone must be paired again");
                 store.enabled = false;
+                for d in &mut store.devices {
+                    d.mac.clear();
+                }
             }
             Loaded { store, broken: None, fresh: false }
         }
@@ -1126,7 +1130,8 @@ mod tests {
     #[test]
     fn a_file_zeroed_by_a_power_cut_comes_back_from_its_previous_version() {
         let d = dir("zeroed");
-        let mut store = Store { version: VERSION, enabled: true, port: Some(4321), ..Default::default() };
+        let phone = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: "signed".into(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, alerts: None, verified: false };
+        let mut store = Store { version: VERSION, enabled: true, port: Some(4321), devices: vec![phone], ..Default::default() };
         crate::persist::save_state(&d.join(FILE), &serde_json::to_vec(&store).unwrap()).unwrap();
         store.port = Some(4322);
         crate::persist::save_state(&d.join(FILE), &serde_json::to_vec(&store).unwrap()).unwrap();
@@ -1135,6 +1140,7 @@ mod tests {
         let l = load(&d);
         assert!(l.broken.is_none(), "{:?}", l.broken);
         assert!(!l.store.enabled, "phone access is off: the lost save may have revoked a phone");
+        assert!(l.store.devices.iter().all(|d| d.mac.is_empty()), "and every phone pairs again");
         assert_eq!(l.store.port, Some(4321));
         // Removed rather than damaged: a reset, so its previous version does not come back.
         std::fs::remove_file(d.join(FILE)).unwrap();

@@ -92,9 +92,10 @@ aside, the transfer journal's damaged copy, an empty store for the rest).
 
 The previous version is one save behind, so a restore undoes the last change. Where that change can be a
 revocation or a started action, a removed file stays removed (`load_unless_removed`: removing it is a reset)
-and a restore fails closed: `mobile.v2.json` comes back with phone access off, `notify.json` without a
-Telegram approval binding (back to alert links), and a run in `runs.json` starts none of its unstarted tasks
-without approval. `policy.json` also stays removed when removed. Plugin approvals keep no previous version:
+and a restore fails closed: `mobile.v2.json` comes back with phone access off and every phone to be paired
+again, `notify.json` without a Telegram approval binding (back to alert links), `automations.json` with
+automatic runs paused, and a run in `runs.json` starts none of its unstarted tasks without approval.
+`policy.json` also stays removed when removed; a damaged one comes back as it was. Plugin approvals keep no previous version:
 a damaged file approves nothing.
 
 | Kept with `.prev` | Durable only, and why |

@@ -132,13 +132,14 @@ fn a_file_zeroed_by_a_power_cut_comes_back_from_its_previous_version() {
     let s = Automations::load(&dir);
     assert!(s.broken().is_none(), "{:?}", s.broken());
     assert_eq!(s.list.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["a"], "the version before the last save");
+    assert!(s.paused, "it may hold an automation removed since: nothing runs until the person resumes");
     let told = s.unannounced.clone().expect("the user is told");
-    assert!(told.contains("previous version") && told.contains("damaged"), "{told}");
+    assert!(told.contains("previous version") && told.contains("damaged") && told.contains("paused"), "{told}");
     let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("automations.json.damaged-")).collect();
     assert_eq!(std::fs::read(kept[0].path()).unwrap(), vec![0u8; size]);
-    // Missing altogether: the previous version too.
+    // Removed: an empty list, not the previous version.
     std::fs::remove_file(&path).unwrap();
-    assert_eq!(Automations::load(&dir).list.len(), 1);
+    assert!(Automations::load(&dir).list.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
 

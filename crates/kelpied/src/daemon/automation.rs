@@ -410,15 +410,24 @@ impl Daemon {
     /// Starts every clock automation that is due, each on its own thread so none waits for another and
     /// the ticker does not wait for any.
     pub(super) fn run_due_automations(self: &Arc<Self>) {
-        let due = self.automations.lock().due(now_millis());
-        for id in due {
-            let me = self.clone();
-            let _ = std::thread::Builder::new().name("kelpie-automation".into()).spawn(move || {
-                if let Err(e) = me.run_automation(&id, false, false) {
-                    tracing::warn!("automation {id}: {e:#}");
-                }
-            });
+        // Nothing is due on almost every tick. When something is, the list is saved (flushed to the disk) as it is
+        // rescheduled: that happens on a thread of its own, so the ticker never waits on the disk. Two such threads
+        // take turns on the list's lock, and the second finds nothing left to do.
+        if !self.automations.lock().any_due(now_millis()) {
+            return;
         }
+        let me = self.clone();
+        let _ = std::thread::Builder::new().name("kelpie-automation".into()).spawn(move || {
+            let due = me.automations.lock().due(now_millis());
+            for id in due {
+                let me = me.clone();
+                let _ = std::thread::Builder::new().name("kelpie-automation".into()).spawn(move || {
+                    if let Err(e) = me.run_automation(&id, false, false) {
+                        tracing::warn!("automation {id}: {e:#}");
+                    }
+                });
+            }
+        });
     }
 
     // ---------- runs ----------
