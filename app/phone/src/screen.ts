@@ -6,6 +6,7 @@
 
 import { chooseVia, needsProof, pathRows, peerFor, startRefusal, viaText, type PathInfo, type RelayInfo, type ViaId } from "./screen-paths";
 import { P2P_RETRY_MS, STUN_ONLY, VideoOrder, type PathStats, type PeerEvents, type PeerSetup } from "./screen-rtc";
+import { BUSY_RETRY_MS, busyText, type BusyInfo } from "./screen-busy";
 
 export const MEDIA = 0x01;
 export const KIND_VIDEO = 1;
@@ -824,9 +825,12 @@ export interface TargetRow {
 
 export type Reply =
   | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ice_servers?: RTCIceServer[]; turn?: string | null }
-  | { t: "error"; code: string; message: string }
+  | { t: "error"; code: string; message: string; reason?: string | null; busy?: BusyInfo | null }
   | { t: "offline" }
   | { t: "unknown" };
+
+type Translate = (text: string, vars?: Record<string, string | number>) => string;
+const fillIn: Translate = (s, vars) => (vars ? s.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : s);
 
 export interface ScreenPort {
   targets(): Promise<Reply>;
@@ -926,9 +930,11 @@ export interface ScreenState {
   pathStats: PathStats | null;
   /** Peer to peer failed from here a moment ago (`P2P_RETRY_MS`): Automatic does not try it on its own meanwhile. */
   p2pFailed: boolean;
+  /** The computer was too busy for `target`: the phone asks again at `at` (`port.now()`), try `attempt` of `BUSY_RETRY_MS`. */
+  retry: { target: string; at: number; attempt: number } | null;
 }
 
-const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null, paths: null, relay: null, via: "auto", usedVia: null, path: null, pathStats: null, p2pFailed: false });
+const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null, paths: null, relay: null, via: "auto", usedVia: null, path: null, pathStats: null, p2pFailed: false, retry: null });
 
 /** Why a screen ended, in the phone's words; the reason codes are the daemon's and the helper's. */
 export function endedText(reason: string, t: (s: string) => string): string {
@@ -1064,7 +1070,10 @@ export class ScreenSession {
   /** The kind of peer opened last (TURN alone or not), which a reconnect or renewed credentials open again. */
   private peerRelayOnly = false;
 
-  constructor(private port: ScreenPort, private changed: (s: ScreenState | null) => void, private t: (s: string) => string = (s) => s) {}
+  /** The next try after a busy refusal (`busy`). */
+  private retryTimer: unknown = null;
+
+  constructor(private port: ScreenPort, private changed: (s: ScreenState | null) => void, private t: Translate = fillIn) {}
 
   private set(next: ScreenState | null) {
     this.state = next;
@@ -1081,6 +1090,7 @@ export class ScreenSession {
 
   async openPicker() {
     if (this.state?.sc && this.state.phase !== "ended") return;
+    this.stopRetry();
     this.set(fresh());
     const r = await this.port.targets();
     if (this.phase() !== "pick") return;
@@ -1111,8 +1121,9 @@ export class ScreenSession {
 
   async pick(target: string) {
     if (this.state?.phase !== "pick") return;
+    this.stopRetry();
     const via = this.state.paths ? this.state.via : null;
-    this.patch({ phase: "starting", message: null });
+    this.patch({ phase: "starting", message: null, retry: null });
     this.early = 0;
     this.earlyKey = false;
     // Through the relay the computer wants the person's Face ID for this very screen, asked for now, while the tap that started it is fresh.
@@ -1126,6 +1137,48 @@ export class ScreenSession {
       }
       recheck = proof;
     }
+    await this.begin(target, via, recheck, 0, false);
+  }
+
+  /** The person stops the tries after a busy refusal; what the computer said stays. */
+  cancelRetry() {
+    this.stopRetry();
+    if (this.state?.retry) this.patch({ retry: null });
+  }
+
+  private stopRetry() {
+    if (this.retryTimer !== null) this.port.clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+
+  /** The computer was too busy (`host_busy`): its reason on the picker, and one more try after the next wait, until they run out. */
+  private busy(target: string, r: { message: string; reason?: string | null; busy?: BusyInfo | null }, attempt: number) {
+    this.stopRetry();
+    const text = busyText(r.reason, r.busy, r.message, this.t);
+    const wait = BUSY_RETRY_MS[attempt];
+    if (wait === undefined) {
+      this.patch({ phase: "pick", message: `${text} ${this.t("Still busy. Tap See it to try again.")}`, retry: null });
+      return;
+    }
+    this.patch({ phase: "pick", message: text, retry: { target, at: this.port.now() + wait, attempt } });
+    this.retryTimer = this.port.setTimeout(() => {
+      this.retryTimer = null;
+      void this.retry(target, attempt + 1);
+    }, wait);
+  }
+
+  /** A try on its own after a busy refusal, the way chosen. Never with Face ID, which only a tap may ask for: the computer looks at its load
+   *  before the passkey, so a start that needs one is refused for the load while it is still busy, and for the missing Face ID once it is not. */
+  private async retry(target: string, attempt: number) {
+    if (this.state?.phase !== "pick" || this.state.retry?.target !== target) return;
+    const via = this.state.paths ? this.state.via : null;
+    this.patch({ phase: "starting", retry: null });
+    this.early = 0;
+    this.earlyKey = false;
+    await this.begin(target, via, undefined, attempt, true);
+  }
+
+  private async begin(target: string, via: ViaId | null, recheck: Record<string, unknown> | undefined, attempt: number, retrying: boolean) {
     const r = await this.port.start(target, via, recheck);
     if (this.phase() !== "starting") {
       // Closed while the computer was starting it (the person left the app): it would go on capturing with nobody watching.
@@ -1133,6 +1186,11 @@ export class ScreenSession {
       return;
     }
     if (r.t !== "ack" || !r.sc) {
+      if (r.t === "error" && r.code === "host_busy") return this.busy(target, r, attempt);
+      if (retrying && r.t === "error" && r.code === "needs_face_id") {
+        this.patch({ phase: "pick", message: this.t("The computer is less busy now. Tap See it to start.") });
+        return;
+      }
       this.patch({ phase: "pick", message: r.t === "error" ? startRefusal(r.code, r.message, this.t) : this.t("Not connected.") });
       return;
     }
@@ -1380,6 +1438,8 @@ export class ScreenSession {
 
   /** This phone locked (it left the app, or its idle time ran out): the computer has ended the screen, and so does the page, at once. */
   locked() {
+    // A try waiting after a busy refusal ends too: it would start a screen with no tap once the phone is unlocked.
+    this.cancelRetry();
     if (this.state?.sc && this.state.phase !== "ended" && this.state.phase !== "pick") this.ended(this.t("Ended when this phone locked."));
   }
 
@@ -1410,6 +1470,7 @@ export class ScreenSession {
 
   close() {
     void this.stop();
+    this.stopRetry();
     this.unwatch();
     this.closePeers();
     this.order.reset();

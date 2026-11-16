@@ -78,7 +78,8 @@ impl Probe {
             objc_autoreleasePoolPop(pool);
             result
         };
-        Reading { cpu: self.cpu(), memory_free: memory_free(), low_memory: false, battery_saver, thermal }
+        let memory_free = memory_free();
+        Reading { cpu: self.cpu(), memory_free, memory_free_mb: memory_free.and_then(memory_free_mb), low_memory: false, battery_saver, thermal }
     }
 
     fn cpu(&mut self) -> Option<f64> {
@@ -103,6 +104,15 @@ fn memory_free() -> Option<f64> {
     // SAFETY: an int-sized out buffer, as the sysctl returns.
     let status = unsafe { sysctlbyname(c"kern.memorystatus_level".as_ptr(), &mut level as *mut c_int as *mut c_void, &mut size, std::ptr::null_mut(), 0) };
     (status == 0).then(|| f64::from(level))
+}
+
+/// MiB available, as `percent` (`memory_free`) of the installed memory (`hw.memsize`).
+fn memory_free_mb(percent: f64) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    // SAFETY: a u64-sized out buffer, as the sysctl returns.
+    let status = unsafe { sysctlbyname(c"hw.memsize".as_ptr(), &mut total as *mut u64 as *mut c_void, &mut size, std::ptr::null_mut(), 0) };
+    (status == 0 && total > 0).then(|| (total as f64 * percent.clamp(0.0, 100.0) / 100.0) as u64 / (1024 * 1024))
 }
 
 /// Not needed here: the process class is left alone and macOS has no EcoQoS.

@@ -701,11 +701,13 @@ pub struct Controller {
     asked_software: bool,
     /// The daemon takes a window sized to the link (`win` in its flow): until it says so, the window stays `MIN_WINDOW`.
     win: bool,
+    /// Started low for the machine's load (`start_low`), until the encoder's rung is back at the top: the picture is reduced for the load.
+    started_low: bool,
 }
 
 impl Controller {
     pub fn new(src: (u32, u32), window: bool, software: bool, now: u64) -> Controller {
-        Controller { overuse: Overuse::default(), bandwidth: Bandwidth::new(now), src, window, level: 0, software, l3_since: None, paused_for_load: false, hw_times: VecDeque::new(), hw_slow_since: None, asked_software: false, win: false }
+        Controller { overuse: Overuse::default(), bandwidth: Bandwidth::new(now), src, window, level: 0, software, l3_since: None, paused_for_load: false, hw_times: VecDeque::new(), hw_slow_since: None, asked_software: false, win: false, started_low: false }
     }
 
     /// Whether the daemon takes a window sized to the link.
@@ -765,6 +767,14 @@ impl Controller {
         }
     }
 
+    /// A stream that starts while the machine is loaded (L2: the daemon lets it start instead of refusing it) starts at the lowest rung, the
+    /// cheapest picture to capture and encode, and climbs a rung at a time as the encoder's own load allows (`Overuse`: ten seconds of light
+    /// use and 60 frames a rung), within what the level allows (`load_cap`).
+    pub fn start_low(&mut self) {
+        self.overuse.rung = LOWEST;
+        self.started_low = true;
+    }
+
     /// The person asked to go on after a pause for load: five more minutes of L3 before the next.
     pub fn resume(&mut self, now: u64) {
         self.paused_for_load = false;
@@ -781,7 +791,8 @@ impl Controller {
         let at = self.rung();
         let r = RUNGS[at];
         let min_lines = if self.window { MIN_WINDOW_LINES } else { 0 };
-        let mut reason = if at == 0 { Reason::None } else if self.overuse.rung >= self.bandwidth.rung() { Reason::Cpu } else { Reason::Bandwidth };
+        let encoder = if self.started_low { Reason::Load } else { Reason::Cpu };
+        let mut reason = if at == 0 { Reason::None } else if self.overuse.rung >= self.bandwidth.rung() { encoder } else { Reason::Bandwidth };
         let (free_w, free_h) = fit(self.src, r.scale, min_lines, u32::MAX);
         let (mut fps, mut max_lines) = (r.fps, u32::MAX);
         let mut cap = |c: (u8, u32), why: Reason, fps: &mut u8, max_lines: &mut u32| {
@@ -814,6 +825,9 @@ impl Controller {
     pub fn on_encoded(&mut self, encode_ms: f64, now: u64) -> Option<Event> {
         let interval = self.interval_ms();
         self.overuse.sample(encode_ms, interval, now);
+        if self.overuse.rung == 0 {
+            self.started_low = false;
+        }
         if self.software || self.asked_software {
             return None;
         }
@@ -822,7 +836,9 @@ impl Controller {
             self.hw_times.pop_front();
         }
         let p95 = percentile(self.hw_times.iter().map(|(_, ms)| *ms), 0.95);
-        if self.rung() == LOWEST && p95.is_some_and(|p| p > HW_SLOW_MS) {
+        // A stream started low is at the lowest rung for the machine's load, not because the encoder fell there: on a loaded machine the
+        // software encoder would cost more CPU still, so the hardware one is judged only once the encoder's own load has had its say.
+        if self.rung() == LOWEST && !self.started_low && p95.is_some_and(|p| p > HW_SLOW_MS) {
             let since = *self.hw_slow_since.get_or_insert(now);
             if now.saturating_sub(since) >= HW_SLOW_FOR_MS {
                 self.asked_software = true;
@@ -1505,6 +1521,39 @@ mod tests {
                 t += gap;
             }
         }
+    }
+
+    #[test]
+    fn a_stream_started_on_a_loaded_machine_starts_at_the_lowest_rung_and_climbs_as_the_encoder_allows() {
+        let mut c = Controller::new((1920, 1080), false, false, 0);
+        c.set_level(2, 0);
+        c.start_low();
+        let p = c.params();
+        assert_eq!((p.fps, p.h, p.degraded, p.reason), (RUNGS[LOWEST].fps, fit((1920, 1080), RUNGS[LOWEST].scale, 0, u32::MAX).1, true, Reason::Load), "{p:?}: reduced for the load, not for a slow encoder");
+        // A light encoder: a rung up once ten seconds and 60 frames have gone by, never in one jump.
+        let mut t = 0;
+        while c.rung() == LOWEST && t < 60_000 {
+            t += 200;
+            c.on_encoded(5.0, t);
+        }
+        assert_eq!(c.rung(), LOWEST - 1, "one rung up after {t} ms");
+        assert!(t >= 10_000, "{t}");
+        // A busy encoder does not climb: it stays where it is.
+        let mut c = Controller::new((1920, 1080), false, false, 0);
+        c.set_level(2, 0);
+        c.start_low();
+        for t in (0..60_000).step_by(200) {
+            c.on_encoded(150.0, t);
+        }
+        assert_eq!(c.rung(), LOWEST);
+        // A slow hardware encoder at the lowest rung it started at is not swapped for the software one, which costs the loaded machine more.
+        let mut slow = Controller::new((1920, 1080), false, false, 0);
+        slow.set_level(2, 0);
+        slow.start_low();
+        assert!((0..60_000).step_by(200).all(|t| slow.on_encoded(60.0, t).is_none()), "no UseSoftware while started low");
+        // However far it climbs, the level's cap holds: 15 fps and 720 lines at L2.
+        c.overuse.rung = 0;
+        assert_eq!((c.params().fps, c.params().h), (15, 720));
     }
 
     #[test]

@@ -41,6 +41,7 @@ fn rig_with(lane: usize, start: Start) -> Rig {
         while let Some(o) = rx.recv().await {
             let m: Value = serde_json::from_slice(&o.data[5..]).unwrap();
             if let Some(id) = m["preq"].as_u64() {
+                kept.lock().push(m.clone());
                 let (app, method) = (app.clone(), m["method"].as_str().unwrap_or_default().to_string());
                 let typed = m["params"]["text"].as_str().unwrap_or_default().to_string();
                 let sc = m["params"]["sc"].as_str().unwrap_or_default().to_string();
@@ -165,6 +166,11 @@ impl Rig {
 
     fn told(&self, method: &str) -> Vec<Value> {
         self.notes.lock().iter().filter(|n| n["pnote"] == method).map(|n| n["params"].clone()).collect()
+    }
+
+    /// What the app was asked (requests, not notices).
+    fn asked(&self, method: &str) -> Vec<Value> {
+        self.notes.lock().iter().filter(|n| n["preq"].is_u64() && n["method"] == method).map(|n| n["params"].clone()).collect()
     }
 }
 
@@ -468,9 +474,9 @@ async fn input_onto_a_picture_that_stopped_is_not_sent() {
 }
 
 #[tokio::test]
-async fn a_busy_computer_starts_no_screen_one_device_at_a_time_and_none_without_the_app() {
+async fn an_overloaded_computer_starts_no_screen_one_device_at_a_time_and_none_without_the_app() {
     let r = rig();
-    r.d.mobile.load.set_for_test(Level::L2);
+    r.d.mobile.load.set_for_test(Level::L3);
     assert_eq!(r.verb("sc_start", json!({"target": "w:66:7"})).await.unwrap_err().code, "host_busy");
     r.d.mobile.load.set_for_test(Level::L0);
     assert_eq!(r.verb("sc_start", json!({"target": "C:\\Windows"})).await.unwrap_err().code, "bad_request");
@@ -1080,4 +1086,71 @@ mod p2p {
         }
         assert_eq!(Arc::strong_count(&stop), 1, "no peer outlives its screen");
     }
+}
+
+fn measured(free_pct: f64, free_mb: u64, cpu: f64, lag: f64) -> crate::load::Sample {
+    crate::load::Sample { lag_p95_ms: lag, reading: crate::load::Reading { cpu: Some(cpu), memory_free: Some(free_pct), memory_free_mb: Some(free_mb), ..Default::default() } }
+}
+
+fn status(level: Level, reasons: &[&str]) -> crate::load::Status {
+    crate::load::Status { level, reasons: reasons.iter().map(|r| r.to_string()).collect(), since: 0 }
+}
+
+#[test]
+fn a_screen_is_gated_by_the_memory_it_needs_not_by_a_share_of_all_memory() {
+    // The owner's 8 GB computer in ordinary use: 11 % free is L2 for memory, and 800 MB is more than a stream needs. It starts, low.
+    assert_eq!(admit(&status(Level::L2, &["memory"]), Some(&measured(11.0, 800, 30.0, 5.0))), Admit::Low);
+    assert_eq!(admit(&status(Level::L1, &["cpu"]), Some(&measured(40.0, 3000, 88.0, 5.0))), Admit::Start);
+    assert_eq!(admit(&status(Level::L0, &[]), Some(&measured(25.0, 2000, 10.0, 1.0))), Admit::Start);
+    assert_eq!(admit(&status(Level::L2, &["cpu"]), Some(&measured(40.0, 3000, 97.0, 5.0))), Admit::Low, "a pegged CPU is L2: low");
+    // Under the floor, whatever the level: memory, with the numbers.
+    let Admit::Busy(r) = admit(&status(Level::L1, &["cpu"]), Some(&measured(14.0, MIN_FREE_MB - 1, 50.0, 5.0))) else { panic!("refused under the floor") };
+    assert_eq!((r.code, r.reason), ("host_busy", Some("memory")));
+    let busy = r.busy.expect("the numbers");
+    assert_eq!((busy["memory_free"].as_u64(), busy["memory_free_mb"].as_u64(), busy["min_free_mb"].as_u64(), busy["level"].as_u64()), (Some(14), Some(MIN_FREE_MB - 1), Some(MIN_FREE_MB), Some(1)));
+    assert!(r.message.contains("Only 14 %") && r.message.contains(&format!("({} MB)", MIN_FREE_MB - 1)), "{}", r.message);
+    // Exactly the floor is enough.
+    assert_eq!(admit(&status(Level::L0, &[]), Some(&measured(30.0, MIN_FREE_MB, 10.0, 1.0))), Admit::Start);
+    // L3 refuses, and names what overloads it first.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["lag", "cpu"]), Some(&measured(40.0, 3000, 99.0, 250.0))) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("lag"));
+    assert_eq!((r.busy.as_ref().unwrap()["lag_ms"].as_u64(), r.busy.as_ref().unwrap()["cpu"].as_u64()), (Some(250), Some(99)));
+    // The reasons come in the order they were measured (lag, CPU, memory): memory, which is what raised it to L3 here, is named.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["cpu", "memory"]), Some(&measured(6.0, 1200, 99.0, 20.0))) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("memory"));
+    // The owner's computer held at L2 for memory (11 % free, above the floor), overloaded by a build's lag: refused for the lag.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["lag", "memory"]), Some(&measured(11.0, 900, 60.0, 250.0))) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("lag"));
+    let Admit::Busy(r) = admit(&status(Level::L3, &["cpu"]), Some(&measured(40.0, 3000, 99.4, 20.0))) else { panic!("L3 refuses") };
+    assert!(r.message.contains("(99 %)"), "{}", r.message);
+    let Admit::Busy(r) = admit(&status(Level::L3, &["thermal"]), Some(&measured(40.0, 3000, 20.0, 5.0))) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("thermal"));
+    // The test hook pins the level and stands for everything measured: no floor, no numbers, the hook's reason.
+    assert_eq!(admit(&status(Level::L2, &["memory"]), None), Admit::Low);
+    let Admit::Busy(r) = admit(&status(Level::L3, &["memory"]), None) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("memory"));
+    assert!(r.busy.as_ref().unwrap()["memory_free_mb"].is_null());
+    assert!(r.message.contains("short of memory"), "{}", r.message);
+    let Admit::Busy(r) = admit(&status(Level::L3, &["forced"]), None) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("load"), "a reason the phone does not know is said as load");
+}
+
+#[tokio::test]
+async fn a_loaded_computer_starts_the_screen_low_and_an_overloaded_one_says_why() {
+    let r = rig();
+    r.d.mobile.load.set_reasons_for_test(Level::L2, &["memory"]);
+    r.d.mobile.load.set_sample_for_test(measured(11.0, 800, 30.0, 5.0));
+    r.start().await;
+    let asked = r.asked("screen.start");
+    assert_eq!(asked.last().map(|p| p["level"].clone()), Some(json!(2)), "the helper hears L2 and starts at its lowest rung: {asked:?}");
+    // Too little memory free for a stream: refused with the reason and the numbers, and nothing is asked of the app.
+    r.d.mobile.load.set_sample_for_test(measured(6.0, 450, 30.0, 5.0));
+    let refusal = r.verb("sc_start", json!({"target": "w:66:7"})).await.unwrap_err();
+    assert_eq!((refusal.code, refusal.reason), ("host_busy", Some("memory")));
+    assert_eq!(refusal.busy.as_ref().unwrap()["memory_free_mb"], 450);
+    assert_eq!(r.asked("screen.start").len(), 1);
+    r.d.mobile.load.set_reasons_for_test(Level::L3, &["cpu"]);
+    r.d.mobile.load.set_sample_for_test(measured(40.0, 3000, 99.0, 20.0));
+    let refusal = r.verb("sc_start", json!({"target": "w:66:7"})).await.unwrap_err();
+    assert_eq!(refusal.reason, Some("cpu"));
 }

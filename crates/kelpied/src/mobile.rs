@@ -2513,23 +2513,25 @@ struct Refusal {
     message: String,
     result: &'static str,
     answered: Option<Box<Resolution>>,
+    /// A screen refused for the load (`host_busy`): the level, its reasons and the numbers (`screen::admit`), as `busy` in the reply.
+    busy: Option<Value>,
 }
 
 fn refuse(code: &'static str, message: impl Into<String>) -> Refusal {
-    Refusal { code, reason: None, message: message.into(), result: "refused", answered: None }
+    Refusal { code, reason: None, message: message.into(), result: "refused", answered: None, busy: None }
 }
 
 /// What a device is told about an answer that was not written.
 fn already_answered(device: &str, answer: Resolution, message: &str) -> Refusal {
     let mine = answer.by.id == device;
     let result = if mine { "dup" } else { "stale" };
-    Refusal { code: result, reason: Some("answered"), message: message.into(), result, answered: Some(Box::new(answer)) }
+    Refusal { code: result, reason: Some("answered"), message: message.into(), result, answered: Some(Box::new(answer)), busy: None }
 }
 
 fn answer_refusal(device: &str, e: AnswerError) -> Refusal {
     match e {
         AnswerError::Prompt => refuse("prompt", "A prompt is waiting on this session: answer it, or send the text anyway."),
-        AnswerError::Stale(reason) => Refusal { code: "stale", reason: Some(reason), message: "That prompt was answered already, or has changed.".into(), result: "stale", answered: None },
+        AnswerError::Stale(reason) => Refusal { code: "stale", reason: Some(reason), message: "That prompt was answered already, or has changed.".into(), result: "stale", answered: None, busy: None },
         AnswerError::Answered(answer) => already_answered(device, answer, "That prompt was answered already."),
         AnswerError::UnknownKey => refuse("bad_request", "unknown key"),
     }
@@ -2727,6 +2729,9 @@ impl Conn {
             Ok(None) => tag.map(|t| json!({"type": "ack", "req": t})),
             Err(r) => {
                 let mut reply = json!({"type": "error", "req": tag, "code": r.code, "reason": r.reason, "message": r.message});
+                if let Some(busy) = r.busy {
+                    reply["busy"] = busy;
+                }
                 if matches!(name, "answer" | "chat_answer") {
                     reply["result"] = json!(r.result);
                     if let Some(answer) = r.answered {
@@ -2928,7 +2933,7 @@ impl Conn {
         if verb.screen() {
             self.screen_refused(verb, granted)?;
             let phone = self.screen_phone();
-            return self.daemon.screen.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
+            return self.daemon.screen.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| Refusal { reason: r.reason, busy: r.busy, ..refuse(r.code, r.message) });
         }
         self.control_refused(verb, granted)?;
         if verb.takeover() {

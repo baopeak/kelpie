@@ -56,6 +56,10 @@ import {
 } from "./screen";
 import { pathRows, type ViaId } from "./screen-paths";
 import type { PeerEvents, PeerSetup } from "./screen-rtc";
+import { BUSY_RETRY_MS } from "./screen-busy";
+
+/** Lets the promises a fired timer started run to their end. */
+const settle = () => new Promise((done) => setTimeout(done, 0));
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 
@@ -274,6 +278,8 @@ interface RigOptions {
   webrtc?: boolean;
   /** The computer's answer to `sc_rtc_servers` (undefined: a computer from before TURN). */
   servers?: Reply;
+  /** The computer's answers to the next starts, in order; then `replies.start`. */
+  startQueue?: Reply[];
 }
 
 /** A peer as the session sees it: what it sent on "i", whether it was started or closed, and its events to fire. */
@@ -332,7 +338,7 @@ function rig(replies: Partial<Record<"targets" | "start" | "stop" | "text" | "re
     targets: async () => replies.targets ?? { t: "ack", targets: [{ id: "m:\\\\.\\DISPLAY1", kind: "monitor", title: "Screen 1", app: "", shortcut: null, w: 1920, h: 1080, minimized: false, primary: true }] },
     start: async (target, via, recheck) => {
       starts.push({ target, via, recheck });
-      return replies.start ?? { t: "ack", result: "ok", sc: "sc1", title: "main.rs — kelpie", kind: "window", encoder: "hw" };
+      return opts.startQueue?.shift() ?? replies.start ?? { t: "ack", result: "ok", sc: "sc1", title: "main.rs — kelpie", kind: "window", encoder: "hw" };
     },
     stop: async (sc) => {
       stopped.push(sc);
@@ -442,6 +448,76 @@ describe("one screen from the phone", () => {
     await r.s.openPicker();
     await r.s.pick("w:1:2");
     expect(r.s.state).toMatchObject({ phase: "pick", message: "The computer is too busy." });
+  });
+
+  it("a busy refusal says why with the computer's numbers, tries again on its own after a wait, and starts once the computer has room", async () => {
+    const busy: Reply = { t: "error", code: "host_busy", reason: "memory", message: "computer's words", busy: { level: 3, reason: "memory", memory_free: 6, memory_free_mb: 480, min_free_mb: 600 } };
+    const r = rig({}, { startQueue: [busy, busy] });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.s.state).toMatchObject({ phase: "pick", message: "Only 6 % of the computer's memory is free (480 MB). Close some programs on the computer.", retry: { target: "w:1:2", attempt: 0, at: r.now() + BUSY_RETRY_MS[0] } });
+    r.advance(BUSY_RETRY_MS[0] - 1);
+    await settle();
+    expect(r.starts.length, "not before the wait").toBe(1);
+    r.advance(1);
+    await settle();
+    expect(r.starts.length).toBe(2);
+    expect(r.s.state?.retry, "still busy: the next wait is longer").toMatchObject({ attempt: 1, at: r.now() + BUSY_RETRY_MS[1] });
+    r.advance(BUSY_RETRY_MS[1]);
+    await settle();
+    expect(r.starts.map((x) => x.target)).toEqual(["w:1:2", "w:1:2", "w:1:2"]);
+    expect(r.s.state).toMatchObject({ phase: "live", sc: "sc1", retry: null });
+  });
+
+  it("tries again a bounded number of times, one at a time, and the person can stop it or start something else", async () => {
+    const busy: Reply = { t: "error", code: "host_busy", reason: "cpu", message: "x", busy: { cpu: 99 } };
+    const r = rig({ start: busy });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    for (const wait of BUSY_RETRY_MS) {
+      r.advance(wait);
+      await settle();
+    }
+    expect(r.starts.length).toBe(1 + BUSY_RETRY_MS.length);
+    expect(r.s.state).toMatchObject({ phase: "pick", retry: null });
+    expect(r.s.state?.message).toBe("The computer's processor is fully busy (99 %). Wait for a build or another heavy task on it to finish. Still busy. Tap See it to try again.");
+    r.advance(60 * 60_000);
+    await settle();
+    expect(r.starts.length, "then it waits for the person").toBe(1 + BUSY_RETRY_MS.length);
+
+    const stopped = rig({ start: busy });
+    await stopped.s.openPicker();
+    await stopped.s.pick("w:1:2");
+    stopped.s.cancelRetry();
+    expect(stopped.s.state).toMatchObject({ retry: null, message: expect.stringMatching(/fully busy/) });
+    stopped.advance(10 * 60_000);
+    await settle();
+    expect(stopped.starts.length, "Stop trying stops it").toBe(1);
+
+    const locked = rig({ start: busy });
+    await locked.s.openPicker();
+    await locked.s.pick("w:1:2");
+    locked.s.locked();
+    locked.advance(10 * 60_000);
+    await settle();
+    expect(locked.starts.length, "the phone locking stops it").toBe(1);
+    expect(locked.s.state?.retry).toBeNull();
+
+    const closed = rig({ start: busy });
+    await closed.s.openPicker();
+    await closed.s.pick("w:1:2");
+    closed.s.close();
+    closed.advance(10 * 60_000);
+    await settle();
+    expect(closed.starts.length, "leaving the screen stops it").toBe(1);
+
+    const other = rig({}, { startQueue: [busy] });
+    await other.s.openPicker();
+    await other.s.pick("w:1:2");
+    await other.s.pick("w:3:4");
+    other.advance(10 * 60_000);
+    await settle();
+    expect(other.starts.map((x) => x.target), "another start replaces the waiting try").toEqual(["w:1:2", "w:3:4"]);
   });
 
   it("input goes merged and stamped while live, and is dropped, not kept, otherwise", async () => {
@@ -972,6 +1048,22 @@ describe("choosing how the screen connects", () => {
       await r.s.pick("w:1:2");
       expect(r.s.state?.message).toBe(`computer says ${code}`);
     }
+  });
+
+  it("a try on its own after a busy refusal never asks for Face ID: once the computer has room the person taps to start", async () => {
+    const busy: Reply = { t: "error", code: "host_busy", reason: "lag", message: "x", busy: { lag_ms: 250 } };
+    const r = rig({ targets }, { route: "relay", startQueue: [busy, busy, { t: "error", code: "needs_face_id", message: "Needs Face ID." }] });
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.proofs).toEqual(["w:1:2"]);
+    expect(r.s.state?.message).toBe("The computer is responding slowly. Wait for a build or another heavy task on it to finish.");
+    r.advance(BUSY_RETRY_MS[0]);
+    await settle();
+    r.advance(BUSY_RETRY_MS[1]);
+    await settle();
+    expect(r.proofs, "Face ID only for the tap").toEqual(["w:1:2"]);
+    expect(r.starts.map((x) => x.recheck === undefined)).toEqual([false, true, true]);
+    expect(r.s.state).toMatchObject({ phase: "pick", retry: null, message: "The computer is less busy now. Tap See it to start." });
   });
 
   it("a computer that lists no ways is asked as before: no choice, no Face ID", async () => {

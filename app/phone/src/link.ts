@@ -28,6 +28,7 @@ import type { ScreenFrame } from "./screen-sync";
 import type { PaneRow, TkOp } from "./takeover";
 import { MEDIA as SCREEN_MEDIA, type ScOp, type TargetRow } from "./screen";
 import type { PathInfo, RelayInfo, ViaId } from "./screen-paths";
+import type { BusyInfo } from "./screen-busy";
 
 // ---------- what the daemon sends ----------
 
@@ -184,6 +185,8 @@ export interface ReplyError {
   code: string;
   reason?: string | null;
   message: string;
+  /** A screen refused for the computer's load (`host_busy`): what it measured (`screen-busy.ts`). */
+  busy?: BusyInfo | null;
   /** For `answer` / `chat_answer`: `stale`, `dup` or `refused`. */
   result?: "stale" | "dup" | "refused";
   answered_by?: string;
@@ -1392,8 +1395,8 @@ export class Link {
     this.pending.delete(m.req);
     this.env.clearTimeout(p.timer);
     if (m.type === "error") {
-      const { code, reason, message, result, answered_by, at } = m;
-      p.resolve({ t: "error", code, reason, message, result, answered_by, at });
+      const { code, reason, message, result, answered_by, at, busy } = m;
+      p.resolve({ t: "error", code, reason, message, result, answered_by, at, busy });
     } else {
       p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers, turn: m.turn });
     }
