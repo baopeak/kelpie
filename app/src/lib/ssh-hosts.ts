@@ -7,7 +7,8 @@ import { createSignal } from "solid-js";
 import { store } from "./store";
 import { CORE_AGENTS, agentPresets, isAgentKind } from "./agents";
 import { remoteCheck, remoteRoot, type HostCheck } from "./remote";
-import { setSessionThemeResolver } from "./terminal-host";
+import { setSessionAppearanceResolver } from "./terminal-host";
+import { hostAppearance, paneTheme } from "./terminal-appearance";
 import { t } from "./i18n";
 import type { Project, SessionInfo, SessionKind, SessionTarget } from "./types";
 
@@ -33,6 +34,13 @@ export interface SshHost {
   color: string;
   /** Terminal colour theme of its panes (empty: the app's terminal theme). */
   terminalTheme: string;
+  /** Its panes' font, size, line height and cursor (empty / null: the app's terminal settings). */
+  fontFamily: string;
+  fontSize: number | null;
+  lineHeight: number | null;
+  /** `block`, `underline` or `bar`; empty: the app's. */
+  cursorStyle: string;
+  cursorBlink: boolean | null;
   /** OS seen on the last check (`ubuntu`, `darwin`…), for its badge. */
   os: string;
   lastConnected: number;
@@ -75,7 +83,8 @@ export interface ForwardState { running: boolean; error: string }
 
 export const newHost = (over: Partial<SshHost> = {}): SshHost => ({
   id: "", label: "", alias: "", group: "", tags: [], hostname: "", port: null, user: "", auth: "key", identityFile: "", jump: "",
-  forwardAgent: false, keepalive: 30, env: {}, startup: "", folder: "", tmux: true, notes: "", color: "", terminalTheme: "", os: "", lastConnected: 0, ...over,
+  forwardAgent: false, keepalive: 30, env: {}, startup: "", folder: "", tmux: true, notes: "", color: "", terminalTheme: "",
+  fontFamily: "", fontSize: null, lineHeight: null, cursorStyle: "", cursorBlink: null, os: "", lastConnected: 0, ...over,
 });
 
 export const newForward = (hostId: string): SshForward => ({ id: "", hostId, label: "", kind: "local", bindAddress: "", bindPort: 0, destHost: "localhost", destPort: 0, autoStart: false });
@@ -304,10 +313,17 @@ export async function startAutoForwards() {
   for (const f of vault().forwards.filter((f) => f.autoStart)) await forwardStart(f.id).catch(() => {});
 }
 
+/** Saves a pane's theme as its host's (the pane's quick switch → Save for this host). */
+export async function saveHostTheme(hostId: string, themeId: string) {
+  if (!hostById(hostId)) throw new Error(t("That host is no longer saved."));
+  // Only the look changes: the host's last check still holds (saveHost would forget it).
+  await saveVault({ ...vault(), hosts: vault().hosts.map((h) => (h.id === hostId ? { ...h, terminalTheme: themeId } : h)) });
+}
+
 /** Loads the vault and starts the auto-start forwards (app start). */
 export async function initSshHosts() {
-  // Panes on a saved host take its terminal theme.
-  setSessionThemeResolver((id) => hostOf(store.sessions[id]?.remote)?.terminalTheme || undefined);
+  // Panes on a saved host take its appearance; a pane's own theme pick goes over it.
+  setSessionAppearanceResolver((id) => ({ host: hostAppearance(hostOf(store.sessions[id]?.remote)), pane: paneTheme(id) }));
   await loadVault().catch(() => {});
   await startAutoForwards();
 }

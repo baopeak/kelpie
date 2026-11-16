@@ -1,7 +1,7 @@
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../lib/store";
 import { redact } from "../lib/ipc";
-import { getView, openTerminalLink, parkView } from "../lib/terminal-host";
+import { getView, openTerminalLink, parkView, sessionAppearance } from "../lib/terminal-host";
 import { Icon } from "./icons";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import { fileRefMenuItems, linkMenuItems, sessionFiles } from "./path-menu";
@@ -13,7 +13,8 @@ import { t } from "../lib/i18n";
 import { commandHint as hint } from "../lib/commands";
 import { handOffSession, sessionTranscript } from "../lib/agent-actions";
 import { hostOf } from "../lib/ssh-hosts";
-import { findTerminalTheme } from "../lib/terminal-themes";
+import { paneTheme } from "../lib/terminal-appearance";
+import { openPaneAppearance } from "./pane-appearance";
 import { selectionSource } from "../lib/composer-state";
 import { sendSelectionToAgent } from "../lib/send-to-agent";
 
@@ -24,8 +25,11 @@ export function TerminalPane(props: { sessionId: string; focused: boolean }) {
   const view = getView(props.sessionId, store.state.settings);
   const [finding, setFinding] = createSignal(false);
   const [query, setQuery] = createSignal("");
-  /** Background of the host's own terminal theme, around the terminal. */
-  const hostBg = () => findTerminalTheme(hostOf(session()?.remote)?.terminalTheme)?.colors[0];
+  /** Background of the pane's own theme (its pick or its host's) around the terminal; the app's theme is the page's own. */
+  const hostBg = () => {
+    if (!paneTheme(props.sessionId) && !hostOf(session()?.remote)?.terminalTheme) return undefined;
+    return sessionAppearance(props.sessionId, store.state.settings).theme.background;
+  };
 
   onMount(() => {
     view.mount(host);
@@ -98,6 +102,7 @@ export function TerminalPane(props: { sessionId: string; focused: boolean }) {
       { label: t("Copy Context"), run: () => void transcript().then(redact).then((text) => writeText(text)).then(() => store.notify(t("Copied the last 400 lines"))) },
       { label: t("Find…"), run: () => { setFinding(true); queueMicrotask(() => findInput?.focus()); } },
       { label: t("Clear"), run: () => view.term.clear() },
+      { label: t("Appearance…"), run: () => openPaneAppearance(props.sessionId, e.clientX, e.clientY) },
       null,
       { label: t("Split Right…"), run: () => s?.project_id && store.splitPicker(s.project_id, "right") },
       { label: t("Split Down…"), run: () => s?.project_id && store.splitPicker(s.project_id, "down") },

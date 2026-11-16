@@ -20,7 +20,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { attachTerminal, b64ToBytes, daemon, detachTerminal, sendInput } from "./ipc";
 import { isMac } from "./platform";
-import { terminalThemeFor } from "./theme";
+import { resolveAppearance, type Appearance, type AppearanceOverrides } from "./terminal-appearance";
 import { typedText } from "./typed-text";
 import { osc52Text } from "./osc52";
 import { deviceQueryGate } from "./device-query-gate";
@@ -29,10 +29,14 @@ import type { FileRef } from "../chat/chat-links";
 import { fileLinkProvider } from "./terminal-file-links";
 import { fitChunk } from "./stream-continuity";
 
-/** A session's own terminal theme id (its host's), over the app's; set by lib/ssh-hosts.ts. */
-let themeOf: (sessionId: string) => string | undefined = () => undefined;
-export const setSessionThemeResolver = (fn: (sessionId: string) => string | undefined) => (themeOf = fn);
-const themeFor = (sessionId: string, s: Settings) => terminalThemeFor(s.theme, themeOf(sessionId) || s.terminalTheme);
+/** A session's own appearance over the app's (its host's overrides, a theme picked for its pane); set by lib/ssh-hosts.ts. */
+let appearanceOf: (sessionId: string) => { host?: AppearanceOverrides; pane?: string } = () => ({});
+export const setSessionAppearanceResolver = (fn: (sessionId: string) => { host?: AppearanceOverrides; pane?: string }) => (appearanceOf = fn);
+/** What a session's pane is drawn with now. */
+export const sessionAppearance = (sessionId: string, s: Settings): Appearance => {
+  const { host, pane } = appearanceOf(sessionId);
+  return resolveAppearance(s, host, pane);
+};
 
 const MAX_PARKED = 16;
 /** Hidden views that keep their WebGL context (visible ones always have one). */
@@ -103,16 +107,17 @@ export class TermView {
     // terminal's right-click menu.
     // xterm activates a link on any button: Ctrl+right-click is the menu, not a click.
     const modified = (e: MouseEvent) => e.button === 0 && (isMac ? e.metaKey : e.ctrlKey);
+    const look = sessionAppearance(sessionId, settings);
     this.term = new Terminal({
-      fontFamily: settings.fontFamily,
-      fontSize: settings.fontSize,
-      lineHeight: settings.lineHeight,
+      fontFamily: look.fontFamily,
+      fontSize: look.fontSize,
+      lineHeight: look.lineHeight,
       scrollback: settings.scrollback,
-      cursorBlink: settings.cursorBlink,
-      cursorStyle: "bar",
+      cursorBlink: look.cursorBlink,
+      cursorStyle: look.cursorStyle,
       cursorWidth: 2,
       allowProposedApi: true,
-      theme: themeFor(sessionId, settings),
+      theme: look.theme,
       macOptionIsMeta: true,
       drawBoldTextInBrightColors: false,
       rescaleOverlappingGlyphs: true,
@@ -438,14 +443,12 @@ export class TermView {
 
   applySettings(s: Settings) {
     this.settings = s;
-    Object.assign(this.term.options, {
-      fontFamily: s.fontFamily,
-      fontSize: s.fontSize,
-      lineHeight: s.lineHeight,
-      cursorBlink: s.cursorBlink,
-      scrollback: s.scrollback,
-      theme: themeFor(this.sessionId, s),
-    });
+    const look = sessionAppearance(this.sessionId, s);
+    const o = this.term.options as Record<string, unknown>;
+    // Only what changed: each option set makes xterm re-measure or repaint.
+    const next: Record<string, unknown> = { fontFamily: look.fontFamily, fontSize: look.fontSize, lineHeight: look.lineHeight, cursorBlink: look.cursorBlink, cursorStyle: look.cursorStyle, scrollback: s.scrollback };
+    for (const [k, v] of Object.entries(next)) if (o[k] !== v) o[k] = v;
+    if (JSON.stringify(this.term.options.theme) !== JSON.stringify(look.theme)) this.term.options.theme = look.theme;
     // Renderer switch applies now (hidden views keep their context, so no remount does it).
     if (!s.webgl) this.releaseWebgl();
     else if (this.visible) this.enableWebgl();

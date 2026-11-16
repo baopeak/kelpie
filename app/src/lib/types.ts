@@ -196,12 +196,24 @@ export interface AgentProfile {
   permission?: string;
 }
 
+/** A terminal colour theme the person made or imported (see `TerminalTheme` in lib/terminal-themes.ts). */
+export interface CustomTerminalTheme {
+  id: string;
+  label: string;
+  dark: boolean;
+  /** background, foreground, cursor, then ANSI 0–15. */
+  colors: [string, string, string, ...string[]];
+  selection?: string;
+}
+
 export interface Settings {
   fontFamily: string;
   fontSize: number;
   lineHeight: number;
   scrollback: number;
   cursorBlink: boolean;
+  /** Terminal cursor shape (saved hosts may override it). */
+  cursorStyle: "block" | "underline" | "bar";
   webgl: boolean;
   shellArgs: string[];
   rightPanelWidth: number;
@@ -267,6 +279,8 @@ export interface Settings {
   announcedUpdate?: string;
   /** Terminal colour theme id (lib/terminal-themes.ts); "default" follows the app theme. */
   terminalTheme: string;
+  /** The person's own terminal colour themes (lib/theme-io.ts checks them; ids start with `custom:`). */
+  customThemes: CustomTerminalTheme[];
   /** Editor soft wrap. */
   wordWrap: boolean;
   /** Agent for AI actions (commit message, pull request text). */

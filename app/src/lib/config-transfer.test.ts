@@ -6,7 +6,8 @@ import type { SshHost, SshForward, Vault } from "./ssh-hosts";
 
 const host = (over: Partial<SshHost>): SshHost => ({
   id: "", label: "", alias: "", group: "", tags: [], hostname: "h.example", port: null, user: "", auth: "key", identityFile: "", jump: "",
-  forwardAgent: false, keepalive: 30, env: {}, startup: "", folder: "", tmux: true, notes: "", color: "", terminalTheme: "", os: "", lastConnected: 0, ...over,
+  forwardAgent: false, keepalive: 30, env: {}, startup: "", folder: "", tmux: true, notes: "", color: "", terminalTheme: "",
+  fontFamily: "", fontSize: null, lineHeight: null, cursorStyle: "", cursorBlink: null, os: "", lastConnected: 0, ...over,
 });
 const forward = (id: string, hostId: string): SshForward => ({ id, hostId, label: id, kind: "local", bindAddress: "", bindPort: 8080, destHost: "localhost", destPort: 80, autoStart: true });
 
