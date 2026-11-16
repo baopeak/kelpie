@@ -2,16 +2,19 @@
 // and the inbox, the open session or Settings below.
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
-import { Inbox } from "./inbox";
+import { Inbox, STATE_WORDS } from "./inbox";
 import { t } from "./i18n";
-import { canStartSessions, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, remoteScreen, remoteScreens, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
+import { canStartSessions, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, projects, remoteScreen, remoteScreens, stateBannerShown, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
 import { NewSessionSheet } from "./new-session";
 import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } from "./hosted";
 import { PaneTakeover } from "./pane-takeover";
 import { ScreenView } from "./screen-view";
 import { LockCover, LockScreen, RecheckSheet } from "./lock-screen";
 import { InstallGuide, PairWays, ScanCode, screenNow } from "./install-guide";
-import { labelOf, needsCount } from "./inbox-order";
+import { groupOf, labelOf, needsCount, whereOf } from "./inbox-order";
+import { Icon } from "./icons";
+import mark from "../../src/assets/brand/kelpie-mark.svg";
+import markDark from "../../src/assets/brand/kelpie-mark-dark.svg";
 import { SessionView } from "./session-view";
 import { SettingsView } from "./settings-view";
 
@@ -29,6 +32,7 @@ function NotPaired() {
   const screen = () => screenNow(paired(), !!pairing());
   return (
     <>
+      <BrandHero />
       <Show when={screen() !== "install"} fallback={<InstallGuide />}>
         <Show when={screen() !== "scan"} fallback={<ScanCode done={setPairing} message={notPairedMessage()} />}>
           <Pairing />
@@ -38,6 +42,25 @@ function NotPaired() {
         <div class="card"><PairWays self /></div>
       </Show>
     </>
+  );
+}
+
+/** Kelpie's mark, drawn for the theme in use (the app's own setting can differ from the system's). */
+function Mark(props: { class: string }) {
+  return (
+    <>
+      <img class={`${props.class} only-light`} src={mark} alt="" />
+      <img class={`${props.class} only-dark`} src={markDark} alt="" />
+    </>
+  );
+}
+
+/** Kelpie's mark, large, where a person meets the app before it is paired (the header names it). */
+function BrandHero() {
+  return (
+    <div class="hero">
+      <Mark class="hero-mark" />
+    </div>
   );
 }
 
@@ -68,7 +91,7 @@ function Pairing() {
           </>
         }>
           <p>{t("Type this code into Kelpie on your computer:")}</p>
-          <p class="pair-code" data-pair-code>{pairShown()!.digits}</p>
+          <p class="pair-code" data-pair-code aria-label={pairShown()!.digits}><For each={[...pairShown()!.digits]}>{(d) => <span>{d}</span>}</For></p>
           <p class="muted">{t("This device's key, which your computer shows too:")} <span class="pair-key" data-pair-key>{pairShown()!.key}</span></p>
         </Show>
       </Show>
@@ -77,10 +100,10 @@ function Pairing() {
 }
 
 /** The always-visible connection indicator: a dot and a short word, the whole thing a button. */
-function ConnIndicator(props: { onClick: () => void }) {
+function ConnIndicator(props: { onClick: () => void; compact: boolean }) {
   const info = () => describeConn(conn(), livePathNow());
   return (
-    <button class={`conn ${info().tone}`} onClick={props.onClick} aria-label={t("Connection")} data-state={conn().kind}>
+    <button class={`conn ${info().tone}${props.compact ? " compact" : ""}`} onClick={props.onClick} aria-label={props.compact ? `${t("Connection")}: ${info().label}` : t("Connection")} data-state={conn().kind}>
       <span class="dot" />
       <span class="conn-label">{info().label}</span>
     </button>
@@ -90,19 +113,21 @@ function ConnIndicator(props: { onClick: () => void }) {
 /** Under the header whenever what is on screen is not the computer as it is now. */
 function StateBanner() {
   const info = () => describeConn(conn(), livePathNow());
-  const shown = () => !["live", "connecting"].includes(conn().kind) || (conn().kind === "connecting" && paintedFrom() !== null);
   const asOf = () => {
     const at = paintedFrom() ?? lastLiveAt();
     return at ? t("As of {time} ({ago})", { time: clock(at, true), ago: ago(at, now()) }) : "";
   };
   return (
-    <Show when={shown() && paired()}>
+    <Show when={stateBannerShown() && paired()}>
       <div class={`banner ${info().tone}`} role="status" data-banner={conn().kind} onClick={() => conn().kind === "replaced" && link.kick()}>
-        <b>{info().label}</b> {info().detail}
-        <Show when={!connected() && asOf()}><div class="asof">{asOf()}</div></Show>
-        <Show when={conn().kind === "not_paired_here"}>
-          <div class="actions"><button class="btn danger" data-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) forgetDevice(); }}>{t("Forget this device")}</button></div>
-        </Show>
+        <Icon name={info().tone === "bad" ? "offline" : info().tone === "warn" ? "alert" : "info"} size={20} />
+        <div class="banner-body">
+          <b>{info().label}</b> {info().detail}
+          <Show when={!connected() && asOf()}><div class="asof">{asOf()}</div></Show>
+          <Show when={conn().kind === "not_paired_here"}>
+            <div class="actions"><button class="btn danger" data-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) forgetDevice(); }}>{t("Forget this device")}</button></div>
+          </Show>
+        </div>
       </div>
     </Show>
   );
@@ -113,19 +138,22 @@ function SecurityBanner() {
   return (
     <>
       <Show when={plainHttpOrigin() || device()?.capped}>
-        <Show when={location.protocol === "https:"} fallback={<div class="banner warn" role="status" data-banner="plain-http">{t("Plain HTTP: someone on this network could swap this page, so it can only read here. To type, pair it again through Tailscale's HTTPS address.")}</div>}>
-          <div class="banner warn" role="status" data-banner="no-passkey">{t("This device has no passkey, so it can only read here. To type, pair it again through Tailscale or at an HTTPS name.")}</div>
+        <Show when={location.protocol === "https:"} fallback={<div class="banner warn" role="status" data-banner="plain-http"><Icon name="alert" size={20} /><div class="banner-body">{t("Plain HTTP: someone on this network could swap this page, so it can only read here. To type, pair it again through Tailscale's HTTPS address.")}</div></div>}>
+          <div class="banner warn" role="status" data-banner="no-passkey"><Icon name="alert" size={20} /><div class="banner-body">{t("This device has no passkey, so it can only read here. To type, pair it again through Tailscale or at an HTTPS name.")}</div></div>
         </Show>
       </Show>
       <Show when={movedHost()}>
         <div class="banner" role="status" data-banner="moved">
+          <Icon name="info" size={20} />
+          <div class="banner-body">
           {HOSTED
             ? t("Your computer now uses the relay at {host}. This app works only through the relay it came from, so this phone must be paired again there.", { host: movedHost()! })
             : t("This computer can be reached at {host}. A browser keeps its pairing per address, so this device must be paired again there.", { host: movedHost()! })}
           <div class="actions"><a class="btn" href={`https://${movedHost()}/`}>{t("Open it")}</a></div>
+          </div>
         </div>
       </Show>
-      <Show when={deviceNews() && lockShown().clear}><div class="banner" role="status" data-banner="device-news">{deviceNews()}</div></Show>
+      <Show when={deviceNews() && lockShown().clear}><div class="banner" role="status" data-banner="device-news"><Icon name="info" size={20} /><div class="banner-body">{deviceNews()}</div></div></Show>
     </>
   );
 }
@@ -212,22 +240,31 @@ export function App() {
   };
   const badge = () => (open() ? needsCount(sessions()) : 0);
   const back = () => (inSettings() ? closeSettings() : remoteScreen() ? remoteScreens.close() : takeover() ? takeovers.close() : history.state?.s ? history.back() : closeSession());
+  const onInbox = () => paired() && open() && !inSettings() && !openId() && !takeover() && !remoteScreen();
+  /** Under an open session's name: its state in a word, its agent and where it runs. */
+  const subtitle = () => {
+    const id = openId();
+    const s = id && open() && !inSettings() && !takeover() && !remoteScreen() ? sessions().find((x) => x.id === id) : undefined;
+    return s ? [t(STATE_WORDS[groupOf(s)]), s.kind, whereOf(s, projects())].filter(Boolean).join(" · ") : "";
+  };
   return (
     <>
       <header id="top">
         <Show when={(inSettings() || openId() || takeover() || remoteScreen()) && open()}>
-          <button class="icon" aria-label={t("Back")} onClick={back}>‹</button>
+          <button class="icon" data-back aria-label={t("Back")} onClick={back}><Icon name="back" size={26} /></button>
         </Show>
-        <h1>{title()}</h1>
-        <Show when={!openId() && !inSettings() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
-        {/* Start a session: on the inbox, when this phone may type and the computer starts sessions for phones. */}
-        <Show when={paired() && lockShown().clear && !inSettings() && !openId() && !remoteScreen() && !takeover() && canStartSessions()}>
-          <button class="gear new-session" data-open-new-session aria-label={t("Start a session")} disabled={!connected()} onClick={() => setStarting(true)}>+</button>
-        </Show>
+        <div class="title-block">
+          <Show when={paired() && (onInbox() || !open())}><Mark class="brand-mark" /></Show>
+          <div class="title-text">
+            <h1>{title()}</h1>
+            <Show when={subtitle()}><span class="subtitle" data-subtitle>{subtitle()}</span></Show>
+          </div>
+          <Show when={!openId() && !inSettings() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
+        </div>
         <Show when={paired() && lockShown().clear && !inSettings() && !remoteScreen() && !takeover()}>
-          <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg></button>
+          <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}><Icon name="gear" size={22} /></button>
         </Show>
-        <Show when={paired()}><ConnIndicator onClick={() => setSheet(true)} /></Show>
+        <Show when={paired()}><ConnIndicator compact={!onInbox()} onClick={() => setSheet(true)} /></Show>
       </header>
       <StateBanner />
       <SecurityBanner />
@@ -244,6 +281,10 @@ export function App() {
           </Show>
         </Show>
       </main>
+      {/* Start a session: on the inbox, when this phone may type and the computer starts sessions for phones. In the thumb's reach. */}
+      <Show when={onInbox() && lockShown().clear && canStartSessions()}>
+        <button class="fab" data-open-new-session aria-label={t("Start a session")} disabled={!connected()} onClick={() => setStarting(true)}><Icon name="plus" size={22} /><span>{t("New session")}</span></button>
+      </Show>
       <Show when={sheet()}><Sheet onClose={() => setSheet(false)} onSettings={openSettings} /></Show>
       <Show when={starting() && open() && canStartSessions()}><NewSessionSheet onClose={() => setStarting(false)} /></Show>
       <Show when={HOSTED && trustOpen()}><TrustSheet onClose={() => setTrustOpen(false)} /></Show>

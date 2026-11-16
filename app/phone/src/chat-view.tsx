@@ -2,6 +2,8 @@
 // observer mode), and the agent's questions answered with a tap. Messages to a chat are written on the
 // computer; the phone never starts, configures or talks to the agent.
 import { createEffect, createSignal, For, Match, Show, Switch } from "solid-js";
+import { Dynamic } from "solid-js/web";
+import { inlineParts, proseBlocks } from "./prose";
 import type { ChatItem } from "../../src/chat/chat-model";
 import { describeTool } from "../../src/chat/tool-view";
 import { CommandBlock } from "./command-block";
@@ -38,8 +40,31 @@ export function splitFences(text: string): { code: boolean; text: string }[] {
   return out;
 }
 
+/** A line of prose with its **bold** and `code`, each piece a text node. */
+function Inlines(props: { text: string }) {
+  return <For each={inlineParts(props.text)}>{(p) => (p.kind === "bold" ? <strong>{p.text}</strong> : p.kind === "code" ? <code>{p.text}</code> : <>{p.text}</>)}</For>;
+}
+
 function Rich(props: { text: string }) {
-  return <For each={splitFences(props.text)}>{(b) => (b.code ? <pre class="code">{b.text}</pre> : <p class="prose">{b.text}</p>)}</For>;
+  return (
+    <For each={splitFences(props.text)}>
+      {(b) =>
+        b.code ? (
+          <pre class="code">{b.text}</pre>
+        ) : (
+          <For each={proseBlocks(b.text)}>
+            {(p) =>
+              p.kind === "para" ? (
+                <p class="prose"><Inlines text={p.text} /></p>
+              ) : (
+                <Dynamic component={p.ordered ? "ol" : "ul"} class="md-list"><For each={p.items}>{(item) => <li><Inlines text={item} /></li>}</For></Dynamic>
+              )
+            }
+          </For>
+        )
+      }
+    </For>
+  );
 }
 
 function ToolRow(props: { item: Tool }) {
