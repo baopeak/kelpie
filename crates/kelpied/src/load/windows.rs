@@ -28,7 +28,8 @@ pub struct Probe {
 
 impl Probe {
     pub fn read(&mut self) -> Reading {
-        Reading { cpu: self.cpu(), memory_free: memory_free(), low_memory: self.low_memory(), battery_saver: battery_saver(), thermal: false }
+        let (memory_free, memory_free_mb) = memory_free().unzip();
+        Reading { cpu: self.cpu(), memory_free, memory_free_mb, low_memory: self.low_memory(), battery_saver: battery_saver(), thermal: false }
     }
 
     fn cpu(&mut self) -> Option<f64> {
@@ -66,12 +67,13 @@ impl Drop for Probe {
     }
 }
 
-/// Percent of physical memory available.
-fn memory_free() -> Option<f64> {
+/// Physical memory available: percent of all of it, and MiB.
+fn memory_free() -> Option<(f64, u64)> {
     let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
     status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
     // SAFETY: `dwLength` is set, as the call requires.
-    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0 && status.ullTotalPhys > 0).then(|| 100.0 * status.ullAvailPhys as f64 / status.ullTotalPhys as f64)
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0 && status.ullTotalPhys > 0)
+        .then(|| (100.0 * status.ullAvailPhys as f64 / status.ullTotalPhys as f64, status.ullAvailPhys / (1024 * 1024)))
 }
 
 /// Windows' battery saver is on.

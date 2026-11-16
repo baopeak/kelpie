@@ -1110,8 +1110,12 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
 - **Broker** (`crates/kelpied/src/screen.rs`): a hold keyed by device, link connection and provider connection, one screen at a time for one device, resting on
   `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). A dropped link keeps it 45 s for the same device's next
   connection (`sc_rebind`; a pane's takeover keeps 15 s), after which the helper sends a keyframe first; a newer connection of the device lets go of the
-  older one's holds at once (`connection_opened`), so its rebind never waits for the older socket to close. 10 minutes with no input ends it. New screens are refused at load L2+ and with under 20 % memory free
-  (`host_busy`; the `KELPIE_LOAD_FORCE` test hook stands for the memory too, in a debug build or an e2e run only, never in a release daemon), without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
+  older one's holds at once (`connection_opened`), so its rebind never waits for the older socket to close. 10 minutes with no input ends it. New screens are admitted by what a stream needs (`screen::admit`): refused at
+  load L3 and with under `MIN_FREE_MB` (600 MiB) of memory free, whatever the level (`host_busy`, with `reason` — `memory`, `cpu`, `lag`, `thermal` or `load` —
+  and `busy {level, reasons, reason, memory_free, memory_free_mb, min_free_mb, cpu, lag_ms}` in the reply, from API 46; the phone says why and tries again
+  on its own on a bounded backoff, never with Face ID, which only a tap asks for: the load is looked at before the passkey); started at L2 with the
+  helper at its lowest rung (`Controller::start_low`), climbing as the encoder's load allows within the level's cap. The `KELPIE_LOAD_FORCE` test hook stands
+  for everything measured, in a debug build or an e2e run only, never in a release daemon. Refused too without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
   are checked again (known ids and kinds, short titles). A start reserves the screen for its whole length: a second start meanwhile, by any device, is
   refused as in use (`sc_taken`), and the first holder keeps it; a failed or timed-out start tells the app to stop; a link that closes during a start leaves a
   hold that waits for the device's next connection. A hold also rests on the record as it is now (`control_held`, looked at again by its task), takes at most

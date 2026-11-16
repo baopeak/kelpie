@@ -115,6 +115,20 @@ function Group(props: { title: string; rows: TargetRow[] }) {
   );
 }
 
+/** After a busy refusal: when the phone asks the computer again, counted down, and a way to stop asking. Mounted only while a try waits. */
+function RetryLine(props: { at: number }) {
+  const [now, setNow] = createSignal(Date.now());
+  const tick = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(tick));
+  const left = () => Math.max(0, Math.ceil((props.at - now()) / 1000));
+  return (
+    <p class="muted" role="status" data-busy-retry>
+      {t("Trying again in {n} s.", { n: left() })}{" "}
+      <button class="btn" onClick={() => remoteScreens.cancelRetry()}>{t("Stop trying")}</button>
+    </p>
+  );
+}
+
 function Picker() {
   const s = () => remoteScreen()!;
   const rows = (pred: (r: TargetRow) => boolean) => (s().targets ?? []).filter(pred);
@@ -123,6 +137,7 @@ function Picker() {
       <h2>{t("See the computer's screen")}</h2>
       <p class="muted">{t("Pick a screen or one window. The computer shows a border around what you see and can stop it at any time; Windows security prompts and the lock screen cannot be seen or answered from here.")}</p>
       <Show when={s().message}><p class="banner bad" role="status">{s().message}</p></Show>
+      <Show when={s().retry}>{(r) => <RetryLine at={r().at} />}</Show>
       <Show when={s().targets} fallback={<p class="muted">{t("Asking the computer…")}</p>}>
         <ConnectThrough />
         <Show when={connectRows().length && needsProof(s().via, route())}>

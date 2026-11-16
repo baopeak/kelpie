@@ -1,7 +1,7 @@
 """The computer's screen from the real phone page: the phone app in Playwright's Chromium as an iPhone (390×844 at 3×, touch), against the real
 app, its screen helper and a daemon of this script's own (Windows). Every function of the remote screen a person reaches with their fingers.
 
-    python -X utf8 scripts/e2e/screen_phone.py <scratch-dir> <app> [--json out.json]
+    python -X utf8 scripts/e2e/screen_phone.py <scratch-dir> <app> [--json out.json] [--load L2:memory]
 
 <app> is a debug build of the app with its frontend embedded (`cd app && pnpm tauri build --debug --no-bundle`), with the debug kelpied (built
 after `pnpm build:phone`, which it embeds: the page tested is the daemon's own) and kelpie-screen next to it. Needs tauri-driver (PATH or
@@ -27,6 +27,8 @@ Checks, each PASS or FAIL, then a summary (`--json` writes them too):
 6. text: shown in the field as typed, Hide masks it; text with Vietnamese diacritics arrives whole; Backspace, Enter, Tab, Esc; Ctrl with a
    letter is a shortcut.
 7. Stop ends it, and it starts again; leaving the app (the page hidden) ends it within a second and nothing more lands.
+`--load` pins this script's daemon at a load level (`KELPIE_LOAD_FORCE`, calm by default). At L2 every check above runs on a screen that started
+at its lowest rung. At L3 the start is refused instead: the picker says why and when it tries again, Stop trying stops it, and nothing else runs.
 Not here: the relay and its Face ID check (screen_relay.py, with an emulated phone), peer to peer under impairment (screen_rtc.py).
 """
 import argparse
@@ -48,7 +50,11 @@ ap = argparse.ArgumentParser()
 ap.add_argument("scratch")
 ap.add_argument("app")
 ap.add_argument("--json", default=None)
+ap.add_argument("--load", default=None, help="the daemon's pinned load level and reason, such as L2:memory or L3:memory")
 ARGS = ap.parse_args()
+if ARGS.load:
+    os.environ["KELPIE_E2E_LOAD"] = ARGS.load
+OVERLOADED = (ARGS.load or "").upper().startswith(("L3", "3"))
 
 TITLE = f"Kelpie phone screen {os.getpid()}"
 EVENTS = os.path.join(SETUP.work, "target-events.txt")
@@ -309,11 +315,32 @@ def scenario(d, run, pw):
         phone.close()
 
 
+def refused_for_load(phone):
+    """At L3: the start is refused, the picker says why and when it asks again, and Stop trying stops the tries."""
+    page = phone.page
+    page.click("[data-see-screen]")
+    row = page.wait_for_selector(f"[data-target]:has-text('{TITLE}')", timeout=30000)
+    row.query_selector("button").click()
+    banner = page.wait_for_selector(".takeover-pick .banner.bad", timeout=30000)
+    text = banner.inner_text()
+    check("an overloaded computer refuses the screen and the phone says why", "memory" in text and "Close some programs" in text, text)
+    retry = page.wait_for_selector("[data-busy-retry]", timeout=10000)
+    check("…and says when it tries again on its own", "Trying again in" in retry.inner_text(), retry.inner_text())
+    check("no picture starts", page.locator(".screen-live").count() == 0)
+    retry.query_selector("button").click()
+    check("Stop trying stops the tries", until(lambda: page.locator("[data-busy-retry]").count() == 0, 5), page.locator("[data-busy-retry]").count())
+
+
 def run_phone(d, phone, hwnd):
     page = phone.page
     # ---------- 1. pairing, control, the picker, the picture ----------
     check("the page pairs on the secure origin, sets up its passkey and is given control", pair(phone, d))
+    if OVERLOADED:
+        return refused_for_load(phone)
     ways = start_screen(phone)
+    if (ARGS.load or "").upper().startswith(("L2", "2")):
+        quality = until(lambda: page.locator(".screen-quality").inner_text().strip(), 10) or ""
+        check("a loaded computer starts the screen low, reduced for the load", "computer busy" in quality and int(quality.split(" fps")[0].split("· ")[-1] or 99) <= 8, quality)
     check("the picker lists the test window and starts it: the picture is live", page.locator(".screen-live[data-phase=live]").count() == 1)
     # This computer offers the screen on its own network only: Automatic and peer to peer, or no choice at all (an older daemon).
     check("Connect through lists the ways this computer offers, Automatic usable", not ways or ["auto", "true"] in ways, ways)

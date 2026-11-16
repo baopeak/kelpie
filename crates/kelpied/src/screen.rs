@@ -75,12 +75,55 @@ pub const ROOM_FOR_VIDEO: usize = 3;
 const KEY_GAP: Duration = Duration::from_secs(1);
 /// Starting the helper and its first look can take a while on a busy machine. The app answers within its own shorter budget.
 pub const START_LIMIT: Duration = Duration::from_secs(15);
-/// New screens are refused with less memory free than this (percent).
-const MIN_FREE_MEMORY: f64 = 20.0;
+/// New screens are refused with less memory free than this (MiB): what a stream takes on this computer (the helper's capture, colour
+/// conversion, encoder and peer, measured at about 150 MiB at 1080p), with room to spare for the rest of the machine. A share of all memory
+/// would refuse an 8 GB computer most of the day while a stream needs a small part of what is free.
+pub const MIN_FREE_MB: u64 = 600;
 
 fn refused(code: &'static str, message: impl Into<String>) -> Refused {
-    Refused { code, message: message.into() }
+    Refused { code, message: message.into(), reason: None, busy: None }
 }
+
+/// What the load lets a new screen do.
+#[derive(Debug, PartialEq)]
+pub enum Admit {
+    /// Start, at what the level allows.
+    Start,
+    /// Start at the lowest rung, and climb as the load allows (the helper is told the level: `start_low`).
+    Low,
+    /// Refused: the computer is overloaded, or has too little memory free for a stream.
+    Busy(Refused),
+}
+
+/// Whether a new screen may start under `status`, with what the last second `measured` (none while the test hook pins the load: the level
+/// then stands for everything). L3 refuses, and so does free memory under `MIN_FREE_MB`; L2 starts low. A refusal says why, with the numbers.
+pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample>) -> Admit {
+    let free_mb = measured.and_then(|m| m.reading.memory_free_mb);
+    let short = free_mb.is_some_and(|mb| mb < MIN_FREE_MB);
+    if status.level < Level::L3 && !short {
+        return if status.level >= Level::L2 { Admit::Low } else { Admit::Start };
+    }
+    // The reason the phone names: memory when it is short here, else the first the level gives (`load::Sample::wants`).
+    let reason = if short { "memory" } else { status.reasons.iter().find_map(|r| BUSY_REASONS.iter().copied().find(|k| k == r)).unwrap_or("load") };
+    let reading = measured.map(|m| &m.reading);
+    let whole = |v: Option<f64>| v.filter(|v| v.is_finite()).map(|v| v.round() as u64);
+    let pct = whole(reading.and_then(|r| r.memory_free));
+    let cpu = whole(reading.and_then(|r| r.cpu));
+    let lag = whole(measured.map(|m| m.lag_p95_ms));
+    let busy = json!({"level": status.level.number(), "reasons": status.reasons, "reason": reason, "memory_free": pct, "memory_free_mb": free_mb, "min_free_mb": MIN_FREE_MB, "cpu": cpu, "lag_ms": lag});
+    let message = match (reason, pct, free_mb, cpu) {
+        ("memory", Some(pct), Some(mb), _) => format!("Only {pct} % of the computer's memory is free ({mb} MB): too little to show its screen. Close some programs on it; the phone tries again."),
+        ("memory", ..) => "The computer is short of memory: too little to show its screen. Close some programs on it; the phone tries again.".to_string(),
+        ("cpu", _, _, Some(cpu)) => format!("The computer's processor is fully busy ({cpu} %). The phone tries again when it is less busy."),
+        ("lag", ..) => "The computer is responding slowly. The phone tries again when it is less busy.".to_string(),
+        ("thermal", ..) => "The computer is too hot and slowed itself down. The phone tries again when it has cooled.".to_string(),
+        _ => "The computer is too busy to show its screen now. The phone tries again in a moment.".to_string(),
+    };
+    Admit::Busy(Refused { code: "host_busy", message, reason: Some(reason), busy: Some(busy) })
+}
+
+/// The reasons that raise the load to L3 or hold it at L2, as a refusal names them (`load::Sample::wants`).
+const BUSY_REASONS: &[&str] = &["memory", "cpu", "lag", "thermal"];
 
 /// The phone connection a verb came on.
 pub struct Phone<'a> {
@@ -793,10 +836,10 @@ impl Broker {
 
     async fn start(&self, d: &Arc<Daemon>, phone: &Phone<'_>, req: &Value) -> Result<Value, Refused> {
         let target = req["target"].as_str().filter(|t| kelpie_screen::targets::TargetId::parse(t).is_some()).ok_or_else(|| refused("bad_request", "missing target"))?.to_string();
-        let level = d.mobile.load.level();
-        let free = d.mobile.load.memory_free();
-        if level >= Level::L2 || free.is_some_and(|f| f < MIN_FREE_MEMORY) {
-            return Err(refused("host_busy", "The computer is too busy to show its screen now. Try again in a moment."));
+        let status = d.mobile.load.status();
+        let level = status.level;
+        if let Admit::Busy(refusal) = admit(&status, d.mobile.load.measured().as_ref()) {
+            return Err(refusal);
         }
         let Some(provider) = d.providers.provider("screen") else { return Err(refused("no_app", "Open Kelpie on the computer to see its screen.")) };
         let in_use = || refused("sc_taken", "The computer's screen is in use by another device.");

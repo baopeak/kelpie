@@ -105,7 +105,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// host only at 44.
 /// 45: `sftp.stat_many {dest, paths}` (at most 512 absolute paths): `[Meta | null]` in order, null for a path that cannot be
 /// read, an error when the connection is lost. A remote project's live updates poll it only at 45.
-pub const API_LEVEL: u32 = 45;
+/// 46: the screen is admitted by what a stream needs: `sc_start` is refused (`host_busy`) at load L3 or with under 600 MiB of memory free, and
+/// starts at L2 with the helper at its lowest rung; the refusal carries `reason` (`memory`, `cpu`, `lag`, `thermal` or `load`) and `busy {level,
+/// reasons, reason, memory_free, memory_free_mb, min_free_mb, cpu, lag_ms}`, and `mobile.load` says `memory_free_mb`. An older daemon refuses at L2
+/// with neither, so the phone shows its words and tries again all the same.
+pub const API_LEVEL: u32 = 46;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

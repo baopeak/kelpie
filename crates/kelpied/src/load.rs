@@ -166,6 +166,8 @@ pub struct Reading {
     pub cpu: Option<f64>,
     /// Percent of memory available.
     pub memory_free: Option<f64>,
+    /// The same in MiB: what a new screen's floor is measured against (`screen::MIN_FREE_MB`).
+    pub memory_free_mb: Option<u64>,
     pub low_memory: bool,
     pub battery_saver: bool,
     pub thermal: bool,
@@ -283,7 +285,7 @@ fn parse_force(text: &str) -> Option<(Level, String)> {
     Some((Level::parse(level)?, reason.trim().to_string()))
 }
 
-/// Whether `KELPIE_LOAD_FORCE` also stands for the free memory (the screen's 20 % floor): only in a debug build or an e2e run (`KELPIE_E2E`), so a
+/// Whether `KELPIE_LOAD_FORCE` also stands for everything measured (the screen's free-memory floor): only in a debug build or an e2e run (`KELPIE_E2E`), so a
 /// leftover variable in a release daemon's environment never lets a screen start on a machine short of memory.
 pub fn memory_hook_applies(forced: bool, debug_build: bool, e2e: bool) -> bool {
     forced && (debug_build || e2e)
@@ -359,13 +361,19 @@ impl Load {
         }
     }
 
-    /// Free memory as the last second measured it (percent); none while the test hook pins the load in a test (`memory_hook_applies`), where
-    /// it stands for everything measured. A release daemon always gives the measured value, whatever its environment says.
-    pub fn memory_free(&self) -> Option<f64> {
+    /// What the last second measured; none while the test hook pins the load in a test (`memory_hook_applies`), where the level stands for
+    /// everything measured. A release daemon always gives the measured values, whatever its environment says.
+    pub fn measured(&self) -> Option<Sample> {
         if memory_hook_applies(forced().is_some(), cfg!(debug_assertions), std::env::var_os("KELPIE_E2E").is_some()) {
             return None;
         }
-        self.last.lock().reading.memory_free
+        Some(self.last.lock().clone())
+    }
+
+    /// Pins what the last second measured.
+    #[cfg(test)]
+    pub fn set_sample_for_test(&self, sample: Sample) {
+        *self.last.lock() = sample;
     }
 
     /// What the last second measured, for the `mobile.load` call.
@@ -376,6 +384,7 @@ impl Load {
         v["lag_p95_ms"] = json!(sample.lag_p95_ms);
         v["cpu"] = json!(sample.reading.cpu);
         v["memory_free"] = json!(sample.reading.memory_free);
+        v["memory_free_mb"] = json!(sample.reading.memory_free_mb);
         v["lag_p99_ms"] = json!(self.lag_percentile(0.99));
         v["lag_p999_ms"] = json!(self.lag_percentile(0.999));
         v["probes"] = json!(self.lags.iter().map(|b| b.load(Ordering::Relaxed)).sum::<u64>());

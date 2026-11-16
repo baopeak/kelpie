@@ -371,6 +371,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let now_ms = || started_at.elapsed().as_millis() as u64;
     let mut ctl = Controller::new(src, window, false, 0);
     ctl.set_level(opts.level, 0);
+    // Started on a loaded machine (the daemon refuses at L3): the cheapest picture first.
+    if opts.level >= 2 {
+        ctl.start_low();
+    }
     if let Some(cap) = opts.max_kbps {
         ctl.bandwidth.set_cap(cap);
     }

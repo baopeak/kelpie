@@ -155,14 +155,17 @@ impl Ladder {
 }
 
 /// A request that was not carried out: `code` for programs, `message` for people.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Refused {
     pub code: &'static str,
     pub message: String,
+    /// Why, in a word the phone knows (`host_busy`: `memory`, `cpu`, `lag`, `thermal` or `load`), and the numbers behind a `host_busy`.
+    pub reason: Option<&'static str>,
+    pub busy: Option<Value>,
 }
 
 fn refused(code: &'static str, message: impl Into<String>) -> Refused {
-    Refused { code, message: message.into() }
+    Refused { code, message: message.into(), reason: None, busy: None }
 }
 
 /// The phone connection a verb came on.
