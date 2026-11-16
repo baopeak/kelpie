@@ -521,6 +521,8 @@ export interface AppState {
   recent: RecentItem[];
   /** Projects whose session list is folded in the sidebar. */
   collapsed: Record<string, boolean>;
+  /** Repositories whose quiet worktrees are listed in full instead of under "N more worktrees". */
+  worktreesExpanded?: Record<string, boolean>;
   /** Shortcut overrides by command id: a chord like "mod+alt+p", or "" for none. */
   keymap: Record<string, string>;
   /** The setup, tabs, copy and link of `.kelpie.yaml` (canonical text) the user agreed to run, by repository path. */

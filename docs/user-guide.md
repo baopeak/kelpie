@@ -76,8 +76,14 @@ their name and shortcut when you hover them.
    top to bottom; sessions in no pane last): status dot, task title, model and time since the
    last activity. Badges show
    sessions that need you (amber), are working (blue) or finished unread (green). The chevron
-   folds a project; the toolbar filters (all / running / needs you) and sorts (manual /
-   recent). Right-click a session to rename it inline, mark it unread, restart or resume it,
+   folds a project (a folded repository shows how many worktrees it has); the toolbar filters
+   (all / running / needs you) and sorts (manual / recent). A repository's worktrees sit under it,
+   one line each, with `*`, ↑ (not pushed) and ↓ (behind) only when they apply; the branch is in
+   the tooltip when it differs from the name. With more than four worktrees the sidebar lists the
+   open one, those with running sessions or sessions that need you and those with uncommitted or
+   unpushed work; the quiet rest fold into *N more worktrees*, which expands (remembered per
+   repository; a single quiet worktree is never folded). A folded worktree comes back into the list
+   when it is opened, starts a session or Kelpie next reads uncommitted or unpushed work in it. Right-click a session to rename it inline, mark it unread, restart or resume it,
    continue it in chat view or stop it; right-click a project for worktrees, rename, reorder.
    Switch projects with a click or `Alt+1…9` (`⌘1…9`); `‹ ›` (or `Alt+Shift+←/→`,
    `⌘⌥←/→`) go back and forward through recently focused panes, across projects.

@@ -150,6 +150,7 @@
 
 /* Compact density: tighter sidebar, panels and tabs. */
 :root[data-density="compact"] .project { padding: 4px 8px; }
+:root[data-density="compact"] .project.wt-row, :root[data-density="compact"] .wt-more { padding-top: 2px; padding-bottom: 2px; }
 :root[data-density="compact"] .session-row { padding: 2px 8px; }
 :root[data-density="compact"] .session-text .model { display: none; }
 :root[data-density="compact"] .tabbar { height: 32px; }
@@ -985,8 +986,24 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .shortcut-warn { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 12px; border: 1px solid var(--waiting); border-radius: 8px; background: color-mix(in srgb, var(--waiting) 8%, transparent); font-size: 12.5px; color: var(--text-dim); }
 /* ---------- worktrees ---------- */
 .worktree-list { margin-left: 14px; border-left: 1px solid var(--border); padding-left: 4px; }
-.wt-glyph { color: color-mix(in oklab, var(--kc) var(--tint-mix), var(--text)); width: 22px; height: 22px; display: grid; place-items: center; flex: none; border-radius: 7px; background: color-mix(in srgb, currentColor 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 22%, transparent); transition: transform .16s ease; }
+/* A worktree is one quiet line under its repository: a small branch glyph in the project's hue (no tile),
+   the name, and on the right only the git state that means something. */
+.project.wt-row { gap: 7px; padding: 4px 8px; }
+.wt-glyph { color: color-mix(in oklab, var(--kc) var(--tint-mix), var(--text)); width: 16px; height: 16px; display: grid; place-items: center; flex: none; opacity: .85; transition: transform .16s ease; }
+.project:hover .wt-glyph, .project.active .wt-glyph { opacity: 1; }
 .project:hover .wt-glyph { transform: translateY(-1px) scale(1.06); }
+.wt-row .project-name { font-size: 12.5px; }
+.wt-status { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; overflow: hidden; font: 10.5px var(--font-mono); color: var(--text-faint); white-space: nowrap; }
+.wt-status > * { flex: none; }
+.wt-status .primary-tag { margin-left: 0; }
+.wt-status .overlap { flex: 0 1 auto; min-width: 0; max-width: 8em; overflow: hidden; text-overflow: ellipsis; }
+/* The name keeps room to be recognised whatever the status beside it holds. */
+.wt-row .project-text { min-width: 4em; }
+.wt-dirty { color: var(--text-dim); font-weight: 700; }
+/* "N more worktrees": the quiet worktrees folded into one row, its chevron under the glyphs above. */
+.wt-more { display: flex; align-items: center; gap: 7px; width: 100%; padding: 3px 8px 3px 11px; border: 0; border-radius: 6px; background: transparent; color: var(--text-faint); font: inherit; font-size: 11.5px; text-align: left; cursor: pointer; }
+.wt-more:hover { background: var(--bg-hover); color: var(--text-dim); }
+.wt-count { display: inline-flex; align-items: center; gap: 2px; font: 10px var(--font-mono); color: var(--text-faint); }
 .primary-tag { margin-left: 6px; font-size: 9.5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--border-strong); color: var(--text-faint); text-transform: uppercase; letter-spacing: .4px; }
 .form-check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim); }
 .form-note { font-size: 12px; color: var(--text-dim); }

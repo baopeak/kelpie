@@ -18,6 +18,7 @@ import { sessionAccount } from "../lib/accounts";
 import { hostLabel } from "../lib/remote";
 import { canGoBack, canGoForward, navBack, navForward } from "../lib/nav-history";
 import { addExistingWorktrees, checkRemoval, removeWorktree } from "../lib/worktrees";
+import { WORKTREE_FOLD_LIMIT, foldWorktrees, isNotableWorktree } from "../lib/worktree-fold";
 import { openWorktreeDialog } from "./worktree-dialog";
 import { openFinish, overlapsOf } from "../lib/review-queue";
 import { openContextMenu, type MenuItem } from "./context-menu";
@@ -344,10 +345,25 @@ function SessionRow(props: { s: SessionInfo; hasKids?: boolean }) {
   );
 }
 
+/** A session that asks for the user even after it ended: it keeps its worktree in view and lights the "needs you" filter. */
+const asksForUser = (s: SessionInfo) => ["waiting", "error", "done"].includes(reportedState(s));
+
 function ProjectRow(props: { project: Project }) {
   const index = createMemo(() => store.topProjects().indexOf(props.project));
   const worktree = () => !!props.project.parentId;
   const children = createMemo<Project[]>((prev) => sameList(prev, store.childrenOf(props.project.id)));
+  // Many worktrees: the quiet ones fold under one "N more worktrees" row (see worktree-fold.ts).
+  const wtFold = createMemo(() => {
+    const kids = children();
+    // Checked here as well as in foldWorktrees so that a small repository's rows do not track every session.
+    if (kids.length <= WORKTREE_FOLD_LIMIT) return { shown: kids, hidden: [] as Project[] };
+    const watched = new Set<string>();
+    for (const s of Object.values(store.sessions)) if (s.project_id && (s.alive || asksForUser(s))) watched.add(s.project_id);
+    return foldWorktrees(kids, (c) => isNotableWorktree({ active: store.state.activeProject === c.id, sessions: watched.has(c.id), info: store.projectInfo[c.id] }));
+  });
+  const wtShown = createMemo<Project[]>((prev) => sameList(prev, wtFold().shown));
+  const wtHidden = createMemo<Project[]>((prev) => sameList(prev, wtFold().hidden));
+  const wtExpanded = () => !!store.state.worktreesExpanded?.[props.project.id];
   const active = () => store.state.activeProject === props.project.id;
   const sessions = createMemo(() => projectSessions(props.project.id));
   /** The rows listed under the project: its sessions that are not shown under a parent. */
@@ -370,15 +386,25 @@ function ProjectRow(props: { project: Project }) {
     const c = commands.find((x) => x.id === `project.${index() + 1}`);
     return c && chordOf(c) ? chordLabel(chordOf(c)!) : "";
   };
+  /** A worktree row is one line, so its branch (when it differs from the name) and host move to the tooltip. */
+  const rowTitle = () => {
+    const lines = [props.project.path];
+    const i = info();
+    if (worktree() && i?.is_repo && i.branch && i.branch !== props.project.name) lines.push(t("Branch: {branch}", { branch: i.branch }));
+    if (worktree() && props.project.remote) lines.push(props.project.remote.tmux ? t("On {host} over SSH · sessions kept in tmux", { host: hostLabel(props.project) }) : t("On {host} over SSH", { host: hostLabel(props.project) }));
+    return lines.join("\n") + (index() >= 0 && index() < 9 ? `  (${switchChord()})` : "");
+  };
+  const overlaps = () => overlapsOf(props.project.id);
+  const wtCountLabel = () => (children().length === 1 ? t("1 worktree") : t("{n} worktrees", { n: children().length }));
 
   return (
     <div class={`project-block${active() ? " active" : ""}`}>
       <div
-        class={`project${active() ? " active" : ""}`}
+        class={`project${worktree() ? " wt-row" : ""}${active() ? " active" : ""}`}
         style={{ "--kc": props.project.color }}
         onClick={() => store.switchProject(props.project.id)}
         onContextMenu={(e) => openContextMenu(e, projectMenu(props.project))}
-        title={`${props.project.path}${index() >= 0 && index() < 9 ? `  (${switchChord()})` : ""}`}
+        title={rowTitle()}
         data-project={props.project.id}
       >
         <Show when={!collapsedSidebar() && (sessions().length || children().length)}>
@@ -387,7 +413,7 @@ function ProjectRow(props: { project: Project }) {
           </button>
         </Show>
         <Show when={worktree()} fallback={<span class="project-swatch" style={{ "--kc": props.project.color }}>{props.project.name.slice(0, 1).toUpperCase()}</span>}>
-          <span class="wt-glyph" style={{ "--kc": props.project.color }}><Icon name="branch" size={13} /></span>
+          <span class="wt-glyph" style={{ "--kc": props.project.color }}><Icon name="branch" size={12} /></span>
         </Show>
         <Show when={!collapsedSidebar()}>
           <span class="project-text">
@@ -397,37 +423,46 @@ function ProjectRow(props: { project: Project }) {
             <Show when={renaming() === `c:${props.project.id}`}>
               <RenameInput value={store.metaFor(props.project)?.comment ?? ""} onDone={(v) => v !== null && void store.setComment(props.project, v)} />
             </Show>
-            <Show when={props.project.remote}>
+            <Show when={props.project.remote && !worktree()}>
               <span class="project-sub remote-host" title={props.project.remote!.tmux ? t("On {host} over SSH · sessions kept in tmux", { host: hostLabel(props.project) }) : t("On {host} over SSH", { host: hostLabel(props.project) })}>
                 <Icon name="server" size={10} /> {hostLabel(props.project)}
               </span>
             </Show>
-            <Show when={info()?.is_repo}>
+            <Show when={!worktree() && info()?.is_repo}>
               <span class="project-sub">
-                <Show when={!worktree()}><Icon name="branch" size={10} /> <span class="branch-text">{info()!.branch ?? t("detached")}</span></Show>
-                <Show when={worktree() && info()!.branch !== props.project.name}><span class="branch-text">{info()!.branch ?? t("detached")}</span></Show>
+                <Icon name="branch" size={10} /> <span class="branch-text">{info()!.branch ?? t("detached")}</span>
                 {info()!.dirty ? "*" : ""}
                 <Show when={info()!.ahead || info()!.behind}> ↑{info()!.ahead}↓{info()!.behind}</Show>
                 <Show when={children().length}><span class="primary-tag">{t("primary")}</span></Show>
-                <Show when={overlapsOf(props.project.id).length}>
-                  <span class="primary-tag overlap" title={overlapsOf(props.project.id).map((o) => `${o.name}: ${o.files.slice(0, 5).join(", ")}${o.files.length > 5 ? "…" : ""}`).join("\n")}>
-                    {t("Also changed in {name}", { name: overlapsOf(props.project.id)[0].name })}{overlapsOf(props.project.id).length > 1 ? ` +${overlapsOf(props.project.id).length - 1}` : ""}
-                  </span>
-                </Show>
-                <Show when={pullRequests.prs[props.project.id]}>
-                  {(pr) => <span class={`primary-tag pr-${prLabel(pr())}`} title={t("{title} ({state}, checks {checks})", { title: pr().title, state: prLabel(pr()), checks: pr().checks })}>{pr().provider === "gitlab" ? "!" : "#"}{pr().number}</span>}
-                </Show>
+                <Show when={overlaps().length}><OverlapTag overlaps={overlaps()} /></Show>
+                <Show when={pullRequests.prs[props.project.id]}>{(pr) => <PrTag pr={pr()} />}</Show>
               </span>
             </Show>
             <Show when={store.metaFor(props.project)?.comment && renaming() !== `c:${props.project.id}`}>
               <span class="project-comment" title={store.metaFor(props.project)!.comment!}>{store.metaFor(props.project)!.comment}</span>
             </Show>
           </span>
+          {/* A worktree's git state, only what means something: a detached HEAD, uncommitted changes, commits ahead/behind. */}
+          <Show when={worktree() && info()?.is_repo}>
+            <span class="wt-status">
+              <Show when={overlaps().length}><OverlapTag overlaps={overlaps()} /></Show>
+              <Show when={pullRequests.prs[props.project.id]}>{(pr) => <PrTag pr={pr()} />}</Show>
+              <Show when={!info()!.branch}><span>{t("detached")}</span></Show>
+              <Show when={info()!.dirty}><span class="wt-dirty" title={t("Uncommitted changes")}>*</span></Show>
+              <Show when={info()!.ahead}><span title={info()!.ahead === 1 ? t("1 commit not pushed") : t("{n} commits not pushed", { n: info()!.ahead })}>↑{info()!.ahead}</span></Show>
+              <Show when={info()!.behind}><span title={info()!.behind === 1 ? t("1 commit behind upstream") : t("{n} commits behind upstream", { n: info()!.behind })}>↓{info()!.behind}</span></Show>
+            </span>
+          </Show>
           <span class="project-badges">
             <Show when={counts().waiting}><span class="badge waiting" title={t("Needs you")}>{counts().waiting}</span></Show>
             <Show when={counts().error}><span class="badge error" title={t("Failed")}>{counts().error}</span></Show>
             <Show when={counts().working}><span class="badge working" title={t("Working")}>{counts().working}</span></Show>
             <Show when={counts().unread}><span class="badge unread" title={t("Finished, unread")}>{counts().unread}</span></Show>
+            <Show when={folded() && children().length}>
+              <span class="wt-count" role="img" title={wtCountLabel()} aria-label={wtCountLabel()}>
+                <Icon name="branch" size={10} />{children().length}
+              </span>
+            </Show>
           </span>
         </Show>
         <Show when={collapsedSidebar() && (counts().waiting || counts().error || counts().unread)}>
@@ -441,10 +476,35 @@ function ProjectRow(props: { project: Project }) {
       </Show>
       <Show when={!collapsedSidebar() && !folded() && children().length}>
         <div class="worktree-list">
-          <For each={children()}>{(c) => <ProjectRow project={c} />}</For>
+          {/* Expanded, the list keeps the repository's own order, so rows do not jump when one becomes notable. */}
+          <For each={wtExpanded() && wtHidden().length ? children() : wtShown()}>{(c) => <ProjectRow project={c} />}</For>
+          <Show when={wtHidden().length}>
+            <button class="wt-more" aria-expanded={wtExpanded()} onClick={() => store.setWorktreesExpanded(props.project.id, !wtExpanded())}>
+              <Icon name={wtExpanded() ? "chevronDown" : "chevronRight"} size={10} />
+              <span>{wtExpanded() ? t("Show fewer worktrees") : t("{n} more worktrees", { n: wtHidden().length })}</span>
+            </button>
+          </Show>
         </div>
       </Show>
     </div>
+  );
+}
+
+/** "Also changed in …": another worktree of the repository changed the same files. */
+function OverlapTag(props: { overlaps: ReturnType<typeof overlapsOf> }) {
+  return (
+    <span class="primary-tag overlap" title={props.overlaps.map((o) => `${o.name}: ${o.files.slice(0, 5).join(", ")}${o.files.length > 5 ? "…" : ""}`).join("\n")}>
+      {t("Also changed in {name}", { name: props.overlaps[0].name })}{props.overlaps.length > 1 ? ` +${props.overlaps.length - 1}` : ""}
+    </span>
+  );
+}
+
+/** The project's open pull/merge request with its state. */
+function PrTag(props: { pr: NonNullable<(typeof pullRequests.prs)[string]> }) {
+  return (
+    <span class={`primary-tag pr-${prLabel(props.pr)}`} title={t("{title} ({state}, checks {checks})", { title: props.pr.title, state: prLabel(props.pr), checks: props.pr.checks })}>
+      {props.pr.provider === "gitlab" ? "!" : "#"}{props.pr.number}
+    </span>
   );
 }
 
@@ -466,7 +526,7 @@ export function Sidebar() {
     if (filter !== "all") {
       list = list.filter((p) =>
         family(p).includes(store.state.activeProject ?? "") ||
-        family(p).some((id) => projectSessions(id).some((s) => (filter === "running" ? s.alive : ["waiting", "error", "done"].includes(reportedState(s))))),
+        family(p).some((id) => projectSessions(id).some((s) => (filter === "running" ? s.alive : asksForUser(s)))),
       );
     }
     if (store.state.settings.projectSort === "recent") list.sort((a, b) => Math.max(...family(b).map(lastActivity)) - Math.max(...family(a).map(lastActivity)));
