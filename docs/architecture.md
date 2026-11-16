@@ -1365,9 +1365,12 @@ Beyond the items, adapters fill shared state the UI renders the same way for eve
 
 `chat/tool-view.ts` turns a tool item into a row (verb, target, detail, IN/OUT) and diffs
 edit strings line by line. A message sent during a turn goes straight to the adapter's `steer` when it
-can (Claude: written mid-turn, the CLI reads and echoes it when the running tools finish, or, when the
-turn ends first, runs it as a turn of its own after a `result`, during which the adapter stays busy; Codex:
-`turn/steer`, queued again if refused): text only, no commands, and nothing else waiting. Below API 21
+can (Claude: written mid-turn, pictures included, the CLI reads and echoes it when the running tools finish,
+or, when the run ends first by itself or by a stop, prints that run's `result` and at once starts another run
+for it (`system/init`, then the echo), during which the adapter stays busy; Codex: `turn/steer`, queued again
+if refused, text only): no commands, and nothing else waiting. A Claude run ended by an interrupt (the CLI
+acknowledges it, writes `[Request interrupted by user…]` and ends with `error_during_execution`) shows
+*Stopped*, not an error. Below API 21
 `ChatController` queues the rest and sends it when the turn ends (adapters set `busy = false` last); *Send
 now* uses `steer` or stops the turn; stopping holds the queue. From API 21 the queue is the daemon's, below. Approvals carry what they
 are about (command, edit diff, plan) and Claude's `AskUserQuestion` / `ExitPlanMode` are
@@ -1396,6 +1399,16 @@ wrong until the answer). A turn is *in flight* from a write until an `Idle` line
 the process ending; a turn-shaped line that reaches stdin by `session.input` (an older app, an adapter's own pre-thread queue, a
 steer) is observed and counts too, never blocked, and an interrupt line seen from either side pauses a queue that has something in
 it. A turn that was written, drew no output and left the agent idle for 30 s is given up.
+
+*Claude's `result` is not always the end of the turn* (`chat/steers.rs`). The user lines written during a turn are noted by their
+text until their echoes (`isReplay`) come, oldest first, the line that started the turn included (so its echo is never taken for a
+later line of the same text, such as two pictures sent alone). A `result` that leaves a line written while the turn ran unread is
+held: Claude starts another run for it at once, so the session stays working, nothing is dispatched and no stop is pending. The
+next `result` ends the turn unless it again leaves such lines unread and fewer than before, so a lost echo holds one `result` at
+most. A held `result` that no `system/init` or work line follows within 15 s ends the turn (failed if that `result` reported an
+error); stderr or an answer to a request is no such sign. A new turn, and the watchdogs that give up on a turn, forget what an
+earlier turn left unread. A run that ends in `error_during_execution` after an interrupt line was written during it (from the
+window or a phone's Stop) does not mark the session failed, however long the stop took.
 
 Who builds the line depends on who holds the state. A **phone's** message is plain text and the daemon builds the turn when it
 writes it (`turns.rs`: three user-turn builders and the interrupts, checked against one golden fixture,

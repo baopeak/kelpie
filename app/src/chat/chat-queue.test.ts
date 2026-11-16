@@ -10,7 +10,7 @@ import type { ChatTransport } from "./transport";
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /** A controller over the daemon's queue: a transport that records what the window asks of the daemon. */
-function setup(make?: (ctx: AdapterContext) => Adapter, opts: { daemon?: boolean } = {}) {
+function setup(make?: (ctx: AdapterContext) => Adapter, opts: { daemon?: boolean; steersPictures?: boolean } = {}) {
   const asked = { enqueue: [] as { cid: string; text: string; rich: boolean; images: string[] }[], write: [] as { qid: string; lines: string[] | null; turn: boolean; retry?: boolean; tooLarge?: boolean }[], ops: [] as { op: string; qid?: string; opts?: object }[], sent: [] as string[] };
   /** What the daemon answers `chat.write_turn` with when it does not take the lines (null: it takes them). */
   const daemonSays = { error: null as string | null };
@@ -39,10 +39,11 @@ function setup(make?: (ctx: AdapterContext) => Adapter, opts: { daemon?: boolean
         ctx.write({ type: "user", message: { role: "user", content: text } });
         ctx.set("busy", true);
       },
-      steer(text) {
-        calls.push(`steer ${text}`);
+      steer(text, images) {
+        calls.push(`steer ${text}${images?.length ? ` +${images.length}` : ""}`);
         return true;
       },
+      steersPictures: opts.steersPictures,
       interrupt() {
         calls.push("interrupt");
       },
@@ -194,6 +195,26 @@ describe("a window on the daemon's queue", () => {
     await tick();
     expect(asked.ops.at(-1)).toEqual({ op: "front", qid: "q4", opts: { interrupt: true } });
     expect(calls.at(-1)).toBe("interrupt");
+  });
+
+  it("sends a picture now by steering it when the agent takes pictures mid-turn, else by a stop", async () => {
+    const pic = { mime: "image/png", data: "AA==", path: "/tmp/a.png" };
+    for (const steersPictures of [true, false]) {
+      const { ctrl, asked, calls, ctx } = setup(undefined, { steersPictures });
+      ctrl.send("look", true, [pic]);
+      await tick();
+      ctrl.applyQueue(view([{ qid: "q1", cid: asked.enqueue[0].cid, text: "look" }]));
+      ctx().set("busy", true);
+      ctrl.sendNow("q1");
+      await tick();
+      if (steersPictures) {
+        expect(asked.ops.at(-1)).toEqual({ op: "take", qid: "q1", opts: undefined });
+        expect(calls).toEqual(["steer look +1"]);
+      } else {
+        expect(asked.ops.at(-1)).toEqual({ op: "front", qid: "q1", opts: { interrupt: true } });
+        expect(calls).toEqual(["interrupt"]);
+      }
+    }
   });
 
   it("queues a message the agent refused to steer at the front of the daemon's queue", async () => {

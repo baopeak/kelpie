@@ -6,7 +6,10 @@
 // - `user` lines carry tool results, and our own prompts when `--replay-user-messages`;
 // - permission prompts arrive as `control_request{subtype:"can_use_tool"}` and are answered
 //   with `control_response` (because of `--permission-prompt-tool stdio`);
-// - `result` ends a turn;
+// - `result` ends a run. A user line written during it that the CLI has not read yet (not echoed) is not lost: the CLI starts
+//   another run for it at once (`system/init`, then the echo), so the person's turn goes on (verified with 2.1.325);
+// - an `interrupt` is acknowledged at once (`control_response` success), followed by a `[Request interrupted by user…]`
+//   user line and a `result` of subtype `error_during_execution`, which is the stop, not a failure;
 // - `control_request{initialize}` answers with its commands (built-in, skills, custom, plugin, MCP prompts), models with their effort
 //   levels and the permission mode; `set_model`, `set_permission_mode` and
 //   `apply_flag_settings{effortLevel}` change them; `system/init` (each turn) and `system/status`
@@ -174,9 +177,18 @@ const waitingCopy = (ctx: AdapterContext, text: string) => ctx.state.items.find(
  *  just sent exactly that: then this is its echo, and the message must not wait for ever. */
 const isClaudesOwnText = (ctx: AdapterContext, text: string) => text.startsWith("<") && !waitingCopy(ctx, text);
 
+/** The marker Claude writes as a user line when its run is interrupted (by our interrupt, or Ctrl+C in its terminal). */
+const INTERRUPTED = /^\[Request interrupted by user/;
+
+function interruptedLine(m: any): boolean {
+  const c = m.message?.content;
+  const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((b: any) => (b?.type === "text" ? String(b.text ?? "") : "")).join("") : "";
+  return INTERRUPTED.test(text.trim());
+}
+
 function pushUser(ctx: AdapterContext, text: string, uuid?: string, images?: UserImage[]) {
   // Ctrl+C used to stop the TUI during a mode switch leaves this marker; it is not a message.
-  if (/^\[Request interrupted by user/.test(text.trim())) return;
+  if (INTERRUPTED.test(text.trim())) return;
   // Replace our optimistic copy instead of duplicating it. It keeps its own pictures, by path: the
   // echo's bytes are not held for a message that has them on disk. A picture sent alone echoes with
   // no text, so its copy is the oldest one waiting with none.
@@ -236,6 +248,9 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
   let cleared = false;
   /** How many messages given to the running turn had not been read when a turn last ended (null: none given). */
   let steersUnread: number | null = null;
+  /** The run going on was asked to stop (the CLI took our interrupt, or said the user interrupted it): its
+   *  `error_during_execution` result is that stop. */
+  let stopAsked = false;
 
   const control = (request: Record<string, unknown>, id = `kelpie-req-${++requestSeq}`) =>
     ctx.write({ type: "control_request", request_id: id, request });
@@ -267,6 +282,7 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
       partialJson = new Map();
       cleared = false;
       steersUnread = null;
+      stopAsked = false;
     },
     start() {
       ctx.set("status", null);
@@ -277,6 +293,8 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
       switch (m.type) {
         case "system":
           if (m.subtype === "init") {
+            // A new run: an interrupt acknowledged before it stopped the one before.
+            stopAsked = false;
             ctx.setModel(m.model ?? null);
             if (m.session_id) ctx.setConversation(m.session_id);
             model = m.model ?? model;
@@ -349,6 +367,7 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
           }
           applyClaudeMessage(ctx, m, live);
           if (m.type === "user" && !m.isReplay) ctx.set("busy", true);
+          if (m.type === "user" && interruptedLine(m)) stopAsked = true;
           return;
         case "control_cancel_request":
           // The CLI withdrew the question (its turn was interrupted).
@@ -366,6 +385,7 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
         }
         case "control_response": {
           const r = m.response ?? {};
+          if (r.subtype === "success" && String(r.request_id).startsWith("kelpie-interrupt-")) stopAsked = true;
           if (r.subtype === "error") {
             // An interrupt with nothing running (e.g. before a hand-off to the TUI) is no news.
             if (String(r.request_id).startsWith("kelpie-interrupt-")) return;
@@ -415,11 +435,14 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
           if (steersUnread != null) for (const i of ctx.state.items) if (i.kind === "user" && i.pending) unread++;
           const runsNext = unread > 0 && (steersUnread === Infinity || unread < steersUnread!);
           steersUnread = runsNext ? unread : null;
+          // A run the person stopped ends in `error_during_execution`: that is the stop, not a failure.
+          const stopped = stopAsked && m.subtype === "error_during_execution";
+          stopAsked = false;
           ctx.set({ busy: runsNext, status: null });
           ctx.upsert({
             kind: "result",
             id: `result-${m.uuid ?? ctx.state.items.length}`,
-            text: [m.is_error ? t("Error: {error}", { error: String(m.result ?? (Array.isArray(m.errors) && m.errors.length ? m.errors.join("; ") : m.subtype)) }) : null, m.duration_ms ? `${(m.duration_ms / 1000).toFixed(1)}s` : null, m.num_turns ? (m.num_turns === 1 ? t("{n} turn", { n: m.num_turns }) : t("{n} turns", { n: m.num_turns })) : null, m.total_cost_usd != null ? `$${m.total_cost_usd.toFixed(3)}` : null].filter(Boolean).join(" · "),
+            text: [stopped ? t("Stopped") : m.is_error ? t("Error: {error}", { error: String(m.result ?? (Array.isArray(m.errors) && m.errors.length ? m.errors.join("; ") : m.subtype)) }) : null, m.duration_ms ? `${(m.duration_ms / 1000).toFixed(1)}s` : null, m.num_turns ? (m.num_turns === 1 ? t("{n} turn", { n: m.num_turns }) : t("{n} turns", { n: m.num_turns })) : null, m.total_cost_usd != null ? `$${m.total_cost_usd.toFixed(3)}` : null].filter(Boolean).join(" · "),
           });
           // Close any stale streaming markers.
           for (const it of ctx.state.items) if ((it as any).streaming) ctx.patch(it.id, (i: any) => (i.streaming = false));
@@ -440,13 +463,14 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
       const pictures = (images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } }));
       ctx.write({ type: "user", message: { role: "user", content: [...pictures, ...(text.trim() ? [{ type: "text", text }] : [])] } });
     },
-    // The CLI takes a message mid-turn and reads it when the running tools finish, echoing it then (it stays pending until
-    // that echo). If the turn ends first, it runs it as a turn of its own.
-    steer(text) {
-      this.send(text);
+    // The CLI takes a message mid-turn, pictures and all, and reads it when the running tools finish, echoing it then (it
+    // stays pending until that echo). If the run ends first (its own end, or a stop), the CLI starts another run for it at once.
+    steer(text, images) {
+      this.send(text, undefined, images);
       steersUnread = Infinity;
       return true;
     },
+    steersPictures: true,
     immediate(text) {
       const slash = slashCommand(text);
       return !!slash && tuiOnly.has(slash[0]);

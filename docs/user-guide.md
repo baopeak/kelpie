@@ -177,11 +177,14 @@ their name and shortcut when you hover them.
      and *Show in chat* for its row. `Esc` steps back, and never stops the agent.
    - A message sent while Claude or Codex works goes into the running turn, as in their terminal: it
      shows faded until the agent reads it at its next step, and the agent decides what to do with
-     it. To change course at once, stop the agent first (`Esc`). A command (`/`, `!`), a message
-     with a picture, a message for any other agent, and one sent while others wait, waits above the
-     message field and goes when the turn ends. *Send now* gives such a message to the agent during
-     its turn, or stops the turn first where it cannot go in; stopping the agent holds these until
-     you send again.
+     it. Claude takes pictures this way too; if its turn ends before it reads the message, it works
+     on it straight away and the chat stays busy. To change course at once, stop the agent first
+     (`Esc`): the turn's last line then says *Stopped*, not an error. A message already sent
+     before the stop is still Claude's to read, and it works on it after the stop. A command (`/`, `!`), a
+     message with a picture for Codex, a message for any other agent, and one sent while others
+     wait, waits above the message field and goes when the turn ends. *Send now* gives such a
+     message to the agent during its turn, or stops the turn first where it cannot go in; stopping
+     the agent holds these until you send again.
    - The agent's task list (Claude's todos, Codex and OMP plans) stays pinned above the message
      field. The ring next to the pickers shows how full the context is (hover for tokens and cost;
      click to compact).
