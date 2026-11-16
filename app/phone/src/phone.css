@@ -113,8 +113,8 @@ header h1 { margin: 0; font-size: var(--fs-lg); font-weight: 700; line-height: 1
 .conn .conn-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conn .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--faint); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 0%, transparent); }
 .conn.ok .dot { background: var(--ok); }
-.conn.warn .dot { background: var(--waiting); }
-.conn.bad .dot { background: var(--danger); }
+.conn.warn .dot { background: none; border: 2.5px solid var(--waiting); }
+.conn.bad .dot { background: var(--danger); border-radius: 2px; }
 .conn.idle .dot { background: var(--faint); }
 .conn.compact { min-width: var(--tap); justify-content: center; padding: 0; }
 .conn.compact .conn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -139,6 +139,11 @@ main { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: 
 .card h2 { margin: 0 0 var(--s2); font-size: var(--fs-lg); font-weight: 700; }
 .card h3 { margin: var(--s4) 0 var(--s1); font-size: var(--fs-md); font-weight: 600; }
 .card > p { margin: var(--s2) 0; }
+.card [data-pair-ways] > :first-child { margin-top: 0; }
+/* A card's actions fill its width, as a sheet's do: easier to reach, and one look throughout. */
+.card > .btn, .card > p > .btn, .card .actions .btn { flex: 1 1 auto; }
+.card > .btn { width: 100%; }
+textarea.field { resize: none; }
 .field { width: 100%; min-height: var(--tap); padding: 10px var(--s3); border-radius: var(--r-md); border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font-size: var(--fs-field); line-height: 1.35; }
 .field:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
 .field::placeholder { color: var(--faint); }
@@ -205,7 +210,7 @@ a.btn { text-decoration: none; }
 /* Start a session: a floating button in the thumb's reach, above the home indicator. */
 .fab { position: fixed; right: calc(var(--s4) + env(safe-area-inset-right)); bottom: calc(var(--s4) + env(safe-area-inset-bottom)); z-index: 5; display: inline-flex; align-items: center; gap: var(--s2); min-height: 52px; padding: 0 var(--s5) 0 var(--s4); border: 0; border-radius: var(--r-pill); background: var(--accent); color: var(--on-accent); font-size: var(--fs-md); font-weight: 700; box-shadow: var(--shadow-float); transition: transform .12s var(--ease); }
 .fab:active:not(:disabled) { transform: scale(.96); }
-.fab:disabled { opacity: .5; }
+.fab:disabled { opacity: 1; background: var(--surface-3); color: var(--faint); box-shadow: none; }
 
 /* ---------- a session ---------- */
 .session { display: flex; flex-direction: column; flex: 1; min-height: 0; }
@@ -229,7 +234,7 @@ a.btn { text-decoration: none; }
 .composer { border-top: 1px solid var(--border); padding: var(--s2) var(--s3) calc(var(--s2) + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: var(--s2); background: var(--bg); }
 .keys { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--s3)); padding: 0 var(--s3); -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); }
 .keys::-webkit-scrollbar { display: none; }
-.key { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap); min-height: var(--tap); padding: 0 var(--s3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface); font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; }
+.key { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap); min-height: var(--tap); padding: 0 var(--s3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface); font-family: var(--mono); font-size: var(--fs-md); font-weight: 600; }
 .key:active:not(:disabled) { background: var(--surface-3); }
 .key.armed { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .send { display: flex; flex-direction: column; gap: 6px; }
@@ -244,6 +249,9 @@ a.btn { text-decoration: none; }
 /* Ways out to the computer itself: small and side by side, so the screen keeps the room. */
 .takeover-entry { display: flex; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
 .takeover-entry::-webkit-scrollbar { display: none; }
+.takeover-entry { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); }
+/* Offline, the ways to the computer cannot be used: the screen keeps the room until they can. */
+.takeover-entry:has(.btn:disabled) { display: none; }
 .takeover-entry .btn { flex: none; white-space: nowrap; min-height: var(--tap); padding: 0 var(--s3); font-size: var(--fs-sm); border-radius: var(--r-pill); }
 
 /* ---------- chat ---------- */
@@ -338,7 +346,7 @@ a.btn { text-decoration: none; }
 .fact { display: flex; gap: var(--s3); padding: 10px 0; font-size: var(--fs-sm); }
 .fact + .fact { border-top: 1px solid var(--border); }
 .fact dt { flex: 0 0 44%; color: var(--dim); }
-.fact dd { margin: 0; flex: 1; min-width: 0; overflow-wrap: anywhere; text-align: right; font-weight: 600; }
+.fact dd { margin: 0; flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
 /* A choice that is on or off: the whole row is the target, the box drawn as a switch (a transparent border makes it a 44 px target on its own). */
 .row-check { display: flex; align-items: center; gap: var(--s3); min-height: var(--tap); padding: 6px 0; font-size: var(--fs-md); cursor: pointer; }
 .row-check > span { flex: 1; min-width: 0; }
@@ -355,7 +363,9 @@ a.btn { text-decoration: none; }
 .key-row .key { order: 0; }
 .key-row input { order: 3; margin-left: auto; }
 .key-row .grow { flex: 1; order: 1; }
-.key-row .btn.small { order: 2; padding: 0; background: none; color: var(--dim); }
+.key-row .btn.small { order: 2; padding: 0; background: var(--surface-2); color: var(--text); border-radius: var(--r-md); }
+.key-row .btn.small:disabled { visibility: hidden; }
+.key-row .key { min-width: 64px; }
 
 /* ---------- the app lock: what stands in front of the app, and the opaque cover that goes up when the page is hidden ---------- */
 .lock-screen { flex: 1; display: flex; flex-direction: column; align-items: center; gap: var(--s3); padding: var(--s8) var(--s6) calc(var(--s6) + env(safe-area-inset-bottom)); text-align: center; }
@@ -438,3 +448,9 @@ a.btn { text-decoration: none; }
 .key-answer[data-label]::after { content: attr(data-label); min-width: 0; font-weight: 600; text-align: left; overflow-wrap: anywhere; }
 .key-answer .k { background: var(--surface-3); }
 .key-answer { border-color: var(--border-strong); background: var(--surface); }
+
+/* A load bar (brand.md): 2 px in the working hue, only while something is awaited, shown after 300 ms, transform only. */
+.load-bar { position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + var(--header-h)); height: 2px; overflow: hidden; z-index: 3; opacity: 0; animation: fade-in .2s ease-out .3s forwards; }
+.load-bar::after { content: ""; position: absolute; inset: 0; width: 40%; background: var(--working); animation: load-sweep 1.4s cubic-bezier(.4, 0, .2, 1) infinite; }
+@keyframes load-sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) { .load-bar::after { animation-duration: 3s; } }

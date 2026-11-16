@@ -2,10 +2,11 @@
 // for each piece; the view puts each piece in an element as a text node, so nothing an agent writes ever becomes markup.
 
 export type Inline = { kind: "text" | "bold" | "code"; text: string };
-export type ProseBlock = { kind: "para"; text: string } | { kind: "list"; ordered: boolean; items: string[] };
+/** A list keeps the agent's own numbering: `start` is its first number (1 for bullets), and a number that does not follow starts a new list. */
+export type ProseBlock = { kind: "para"; text: string } | { kind: "list"; ordered: boolean; start: number; items: string[] };
 
 const BULLET = /^\s{0,3}[-*•]\s+(.*)$/;
-const NUMBERED = /^\s{0,3}\d{1,3}[.)]\s+(.*)$/;
+const NUMBERED = /^\s{0,3}(\d{1,3})[.)]\s+(.*)$/;
 
 /** Paragraphs and lists: a run of "- " (or "1. ") lines is one list; everything else stays as written, line breaks kept. */
 export function proseBlocks(text: string): ProseBlock[] {
@@ -21,14 +22,16 @@ export function proseBlocks(text: string): ProseBlock[] {
   for (const line of text.split("\n")) {
     const b = BULLET.exec(line);
     const n = b ? null : NUMBERED.exec(line);
-    const item = b?.[1] ?? n?.[1];
+    const item = b?.[1] ?? n?.[2];
     if (item !== undefined) {
       const ordered = !b;
+      const number = n ? Number(n[1]) : 1;
       const last = out[out.length - 1];
-      if (!para.length && last?.kind === "list" && last.ordered === ordered) last.items.push(item);
+      const follows = last?.kind === "list" && last.ordered === ordered && (!ordered || last.start + last.items.length === number);
+      if (!para.length && follows) (last as { items: string[] }).items.push(item);
       else {
         flush();
-        out.push({ kind: "list", ordered, items: [item] });
+        out.push({ kind: "list", ordered, start: number, items: [item] });
       }
     } else if (!line.trim() && !para.length) {
       // A blank line between list items or before a paragraph: spacing only.

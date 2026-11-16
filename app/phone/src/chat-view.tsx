@@ -57,7 +57,7 @@ function Rich(props: { text: string }) {
               p.kind === "para" ? (
                 <p class="prose"><Inlines text={p.text} /></p>
               ) : (
-                <Dynamic component={p.ordered ? "ol" : "ul"} class="md-list"><For each={p.items}>{(item) => <li><Inlines text={item} /></li>}</For></Dynamic>
+                <Dynamic component={p.ordered ? "ol" : "ul"} class="md-list" start={p.ordered && p.start !== 1 ? p.start : undefined}><For each={p.items}>{(item) => <li><Inlines text={item} /></li>}</For></Dynamic>
               )
             }
           </For>
@@ -143,7 +143,7 @@ function PermissionCard(props: { item: Permission }) {
           </div>
         </Show>
         <Show when={p().feedback}>
-          <input class="field" placeholder={t("Tell the agent what to do instead (sent with Deny)…")} value={message()} disabled={!enabled()} onInput={(e) => setMessage(e.currentTarget.value)} />
+          <textarea class="field" rows="2" placeholder={t("Tell the agent what to do instead (sent with Deny)…")} value={message()} disabled={!enabled()} onInput={(e) => setMessage(e.currentTarget.value)} />
         </Show>
         <div class="actions">
           <For each={p().options.filter((o) => !o.lasting)}>
@@ -220,7 +220,7 @@ export function ChatView(props: { row: SessionRow; dim: boolean }) {
   return (
     <div class="session chat" data-id={props.row.id} classList={{ dim: props.dim }}>
       <div class="chat-log" ref={scroller} onScroll={() => (stick = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40)}>
-        <Show when={chat()?.state.ready} fallback={<div class="muted center">{connected() ? t("Loading the conversation…") : t("This chat is not available offline. It opens when the connection is back.")}</div>}>
+        <Show when={chat()?.state.ready} fallback={<div class="muted center">{connected() ? <><div class="load-bar" />{t("Loading the conversation…")}</> : t("This chat is not available offline. It opens when the connection is back.")}</div>}>
           <For each={items()}>{(item) => <Row item={item} />}</For>
           <Show when={chat()?.state.busy}><div class="muted working" role="status">{t("Working…")}</div></Show>
         </Show>

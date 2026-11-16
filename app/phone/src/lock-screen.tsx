@@ -29,6 +29,8 @@ export function LockScreen() {
   const can = () => s().face === "unlock" || s().face === "enrol";
   return (
     <div class="lock-screen" data-lock-screen={s().face}>
+      {/* Waiting on the computer: the load bar says it is running, not frozen (brand.md). */}
+      <Show when={s().face === "unknown"}><div class="load-bar" /></Show>
       <div class="lock-top">
         <span class="lock-icon"><Icon name="lock" size={36} /></span>
         <h2>{words(s().face).title}</h2>

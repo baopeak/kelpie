@@ -191,7 +191,7 @@ function Sheet(props: { onClose: () => void; onSettings: () => void }) {
         <h2>{info().label}</h2>
         <p class="muted">{info().detail}</p>
         <div class="actions">
-          <button class="btn" onClick={() => { link.kick(); props.onClose(); }}>{t("Reconnect now")}</button>
+          <button class="btn primary" onClick={() => { link.kick(); props.onClose(); }}>{t("Reconnect now")}</button>
           <Show when={lockShown().clear} fallback={
             <button class="btn danger" data-sheet-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) { forgetDevice(); props.onClose(); } }}>{t("Forget this device")}</button>
           }>
@@ -259,12 +259,12 @@ export function App() {
             <h1>{title()}</h1>
             <Show when={subtitle()}><span class="subtitle" data-subtitle>{subtitle()}</span></Show>
           </div>
-          <Show when={!openId() && !inSettings() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
+          <Show when={onInbox() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
         </div>
         <Show when={paired() && lockShown().clear && !inSettings() && !remoteScreen() && !takeover()}>
           <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}><Icon name="gear" size={22} /></button>
         </Show>
-        <Show when={paired()}><ConnIndicator compact={!onInbox()} onClick={() => setSheet(true)} /></Show>
+        <Show when={paired()}><ConnIndicator compact={!onInbox() || stateBannerShown()} onClick={() => setSheet(true)} /></Show>
       </header>
       <StateBanner />
       <SecurityBanner />

@@ -1,38 +1,30 @@
 // What each key of a menu prompt does, read from the screen the phone already shows: the daemon sends the keys only, and a card of bare
-// "1" and "3" makes the person map digits to options by reading the terminal. A label is given only when the screen says it plainly: the
-// last lines that list the keys as "1. Yes" (a marker such as ❯ before it allowed), each key once, in the same order as the keys.
-// Anything else (no such lines, a key listed twice, a key missing) gives no labels at all, so the card never names an option wrongly.
+// "1" and "3" makes the person map digits to options by reading the terminal. The menu is read the way the daemon finds it
+// (`MENU_ITEM` and `menu_labels` in crates/kelpied/src/choices.rs; keep the two in step): numbered lines among the last non-empty lines,
+// a "1." starting the menu afresh, a box border or a marker before the number allowed. A label is given only when that menu ends the
+// screen (a few hint lines below it at most) and its numbers are exactly the prompt's keys, in order. Anything else gives no labels at all,
+// so a card never names an option from some other list on the screen.
 
-/** How far up from the bottom a menu is looked for. */
-const LOOK_BACK = 30;
-const OPTION = /^\s*(?:[❯›>»▶●○◉*]\s*)?(\S{1,3})[.)]\s+(.+?)\s*$/;
+/** How far up a menu may start, in non-empty lines from the bottom (the daemon's `MENU_LINES`). */
+const MENU_LINES = 12;
+/** Lines allowed under the last option: a wrapped label, a hint such as "Esc to cancel", a box's bottom edge. */
+const FOOTER_LINES = 3;
+const OPTION = /^\s*(?:[│|]\s*)?(?:[❯>›»▶●○◉◯*]\s*)?(\d)[.)]\s+(\S.*?)\s*[│|]?\s*$/;
 
 /** Labels by key for `keys`, or an empty map when the screen does not show them plainly. */
 export function promptLabels(rows: string[], keys: string[]): Record<string, string> {
   if (!keys.length) return {};
-  const tail = rows.slice(-LOOK_BACK);
-  // The menu is the last run of option lines: walk up from the bottom to its last line, then take the run.
-  let end = tail.length - 1;
-  while (end >= 0 && !OPTION.test(tail[end])) end--;
-  if (end < 0) return {};
-  const found: { key: string; label: string }[] = [];
-  for (let i = end; i >= 0; i--) {
-    const m = OPTION.exec(tail[i]);
-    if (!m) {
-      // A wrapped option's second line is indented text: it belongs to the option above and ends nothing.
-      if (/^\s{3,}\S/.test(tail[i]) && found.length) continue;
-      break;
-    }
-    found.unshift({ key: m[1], label: m[2] });
-  }
-  const out: Record<string, string> = {};
-  for (const k of keys) {
-    const hits = found.filter((f) => f.key.toLowerCase() === k.toLowerCase());
-    if (hits.length !== 1) return {};
-    out[k] = hits[0].label;
-  }
-  // The keys come in screen order: labels in another order would be another menu.
-  const order = keys.map((k) => found.findIndex((f) => f.key.toLowerCase() === k.toLowerCase()));
-  if (order.some((n, i) => i > 0 && n <= order[i - 1])) return {};
-  return out;
+  const lines = rows.filter((r) => r.trim()).slice(-MENU_LINES);
+  let items: { key: string; label: string }[] = [];
+  let last = -1;
+  lines.forEach((line, i) => {
+    const m = OPTION.exec(line);
+    if (!m) return;
+    if (m[1] === "1") items = [];
+    items.push({ key: m[1], label: m[2] });
+    last = i;
+  });
+  if (!items.length || lines.length - 1 - last > FOOTER_LINES) return {};
+  if (items.length !== keys.length || items.some((it, i) => it.key !== keys[i])) return {};
+  return Object.fromEntries(items.map((it) => [it.key, it.label]));
 }
