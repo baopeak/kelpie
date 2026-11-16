@@ -13,6 +13,7 @@ import { openContextMenu, type MenuItem } from "./context-menu";
 import { pathMenuItems } from "./path-menu";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
+import { refreshFiles } from "../lib/file-refresh";
 
 const ROW_H = 24;
 
@@ -166,7 +167,7 @@ export function FileTree(props: { project: Project; api?: (api: FileTreeApi) => 
         },
       );
     }
-    items.push(null, { label: t("Refresh"), run: () => { for (const d of Object.keys(children)) void load(d); void gitState.refresh(); } });
+    items.push(null, { label: t("Refresh"), run: () => { for (const d of Object.keys(children)) void load(d); refreshFiles(root()); void gitState.refresh(); } });
     return items;
   };
 

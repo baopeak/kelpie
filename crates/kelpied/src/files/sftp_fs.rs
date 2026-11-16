@@ -42,6 +42,18 @@ impl SftpFs {
         self.0.touch();
         &self.0
     }
+
+    /// A new empty file with the host's usual mode (the Files tab's *New file*). Never truncates or replaces: a name
+    /// that is taken is refused, and the create is exclusive, so one made meanwhile is refused too.
+    pub async fn create_empty(&self, path: &str) -> FsResult<()> {
+        let c = self.c();
+        if c.sftp.symlink_metadata(path).await.is_ok() {
+            return Err(FsError::new(ErrKind::Exists, format!("{path} is already there")));
+        }
+        let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE;
+        let f = c.sftp.open_with_flags(path, flags).await.map_err(|e| c.error(e))?;
+        f.close().await.map_err(|e| c.io_error(e))
+    }
 }
 
 #[async_trait]

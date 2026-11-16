@@ -2303,7 +2303,7 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - The children are `kill_on_drop`. The spike showed ssh, and a ProxyJump's inner ssh, exit by themselves when the daemon dies and their pipes close.
 - **Methods** (API 31), answered from their own task:
   - `sftp.list {dest, path, hidden}`, `sftp.stat` (`lstat` and the followed `stat`), `sftp.realpath` (`~` is the login folder);
-  - `sftp.mkdir`, `sftp.rename` (refuses an existing target), `sftp.chmod {paths, mode}` (not recursive);
+  - `sftp.mkdir`, `sftp.create` (a new empty file, exclusive: refuses a name that is taken; API 44), `sftp.rename` (refuses an existing target), `sftp.chmod {paths, mode}` (not recursive);
   - `local.list {path, hidden}`, `local.home`.
 
   They are open to the user's and the app's connections only. Programs in sessions cannot call them, so an agent cannot use saved passwords through the daemon.

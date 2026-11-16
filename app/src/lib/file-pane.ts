@@ -104,6 +104,13 @@ export function pruneSelection(sel: Selection, shown: string[]): Selection {
   return { picked, anchor: sel.anchor && shown.includes(sel.anchor) ? sel.anchor : picked[0] ?? null };
 }
 
+/** A host path typed from the login folder: `~` or `""` is "" (the login folder), `~/a/b` is "a/b"; null when absolute. */
+export function homeRelative(path: string): string | null {
+  const p = path.trim();
+  if (p === "" || p === "~") return "";
+  return p.startsWith("~/") ? p.slice(2).replace(/^\/+/, "") : null;
+}
+
 /** The names a delete lists: the first `max`, and how many more. */
 export function listNames(names: string[], max = 5): { shown: string[]; more: number } {
   return { shown: names.slice(0, max), more: Math.max(0, names.length - max) };

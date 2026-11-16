@@ -96,7 +96,9 @@ export const installKey = (alias: string, keyPath: string) => invoke<void>("ssh_
 export const agentList = () => invoke<AgentState>("ssh_agent_list");
 export const agentAdd = (keyPath: string) => invoke<void>("ssh_agent_add", { keyPath });
 export const knownHosts = () => invoke<KnownHost[]>("ssh_known_hosts_list");
-export const removeKnownHosts = (lines: number[]) => invoke<void>("ssh_known_hosts_remove", { lines });
+/** Removes entries as they were listed; refused when the file changed since (a stale list never forgets another key). */
+export const removeKnownHosts = (entries: Pick<KnownHost, "line" | "hosts" | "fingerprint" | "marker">[]) =>
+  invoke<void>("ssh_known_hosts_remove", { entries: entries.map(({ line, hosts, fingerprint, marker }) => ({ line, hosts, fingerprint, marker })) });
 export const hostKeys = (alias: string) => invoke<HostKeys>("ssh_host_keys", { alias });
 export const trustHost = (lines: string[]) => invoke<void>("ssh_host_trust", { lines });
 export const forwardStart = (id: string) => invoke<void>("ssh_forward_start", { id });

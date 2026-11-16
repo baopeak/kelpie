@@ -1,4 +1,4 @@
-import { Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { EditorView } from "@codemirror/view";
 import { Compartment, EditorSelection } from "@codemirror/state";
 import { marked } from "marked";
@@ -6,6 +6,10 @@ import DOMPurify from "dompurify";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { store } from "../lib/store";
 import { onEvent, readFile, writeFile } from "../lib/ipc";
+import { asksFor, refreshAsk, refreshFiles, reread } from "../lib/file-refresh";
+import { cksumOf } from "../lib/spec-index";
+import { isRemote } from "../lib/remote";
+import { Icon } from "./icons";
 import { baseExtensions, languageFor } from "../lib/codemirror";
 import { isMac } from "../lib/platform";
 import { CsvView, MermaidView, NotebookView, PdfView, renderMermaidBlocks } from "./rich-viewers";
@@ -19,6 +23,9 @@ import { selectionSource } from "../lib/composer-state";
 import { sendSelectionToAgent } from "../lib/send-to-agent";
 
 const EDIT_LIMIT = 5 << 20; // larger files open read-only (first 5 MiB)
+const RECHECK_MS = 5000;
+/** Larger files are re-checked on a host only when asked (Reload, Refresh): a re-check reads the whole file. */
+const RECHECK_MAX = 1 << 20;
 const IMAGE_EXT: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", ico: "image/x-icon", bmp: "image/bmp", avif: "image/avif" };
 
 const ext = (path: string) => path.split(".").pop()?.toLowerCase() ?? "";
@@ -43,6 +50,9 @@ export function FileViewer(props: { project: Project; path: string; line?: numbe
   const kind = () => kindOf(props.path);
   // Opening at a line (search hit, go to file) means the source.
   const [mode, setMode] = createSignal<"rendered" | "source">(RENDERED[kindOf(props.path)] && !props.line ? "rendered" : "source");
+  const rendered = () => kind() === "image" || kind() === "pdf" || (!!RENDERED[kind()] && mode() === "rendered");
+  const [version, setVersion] = createSignal(0);
+  createEffect(on(refreshAsk, (a) => asksFor(a, props.project.path, props.path) && rendered() && setVersion((v) => v + 1), { defer: true }));
   return (
     <div class="viewer">
       <div class="viewer-bar">
@@ -56,16 +66,25 @@ export function FileViewer(props: { project: Project; path: string; line?: numbe
         <Show when={kind() === "text" || mode() === "source"}>
           <button class={`toggle${store.state.settings.wordWrap ? " on" : ""}`} title={t("Word wrap (Alt+Z)")} onClick={() => store.setSettings({ wordWrap: !store.state.settings.wordWrap })}>{t("Wrap")}</button>
         </Show>
+        <button class="icon-btn" data-action="reload-file" title={isRemote(props.project) ? t("Reload from the host") : t("Reload from disk")} onClick={() => refreshFiles(props.project.path, props.path)}>
+          <Icon name="refresh" size={13} />
+        </button>
       </div>
-      <Switch>
-        <Match when={kind() === "image"}><ImageView project={props.project} path={props.path} /></Match>
-        <Match when={kind() === "pdf"}><PdfView project={props.project} path={props.path} /></Match>
-        <Match when={kind() === "markdown" && mode() === "rendered"}><MarkdownView project={props.project} path={props.path} /></Match>
-        <Match when={kind() === "csv" && mode() === "rendered"}><CsvView project={props.project} path={props.path} /></Match>
-        <Match when={kind() === "notebook" && mode() === "rendered"}><NotebookView project={props.project} path={props.path} /></Match>
-        <Match when={kind() === "mermaid" && mode() === "rendered"}><MermaidView project={props.project} path={props.path} /></Match>
-        <Match when={true}><TextEditor project={props.project} path={props.path} line={props.line} focused={props.focused} /></Match>
-      </Switch>
+      <Show when={rendered()} fallback={<TextEditor project={props.project} path={props.path} line={props.line} focused={props.focused} />}>
+        {/* A rendered view reads its file once: a reload makes it again. */}
+        <For each={[version()]}>
+          {() => (
+            <Switch>
+              <Match when={kind() === "image"}><ImageView project={props.project} path={props.path} /></Match>
+              <Match when={kind() === "pdf"}><PdfView project={props.project} path={props.path} /></Match>
+              <Match when={kind() === "markdown"}><MarkdownView project={props.project} path={props.path} /></Match>
+              <Match when={kind() === "csv"}><CsvView project={props.project} path={props.path} /></Match>
+              <Match when={kind() === "notebook"}><NotebookView project={props.project} path={props.path} /></Match>
+              <Match when={kind() === "mermaid"}><MermaidView project={props.project} path={props.path} /></Match>
+            </Switch>
+          )}
+        </For>
+      </Show>
     </div>
   );
 }
@@ -140,6 +159,11 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
   const [error, setError] = createSignal<string | null>(null);
   let mtime = 0;
   let loadedText = "";
+  /** On a host, the `cksum` of the file's bytes as last read or written (what a save must still find there). */
+  let loadedSum: string | undefined;
+  /** Bumped by every read and around every save: a read overtaken by another read or a save is dropped. */
+  let seq = 0;
+  const remote = () => isRemote(props.project);
 
   const readOnly = () => !!file() && (file()!.truncated || file()!.binary);
 
@@ -157,27 +181,46 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
   async function save(force = false) {
     if (!view || readOnly()) return;
     const text = view.state.doc.toString();
+    seq++;
     try {
-      const r = await writeFile(props.project.path, props.path, text, mtime, force);
+      // On a host times are whole seconds: the checksum of what was read tells two writes in one second apart.
+      const sum = remote() ? (loadedSum ?? cksumOf(new TextEncoder().encode(loadedText))) : undefined;
+      const r = await writeFile(props.project.path, props.path, text, mtime, force, sum);
       if (r.conflict) {
         if (await confirmDialog(t("{path} changed on disk since it was opened. Overwrite it?", { path: props.path }))) return save(true);
         return;
       }
       mtime = r.mtime;
       loadedText = text;
-      setDirty(false);
+      loadedSum = remote() ? cksumOf(new TextEncoder().encode(text)) : undefined;
+      // Typed while the write ran: still unsaved.
+      setDirty(view.state.doc.toString() !== text);
       setExternal(false);
     } catch (e) {
       store.notify(t("Save failed: {error}", { error: String(e) }));
+    } finally {
+      seq++;
     }
   }
 
   async function load(initial: boolean) {
     try {
+      const mine = ++seq;
       const f = await readFile(props.project.path, props.path, EDIT_LIMIT);
-      if (!initial && f.mtime === mtime) return;
+      if (mine !== seq) return; // another read or a save came after this one
+      setError(null); // a re-check that failed earlier (the host was unreachable) is over
+      if (!initial && view) {
+        const what = reread(f, { text: loadedText, truncated: !!file()?.truncated }, dirty());
+        if (what === "same") {
+          mtime = f.mtime;
+          loadedSum = f.cksum ?? loadedSum;
+          return void setExternal(false);
+        }
+        if (what === "changed") return void setExternal(true);
+      }
       setFile(f);
       mtime = f.mtime;
+      loadedSum = f.cksum ?? undefined;
       if (f.binary) return setError(t("Binary file ({size} KB) — not shown.", { size: (f.size / 1024).toFixed(1) }));
       const text = f.text ?? "";
       loadedText = text;
@@ -221,12 +264,24 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
       if (dirty()) setExternal(true);
       else void load(false);
     });
+    window.addEventListener("focus", recheck);
     onCleanup(() => {
       void un.then((f) => f());
+      window.removeEventListener("focus", recheck);
       selection.dispose();
       view?.destroy();
     });
   });
+  // A host has no watcher: showing this file again, or coming back to the window, re-checks it (at most every few seconds).
+  let checked = Date.now();
+  const recheck = () => {
+    if (!remote() || !props.focused || Date.now() - checked < RECHECK_MS || (file()?.size ?? 0) > RECHECK_MAX) return;
+    checked = Date.now();
+    void load(false);
+  };
+  createEffect(on(() => props.focused, recheck, { defer: true }));
+  // Reload, or the Explorer's Refresh.
+  createEffect(on(refreshAsk, (a) => asksFor(a, props.project.path, props.path) && void load(false), { defer: true }));
 
   /** With a selection the menu offers it to an agent; without one the native menu stays. */
   const menu = (e: MouseEvent) => {

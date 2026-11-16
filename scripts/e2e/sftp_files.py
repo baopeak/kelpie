@@ -7,7 +7,7 @@ its own `kelpied serve` with them: the real daemon and the real ~/.ssh are never
 `ssh_test_server.py` (needs paramiko) on 127.0.0.1, logged in with a key made for this run; its throttled twin goes
 through `net_fault_proxy.py`. Only the processes this script starts are stopped, by their own handles.
 
-Covers: realpath / mkdir / list / rename / stat / chmod on a host, local.list, an unknown host key (ssh's own text),
+Covers: realpath / mkdir / create (a new empty file, never over a taken name) / list / rename / stat / chmod on a host, local.list, an unknown host key (ssh's own text),
 upload and download with equal SHA-256, the final mode of a new and of a replaced file, conflict ask -> keep both,
 apply-to-all (one transfer only), cancel leaving no
 partial, pause and resume from the partial, the host going away mid-transfer and coming back (resumes by itself), a
@@ -212,6 +212,17 @@ try:
     check(call_err(c, "sftp.rename", {"dest": "e2e-host", "from": remote_work + "/renamed", "to": remote_work + "/taken"}) is not None, "rename refuses an existing target")
     st = c.call("sftp.stat", {"dest": "e2e-host", "path": remote_work + "/taken"})
     check(st["stat"]["kind"] == "file", "stat")
+    # New file (API 44): empty, made once, never truncating what has the name.
+    if info["api"] >= 44:
+        c.call("sftp.create", {"dest": "e2e-host", "path": remote_work + "/new.txt"})
+        check(os.path.isfile(os.path.join(work, "new.txt")) and os.path.getsize(os.path.join(work, "new.txt")) == 0, "create makes an empty file")
+        with open(os.path.join(work, "keep.txt"), "w") as f:
+            f.write("keep me")
+        err = call_err(c, "sftp.create", {"dest": "e2e-host", "path": remote_work + "/keep.txt"}) or ""
+        check("already there" in err and open(os.path.join(work, "keep.txt")).read() == "keep me", f"create refuses a taken name and keeps its content ({err[:60]})")
+        check(call_err(c, "sftp.create", {"dest": "e2e-host", "path": "relative.txt"}) is not None, "create refuses a relative path")
+        c.call("sftp.create", {"dest": "e2e-host", "path": remote_work + "/Tiếng Việt.md"})
+        check(os.path.isfile(os.path.join(work, "Tiếng Việt.md")), "create with a Vietnamese name")
     check(any(e["name"] == "renamed" for e in c.call("local.list", {"path": work})), "local.list")
     err = call_err(c, "sftp.list", {"dest": "e2e-unknown", "path": "/"}) or ""
     check("Host key verification failed" in err, f"an unknown host key keeps ssh's text ({err[:80]})")

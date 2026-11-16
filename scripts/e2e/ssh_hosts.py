@@ -14,7 +14,8 @@ config, an unknown host key shown with fingerprints before trusting it, logging 
 password (askpass), a terminal on the host in its remote project, files on the host (list, new
 folder, upload, download), local / remote / SOCKS forwards carrying traffic and stopping, a new
 key installed on the host and used to log in, known hosts, importing the SSH config, Claude Code
-on the host.
+on the host. Refresh in a host's Files pane (button and Ctrl+R, keeping the selection), New file on the host (refused
+over a taken name), and Refresh in the keychain and known hosts (then Forget of the entry it found).
 """
 import http.server
 import os
@@ -204,6 +205,26 @@ try:
     d.click("[data-pane=right] [data-action=ask-ok]")
     run.check("new folder on the host", wait(lambda: os.path.isdir(os.path.join(home, "made-by-e2e")) and exists('[data-pane=right] [data-entry="made-by-e2e"]'), 20))
     run.check("nothing was made on this computer", not os.path.exists(os.path.join(files_home, "Downloads", "made-by-e2e")))
+    # Refresh: what changed on the host behind Kelpie's back shows after Refresh or Ctrl+R; the selection stays.
+    d.click('[data-pane=right] [data-entry="made-by-e2e"]')
+    behind = os.path.join(home, "made-behind.txt")
+    open(behind, "w").write("x")
+    d.click("[data-pane=right] [data-action=refresh-pane]")
+    run.check("Refresh lists a file made on the host meanwhile", wait(lambda: exists('[data-pane=right] [data-entry="made-behind.txt"]'), 20))
+    run.check("…and keeps the selection", exists('[data-pane=right] .files-row.on[data-entry="made-by-e2e"]'))
+    os.remove(behind)
+    d.js("document.querySelector('[data-pane=right] [data-files-list]').dispatchEvent(new KeyboardEvent('keydown', {key: 'r', ctrlKey: true, bubbles: true}))")
+    run.check("Ctrl+R refreshes the pane too", wait(lambda: not exists('[data-pane=right] [data-entry="made-behind.txt"]'), 20))
+    # New file on the host: empty, and never over a name that is taken.
+    d.click("[data-pane=right] [data-action=new-file]")
+    fill("[data-pane=right] [data-field=ask]", "notes-e2e.md")
+    d.click("[data-pane=right] [data-action=ask-ok]")
+    made = os.path.join(home, "notes-e2e.md")
+    run.check("new file on the host", wait(lambda: os.path.isfile(made) and exists('[data-pane=right] [data-entry="notes-e2e.md"]'), 20) and os.path.getsize(made) == 0)
+    d.click("[data-pane=right] [data-action=new-file]")
+    fill("[data-pane=right] [data-field=ask]", "existing.txt")
+    d.click("[data-pane=right] [data-action=ask-ok]")
+    run.check("new file refuses a name that is taken, and keeps the file", wait(lambda: "already there" in text_of("[data-pane=right] [data-pane-error]"), 20) and open(os.path.join(home, "existing.txt")).read() == "on the host", text_of("[data-pane=right] [data-pane-error]"))
     up = os.path.join(scratch, "upload-me.txt")
     open(up, "w").write("uploaded by kelpie")
     def xfer(job):
@@ -250,6 +271,10 @@ try:
     fill("[data-field=key-name]", "e2e_key")
     d.click("[data-action=create-key]")
     run.check("a key is generated and listed", wait(lambda: exists("[data-key=e2e_key]"), 20) and os.path.exists(os.path.join(ssh_dir, "e2e_key.pub")))
+    # A key made outside Kelpie (ssh-keygen in a terminal) shows after Refresh.
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "outside", "-f", os.path.join(ssh_dir, "outside_key")], check=True)
+    d.click("[data-action=refresh-keys]")
+    run.check("Refresh in the keychain lists a key made outside Kelpie", wait(lambda: exists("[data-key=outside_key]"), 20))
     run.shot("08-keychain")
     d.js("[...document.querySelectorAll('[data-key=e2e_key] button')].find((b) => b.textContent.includes('Install on host')).click()")
     click_text("Test box", "[data-key=e2e_key] .key-install")
@@ -269,7 +294,18 @@ try:
     open_hosts()  # the page reloads the vault changed above
     d.click("[data-tab=known]")
     run.check("known hosts are listed with fingerprints", wait(lambda: "SHA256:" in text_of("[data-known]"), 10))
+    # An entry added outside Kelpie shows after Refresh, and Forget removes that one entry.
+    pub_line = open(os.path.join(ssh_dir, "outside_key.pub")).read().split()
+    kh = os.path.join(ssh_dir, "known_hosts")
+    before = open(kh).read()
+    with open(kh, "a", newline="\n") as f:
+        f.write(f"outside-host.example {pub_line[0]} {pub_line[1]}\n")
+    d.click("[data-action=refresh-known]")
+    run.check("Refresh in known hosts lists an entry added outside Kelpie", wait(lambda: "outside-host.example" in text_of(".hosts-section"), 10))
     run.shot("09-known-hosts")
+    d.js("window.confirm = () => true;")
+    d.js("[...document.querySelectorAll('[data-known]')].find((r) => r.textContent.includes('outside-host.example')).querySelector('button').click()")
+    run.check("Forget removes only that entry", wait(lambda: open(kh).read().replace("\r\n", "\n") == before.replace("\r\n", "\n") and "outside-host.example" not in text_of(".hosts-section"), 10))
 
     # ---- import the user's ssh config ----
     d.click("[data-tab=hosts]")

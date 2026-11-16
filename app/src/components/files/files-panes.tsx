@@ -6,7 +6,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { t, errorText } from "../../lib/i18n";
 import * as ipc from "../../lib/ipc";
 import { store } from "../../lib/store";
-import { vault, type SshHost } from "../../lib/ssh-hosts";
+import { hostProject, isHostKeyError, vault, type SshHost } from "../../lib/ssh-hosts";
 import { joinPath, type PaneEnd } from "../../lib/file-pane";
 import { filesViewClosed, filesViewOpened, initTransfers, isFinished, jobList } from "../../lib/transfers";
 import type { RemoteEntry, XferRoute, XferStart } from "../../lib/types";
@@ -70,6 +70,22 @@ export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
       setError(errorText(String(e)));
     }
   };
+  // A host's folder as a project of its own, or a terminal there (inside tmux when the host has it).
+  const openHere = async (alias: string, dir: string, terminal: boolean) => {
+    setError(null);
+    const host = vault().hosts.find((h) => h.alias === alias);
+    if (!host) return;
+    try {
+      const id = await hostProject(host, undefined, dir);
+      if (terminal) await store.newSession(id, "shell", { prompt: host.startup.trim() || undefined });
+      // Closed once started: a failure shows here.
+      store.setOverlay(null);
+      store.switchProject(id);
+    } catch (e) {
+      if (isHostKeyError(e)) props.onHostKey();
+      else setError(errorText(String(e)));
+    }
+  };
   const copyFrom = (side: Side) => {
     const api = apis[side];
     if (api && api.picked().length) void copy({ end: api.end(), dir: api.dir(), names: api.picked() }, other(side));
@@ -116,6 +132,7 @@ export function FilesPanes(props: { host: SshHost; onHostKey: () => void }) {
           onDropFiles={(from, dir) => void copy(from, side, dir)}
           onPermissions={(entries, dir) => end !== null && setPerms({ dest: end, dir, entries })}
           onEdit={end === null ? undefined : (path, _entry, how) => void edit(end, path, how)}
+          onOpenHere={end === null ? undefined : (dir, terminal) => void openHere(end, dir, terminal)}
           onSwitchPane={() => {
             setActive(other(side));
             boxes[other(side)]?.querySelector<HTMLElement>("[data-files-list]")?.focus();

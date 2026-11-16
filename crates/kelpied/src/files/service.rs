@@ -84,6 +84,12 @@ impl Files {
                 self.host(&p).await?.mkdir(path).await.map_err(fs_err)?;
                 Ok(json!(true))
             }
+            "sftp.create" => {
+                let path = s(&p, "path")?;
+                check_remote_path(path).map_err(fs_err)?;
+                self.host(&p).await?.create_empty(path).await.map_err(fs_err)?;
+                Ok(json!(true))
+            }
             "sftp.rename" => {
                 let (from, to) = (s(&p, "from")?, s(&p, "to")?);
                 check_remote_path(from).map_err(fs_err)?;

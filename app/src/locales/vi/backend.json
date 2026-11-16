@@ -229,5 +229,6 @@
   "Telegram gives this bot's messages to something else: the bot has a webhook, or another program reads its messages. Remove the webhook (deleteWebhook) or stop that program.": "Telegram đang chuyển tin nhắn của bot này cho nơi khác: bot có webhook, hoặc một chương trình khác đang đọc tin nhắn của nó. Hãy gỡ webhook (deleteWebhook) hoặc dừng chương trình đó.",
   "Telegram could not be reached": "Không kết nối được Telegram",
   "Buttons sent meanwhile expire; alerts still go out when it can be.": "Các nút gửi trong lúc này sẽ hết hạn; cảnh báo vẫn được gửi khi kết nối lại được.",
-  "The binding could not be saved: turn approvals on again.": "Không lưu được liên kết: hãy bật lại duyệt yêu cầu."
+  "The binding could not be saved: turn approvals on again.": "Không lưu được liên kết: hãy bật lại duyệt yêu cầu.",
+  "known_hosts changed since it was listed: refresh the list and try again": "known_hosts đã thay đổi kể từ khi danh sách được đọc: hãy làm mới danh sách rồi thử lại"
 }

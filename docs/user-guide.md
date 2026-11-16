@@ -1052,6 +1052,15 @@ name or an error loses its query and fragment. Screenshots agents take are saved
 `ssh -t` — inside `tmux` when the host has it, so they survive a dropped connection — and the file
 tree, editor, search and git work through ssh as well. Kelpie uses your OpenSSH client and config
 (Settings → Remote picks another config file): keys, agents, users, ports and jump hosts apply.
+The folder list in the dialog has a **Refresh** button.
+
+A host has no file watcher, so its views read the host again on demand: **Refresh** in the Explorer
+re-reads the tree and every open file of the project, each open file has a **Reload** button (the circular arrow
+at the right of its bar), and an open text file you come back to (its tab, or the window) is checked again (up to
+1 MiB; a larger one on Reload or Refresh). Unsaved edits are
+never replaced: the editor says the file changed and offers *Reload*. A save compares the file's content with what
+was opened, not only its time, so an agent's edit on the host in the same second is asked about, never
+overwritten.
 The launchers show the agents installed on the host; *Open in VS Code* uses its Remote-SSH
 extension. Chat view is not available for remote sessions.
 
@@ -1082,11 +1091,14 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
   loudly when a known host's key changed.
 - **Files**: two panes, by default this computer (Downloads) on the left and the host on the right. Each pane can
   show this computer or any saved host, so a copy can also go from one host to another.
-  - **Panes**: a path bar, up, home, drives (Windows), hidden files, a filter, new folder, and columns you can sort
-    (name, size, modified, permissions, owner). Owner and group show as uid / gid numbers (SFTP does not send
-    names).
+  - **Panes**: a path bar (`~/…` on a host starts at its login folder), up, home, drives (Windows), **refresh**
+    (keeps the selection), hidden files, a filter, new folder, **new file** (never over a name that is taken), and
+    columns you can sort (name, size, modified, permissions, owner). Owner and group show as uid / gid numbers (SFTP
+    does not send names). Each pane opens again in the folder it last showed on that host or this computer.
+  - **On a host's folder**: the terminal button opens a terminal in the folder the pane shows; a folder's menu has
+    *Open terminal here* and *Open as project*.
   - **Keys**: Ctrl/Cmd+click and Shift+click select several, Enter opens, Backspace goes up, F2 renames, Delete
-    deletes, Tab switches panes, F5 copies to the other pane.
+    deletes, Tab switches panes, F5 copies to the other pane, Ctrl/Cmd+R refreshes.
   - **Copy**: drag between the panes, use the arrow buttons or the context menu, or drop files from Explorer /
     Finder onto a host's pane. Copies on this computer itself are for Explorer / Finder.
   - **Transfers** run in Kelpie's background service, so closing the window does not stop them. The queue below the
@@ -1126,8 +1138,12 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
   command), one terminal each.
 - **Keychain**: the keys in `~/.ssh` with type and fingerprint; generate (Ed25519, RSA 4096,
   ECDSA), import, copy the public key, **install it on a host** (`authorized_keys`), add it to the
-  SSH agent, save its passphrase, move it to the trash.
-- **Known hosts**: every entry with its fingerprint; forget one.
+  SSH agent, save its passphrase, move it to the trash. *Refresh* reads `~/.ssh` and the agent again (a key made
+  with `ssh-keygen` in a terminal).
+- **Known hosts**: every entry with its fingerprint; *Refresh*; forget one. A forget is refused when the file
+  changed since the list was read, so a stale list never forgets another host's key.
+- The **Hosts** list has a *Refresh* button that reads the saved hosts again (changed by another window or a
+  settings import).
 - **Port forwarding**: local (`-L`), remote (`-R`) and SOCKS (`-D`) rules per host, started and
   stopped from the page; rules marked *Start when Kelpie opens* come back with the app.
 

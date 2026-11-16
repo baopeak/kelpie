@@ -3,15 +3,17 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as ipc from "../../lib/ipc";
+import { store } from "../../lib/store";
 import { t, errorText } from "../../lib/i18n";
 import { confirmDialog } from "../../lib/confirm-dialog";
 import { isHostKeyError, type SshHost } from "../../lib/ssh-hosts";
-import { baseName, clickSelect, filterEntries, formatSize, formatTime, joinPath, listNames, modeString, parentPath, pruneSelection, selectAll, sortEntries, type PaneEnd, type Selection, type SortKey } from "../../lib/file-pane";
+import { baseName, clickSelect, filterEntries, formatSize, formatTime, homeRelative, joinPath, listNames, modeString, parentPath, pruneSelection, selectAll, sortEntries, type PaneEnd, type Selection, type SortKey } from "../../lib/file-pane";
 import type { RemoteEntry } from "../../lib/types";
 import { openContextMenu, type MenuItem } from "../context-menu";
 import { AskRow, type Ask } from "../ask-row";
 import { Icon } from "../icons";
 import { LoadBar } from "../load-bar";
+import { isMac } from "../../lib/platform";
 
 /** What the panes around a pane need from it. */
 export interface PaneApi {
@@ -45,6 +47,26 @@ const writeHidden = (end: PaneEnd, on: boolean) => {
   }
 };
 
+/** The folder a pane last showed, per host (or this computer): a pane opens there again. */
+const lastKey = (end: PaneEnd) => `kelpie.files.dir.${end === null ? "" : "host:"}${end ?? "local"}`;
+const readLast = (end: PaneEnd) => {
+  try {
+    return localStorage.getItem(lastKey(end)) || null;
+  } catch {
+    return null;
+  }
+};
+const writeLast = (end: PaneEnd, dir: string) => {
+  try {
+    localStorage.setItem(lastKey(end), dir);
+  } catch {
+    // Not remembered in a private window.
+  }
+};
+
+/** The error of a listing says the folder itself is gone or closed (not that the host could not be reached). */
+const folderGone = (e: string) => /no such file|not found|cannot find|permission denied|access is denied|not a (folder|directory)/i.test(e);
+
 export function FilePane(props: {
   side: "left" | "right";
   end: PaneEnd;
@@ -60,6 +82,8 @@ export function FilePane(props: {
   onDropFiles: (from: DragFiles, toDir: string) => void;
   onPermissions: (entries: RemoteEntry[], dir: string) => void;
   onEdit?: (path: string, entry: RemoteEntry, how: "kelpie" | "external") => void;
+  /** A host's folder: a terminal there, or the folder as a project. */
+  onOpenHere?: (dir: string, terminal: boolean) => void;
   onSwitchPane: () => void;
   onHostKey: () => void;
   api: (api: PaneApi) => void;
@@ -86,30 +110,46 @@ export function FilePane(props: {
     if (pruned.picked.length !== sel().picked.length) setSel(pruned);
   }, { defer: true }));
 
-  const load = async (path: string) => {
+  /** Lists `path`; resolves to the error text when that failed. */
+  const load = async (path: string): Promise<string | null> => {
     setError(null);
     setListing(true);
     try {
       const end = host();
       let abs = path;
-      if (end !== null && (path === "~" || path === "")) abs = await ipc.sftpRealpath(end);
+      const fromHome = end === null ? null : homeRelative(path);
+      if (end !== null && fromHome !== null) {
+        const home = await ipc.sftpRealpath(end);
+        abs = fromHome ? joinPath(end, home, fromHome) : home;
+      }
       const list = end === null ? await ipc.localList(abs, hidden()) : await ipc.sftpList(end, abs, hidden());
+      // Refreshing the same folder keeps what is still there selected.
+      const same = abs === dir();
       setEntries(list);
       setDir(abs);
       setTyped(abs);
-      setSel({ picked: [], anchor: null });
+      writeLast(end, abs);
+      setSel(same ? pruneSelection(sel(), list.filter((e) => e.readable_name).map((e) => e.name)) : { picked: [], anchor: null });
+      return null;
     } catch (e) {
       if (isHostKeyError(e)) props.onHostKey();
       setError(errorText(String(e)));
+      return String(e);
     } finally {
       setListing(false);
     }
   };
-  const reload = () => load(dir());
+  const reload = async () => void (await load(dir()));
   props.api({ end: host, dir, picked: () => sel().picked, reload });
 
   onMount(async () => {
     if (props.start) return void load(props.start);
+    // Where this pane was last, unless that folder is gone (a host that cannot be reached is not asked twice).
+    const last = readLast(host());
+    if (last !== null) {
+      const failed = await load(last);
+      if (failed === null || !folderGone(failed)) return;
+    }
     if (host() !== null) return void load("~");
     // This computer starts in Downloads (the home folder when there is none).
     const home = await ipc.localHome().catch(() => "");
@@ -125,7 +165,7 @@ export function FilePane(props: {
       // A link to a folder opens through its target; a link to a file edits like a file.
       const end = host();
       if (end === null) return void load(path);
-      void ipc.sftpStat(end, path).then((s) => (s.stat?.kind === "dir" ? ipc.sftpRealpath(end, path).then(load) : props.onEdit?.(path, e, "kelpie"))).catch((err) => setError(errorText(String(err))));
+      void ipc.sftpStat(end, path).then((s) => void (s.stat?.kind === "dir" ? ipc.sftpRealpath(end, path).then(load) : props.onEdit?.(path, e, "kelpie"))).catch((err) => setError(errorText(String(err))));
       return;
     }
     props.onEdit?.(path, e, "kelpie");
@@ -150,6 +190,18 @@ export function FilePane(props: {
         void run(() => (end === null ? ipc.createEntry(dir(), name, true) : ipc.sftpMkdir(end, joinPath(end, dir(), name))));
       },
     });
+
+  const mkfile = () =>
+    setAsk({
+      label: t("New file name"), value: "", ok: (v) => {
+        const name = v.trim();
+        if (!name) return;
+        const end = host();
+        void run(() => (end === null ? ipc.createEntry(dir(), name, false) : ipc.sftpCreate(end, joinPath(end, dir(), name))));
+      },
+    });
+  /** A host's daemon makes files from API 44; this computer always can. */
+  const canMakeFile = () => host() === null || store.daemonApi() >= ipc.CREATE_API;
 
   const rename = () => {
     const from = sel().picked[0];
@@ -201,6 +253,10 @@ export function FilePane(props: {
       ...(host() !== null ? [{ label: t("Permissions…"), run: () => props.onPermissions(pickedEntries(), dir()) }] : []),
       { label: t("Copy path"), run: () => void writeText(path) },
       ...(host() === null ? [{ label: t("Show in folder"), run: () => void ipc.revealEntry(dir(), e.name) }] : []),
+      ...(one && e.kind === "dir" && props.onOpenHere ? [
+        { label: t("Open terminal here"), run: () => props.onOpenHere!(path, true) },
+        { label: t("Open as project"), run: () => props.onOpenHere!(path, false) },
+      ] : []),
       null,
       { label: t("Delete"), run: () => void remove(), danger: true },
     ];
@@ -224,6 +280,10 @@ export function FilePane(props: {
       rename();
     } else if (ev.key === "Delete") {
       void remove();
+    } else if (mod && ev.key.toLowerCase() === "r") {
+      // F5 copies (as in two-pane managers); Ctrl/Cmd+R reads the folder again.
+      ev.preventDefault();
+      if (!listing()) void reload();
     } else if (ev.key === "F5") {
       ev.preventDefault();
       copyOver();
@@ -270,7 +330,7 @@ export function FilePane(props: {
         </Show>
         <input class="text-input mono file-pane-path" data-field="pane-path" value={typed()} onInput={(e) => setTyped(e.currentTarget.value)}
           onKeyDown={(e) => e.key === "Enter" && void load(e.currentTarget.value.trim() || (host() === null ? "" : "/"))} />
-        <button class="icon-btn" title={t("Refresh")} onClick={() => void reload()}><Icon name="refresh" size={14} /></button>
+        <button class="icon-btn" data-action="refresh-pane" title={t("Refresh ({key})", { key: isMac ? "⌘R" : "Ctrl+R" })} disabled={listing()} onClick={() => void reload()}><Icon name="refresh" size={14} /></button>
       </div>
       <div class="file-pane-bar">
         <input class="text-input file-pane-filter" placeholder={t("Filter")} value={filter()} onInput={(e) => setFilter(e.currentTarget.value)} />
@@ -278,6 +338,10 @@ export function FilePane(props: {
           <input type="checkbox" data-field="show-hidden" checked={hidden()} onChange={(e) => { setHidden(e.currentTarget.checked); writeHidden(host(), e.currentTarget.checked); void reload(); }} /> {t("Hidden")}
         </label>
         <button class="btn" data-action="new-folder" onClick={mkdir}>{t("New folder")}</button>
+        <Show when={canMakeFile()}><button class="btn" data-action="new-file" onClick={mkfile}>{t("New file")}</button></Show>
+        <Show when={props.onOpenHere}>
+          <button class="icon-btn" data-action="terminal-here" title={t("Open a terminal in this folder")} disabled={!dir()} onClick={() => props.onOpenHere!(dir(), true)}><Icon name="terminal" size={14} /></button>
+        </Show>
       </div>
       <Show when={ask()} keyed>{(a) => <AskRow ask={a} onClose={() => setAsk(null)} />}</Show>
       <Show when={error()}><div class="form-note error" data-pane-error>{error()}</div></Show>
