@@ -1054,10 +1054,15 @@ tree, editor, search and git work through ssh as well. Kelpie uses your OpenSSH 
 (Settings → Remote picks another config file): keys, agents, users, ports and jump hosts apply.
 The folder list in the dialog has a **Refresh** button.
 
-A host has no file watcher, so its views read the host again on demand: **Refresh** in the Explorer
-re-reads the tree and every open file of the project, each open file has a **Reload** button (the circular arrow
-at the right of its bar), and an open text file you come back to (its tab, or the window) is checked again (up to
-1 MiB; a larger one on Reload or Refresh). Unsaved edits are
+**Live updates**: while Kelpie's window is shown, every few seconds it checks the folders the tree shows and the
+files you have open, over one SFTP connection it keeps to the host, and reads again only what changed. A file an
+agent adds or removes on the host shows in the tree, and an open file it edits updates in the editor, by itself;
+the tree's git colours follow within about half a minute. A project whose address has a
+typed port (`user@host:2222`) is not covered: save the host on the SSH hosts page and open it from there instead.
+A host that cannot be reached is asked again after 30 seconds, then less and less often (a refused login waits 10
+minutes); **Refresh** asks at once. **Refresh** in the Explorer still re-reads the tree
+and every open file, each open file has a **Reload** button (the circular arrow at the right of its bar), and
+without live updates an open text file you come back to is checked again (up to 1 MiB). Unsaved edits are
 never replaced: the editor says the file changed and offers *Reload*. A save compares the file's content with what
 was opened, not only its time, so an agent's edit on the host in the same second is asked about, never
 overwritten.

@@ -2302,7 +2302,7 @@ The Files tab and transfers run in the daemon (`crates/kelpied/src/files/`), so 
   - ssh's stderr (16 KiB) gives the error text, in `remote::exec`'s wording (`ssh <dest>: …`), so the app's host-key check still recognises an unknown key.
   - The children are `kill_on_drop`. The spike showed ssh, and a ProxyJump's inner ssh, exit by themselves when the daemon dies and their pipes close.
 - **Methods** (API 31), answered from their own task:
-  - `sftp.list {dest, path, hidden}`, `sftp.stat` (`lstat` and the followed `stat`), `sftp.realpath` (`~` is the login folder);
+  - `sftp.list {dest, path, hidden}`, `sftp.stat` (`lstat` and the followed `stat`), `sftp.stat_many {paths}` (followed `stat` of up to 512 paths, null for one that cannot be read, an error when the connection is lost; API 45, polled by a remote project's live updates), `sftp.realpath` (`~` is the login folder);
   - `sftp.mkdir`, `sftp.create` (a new empty file, exclusive: refuses a name that is taken; API 44), `sftp.rename` (refuses an existing target), `sftp.chmod {paths, mode}` (not recursive);
   - `local.list {path, hidden}`, `local.home`.
 

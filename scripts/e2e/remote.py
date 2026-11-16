@@ -10,7 +10,8 @@ folder is a POSIX path (/c/Users/…), commands are bash, git is Git for Windows
 Covers: hosts from the SSH config, the Add remote project dialog (connect, host check, folder
 browsing and Refresh), the sidebar host label, branch info, file tree, viewing / editing / saving a file,
 the editor's Reload and the Explorer's Refresh re-reading a host's file, a save refused when the file changed on the
-host within the same second (content compared, not only the time),
+host within the same second (content compared, not only the time), live updates (a file made or removed on the host
+shows in the tree, an open file changed there updates, without Refresh),
 create / rename / delete, search in files, quick open, the Changes panel (status, stage,
 commit), a terminal running on the host, chat view offered only for local sessions, resuming
 the remote terminal after the daemon restarts, removing the project.
@@ -185,6 +186,18 @@ try:
     d.js("window.confirm = () => true;")
     d.keys("ctrl+s")
     run.check("…and overwrites only when told to", wait(lambda: open(edit_txt).read() == "mine", 20), open(edit_txt).read())
+
+    # ---------- live updates (daemon API 45): what changes on the host shows without Refresh ----------
+    if daemon(d, "daemon.info")["api"] >= 45:
+        d.js(f"{S}.showRightPanel('files')")
+        made = os.path.join(repo, "live-made.txt")
+        open(made, "w").write("x")
+        in_tree = lambda name: d.js("return [...document.querySelectorAll('.tree-row')].some(r => r.textContent.includes(arguments[0]))", name)
+        run.check("a file made on the host shows in the tree by itself", wait(lambda: in_tree("live-made.txt"), 30))
+        os.remove(made)
+        run.check("…and goes when it is removed there", wait(lambda: not in_tree("live-made.txt"), 30))
+        open(edit_txt, "w", newline="\n").write("live edit\n")
+        run.check("an open file changed on the host updates by itself", wait(lambda: "live edit" in editor_text(), 30), editor_text()[:80])
 
     # ---------- search / quick open ----------
     found = inv("search_text", {"root": root, "query": "remote-needle", "regex": False, "caseSensitive": False})

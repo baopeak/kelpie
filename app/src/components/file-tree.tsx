@@ -14,6 +14,7 @@ import { pathMenuItems } from "./path-menu";
 import { t } from "../lib/i18n";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { refreshFiles } from "../lib/file-refresh";
+import { watchTree } from "../lib/remote-live";
 
 const ROW_H = 24;
 
@@ -49,27 +50,38 @@ export function FileTree(props: { project: Project; api?: (api: FileTreeApi) => 
   const [editing, setEditing] = createSignal<{ dir: string; kind: "file" | "dir" | "rename"; entry?: DirEntry } | null>(null);
   let scroller!: HTMLDivElement;
 
-  async function load(dir: string) {
+  /** `keep`: a live update's reload, which keeps what is listed when the host cannot be read just now. */
+  async function load(dir: string, keep = false) {
     try {
       const list = await listDir(root(), dir);
       setChildren(dir, list);
     } catch (e) {
+      if (keep) return;
       // A folder deleted behind our back simply disappears; only the root is worth a toast.
       setChildren(produce((c) => delete c[dir]));
       if (!dir) store.notify(String(e));
     }
   }
 
+  /** The root and the folders shown now (expanded, with all their parents expanded). */
+  const shownDirs = () => {
+    const open = (d: string): boolean => !d || (!!expanded[d] && open(d.includes("/") ? d.slice(0, d.lastIndexOf("/")) : ""));
+    return Object.keys(children).filter(open);
+  };
+
   onMount(() => {
     void load("");
     props.api?.({
       collapseAll: () => setExpanded(reconcile({ "": true })),
       refresh: () => {
-        // Only the root and folders currently expanded (with all their parents expanded).
-        const open = (d: string): boolean => !d || (!!expanded[d] && open(d.includes("/") ? d.slice(0, d.lastIndexOf("/")) : ""));
-        for (const d of Object.keys(children)) if (open(d)) void load(d);
+        for (const d of shownDirs()) void load(d);
       },
     });
+    // A remote project has no watcher: its shown folders are polled while the window is shown.
+    // One folder at a time: each read is an ssh connection, and a host limits how many it takes at once.
+    onCleanup(watchTree(props.project, shownDirs, async (dirs) => {
+      for (const d of dirs) if (children[d]) await load(d, true);
+    }));
     const ro = new ResizeObserver(() => setHeight(scroller.clientHeight));
     ro.observe(scroller);
     const un = onEvent<{ root: string; dirs: string[] }>("fs-changed", (e) => {

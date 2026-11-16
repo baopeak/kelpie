@@ -7,7 +7,7 @@ its own `kelpied serve` with them: the real daemon and the real ~/.ssh are never
 `ssh_test_server.py` (needs paramiko) on 127.0.0.1, logged in with a key made for this run; its throttled twin goes
 through `net_fault_proxy.py`. Only the processes this script starts are stopped, by their own handles.
 
-Covers: realpath / mkdir / create (a new empty file, never over a taken name) / list / rename / stat / chmod on a host, local.list, an unknown host key (ssh's own text),
+Covers: realpath / mkdir / create (a new empty file, never over a taken name) / list / rename / stat / stat_many / chmod on a host, local.list, an unknown host key (ssh's own text),
 upload and download with equal SHA-256, the final mode of a new and of a replaced file, conflict ask -> keep both,
 apply-to-all (one transfer only), cancel leaving no
 partial, pause and resume from the partial, the host going away mid-transfer and coming back (resumes by itself), a
@@ -223,6 +223,14 @@ try:
         check(call_err(c, "sftp.create", {"dest": "e2e-host", "path": "relative.txt"}) is not None, "create refuses a relative path")
         c.call("sftp.create", {"dest": "e2e-host", "path": remote_work + "/Tiếng Việt.md"})
         check(os.path.isfile(os.path.join(work, "Tiếng Việt.md")), "create with a Vietnamese name")
+    # Live updates of remote projects (API 45): many stats in one call, null for a path that is not there.
+    if info["api"] >= 45:
+        many = c.call("sftp.stat_many", {"dest": "e2e-host", "paths": [remote_work, remote_work + "/new.txt", remote_work + "/no-such"]})
+        check(many[0]["kind"] == "dir" and many[1]["kind"] == "file" and many[1]["size"] == 0 and many[2] is None, f"stat_many: kinds and sizes in order, null when missing ({many})")
+        odd = c.call("sftp.stat_many", {"dest": "e2e-host", "paths": ["relative", remote_work]})
+        check(odd[0] is None and odd[1]["kind"] == "dir", "stat_many answers null for a relative path and still the rest")
+        check(call_err(c, "sftp.stat_many", {"dest": "e2e-host", "paths": [remote_work, 5]}) is not None, "stat_many refuses a path that is not text")
+        check(call_err(c, "sftp.stat_many", {"dest": "e2e-host", "paths": [remote_work] * 513}) is not None, "stat_many refuses more than 512 paths")
     check(any(e["name"] == "renamed" for e in c.call("local.list", {"path": work})), "local.list")
     err = call_err(c, "sftp.list", {"dest": "e2e-unknown", "path": "/"}) or ""
     check("Host key verification failed" in err, f"an unknown host key keeps ssh's text ({err[:80]})")
