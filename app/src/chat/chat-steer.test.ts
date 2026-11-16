@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ChatController, type ChatImage } from "./chat-model";
 import { createClaudeAdapter } from "./claude-adapter";
 import { createAcpAdapter } from "./acp-adapter";
+import { createCodexAdapter } from "./codex-adapter";
 import type { ChatTransport } from "./transport";
 
 const line = (o: unknown) => `${JSON.stringify(o)}\n`;
@@ -36,7 +37,7 @@ async function chat(make: typeof createClaudeAdapter = createClaudeAdapter, opts
     const m = JSON.parse(l);
     return m.type === "user" ? [m.message.content.map((b: { text?: string }) => b.text ?? "").join("")] : [];
   });
-  return { ctrl, said, queued, print: (s: string) => live(encode(s)) };
+  return { ctrl, said, written, queued, print: (s: string) => live(encode(s)) };
 }
 
 const pending = (c: ChatController) => c.state.items.filter((i) => i.kind === "user" && i.pending).map((i) => (i as { text: string }).text);
@@ -102,17 +103,65 @@ describe("a message sent while the agent works", () => {
     expect(ctrl.state.busy).toBe(false);
   });
 
-  const picture: ChatImage = { mime: "image/png", data: "AA==", path: "/tmp/a.png" };
-  for (const [name, text, images] of [["a command", "/compact", undefined], ["a shell line", "!ls", undefined], ["a picture", "look", [picture]]] as const) {
+  for (const [name, text] of [["a command", "/compact"], ["a shell line", "!ls"]] as const) {
     it(`waits for the turn to end when it is ${name}`, async () => {
       const { ctrl, said, print } = await chat();
       ctrl.send("one");
       print(echo("one"));
-      ctrl.send(text, true, images ? [...images] : undefined);
+      ctrl.send(text, true);
       expect(said()).toEqual(["one"]);
       expect(ctrl.state.queue.map((q) => q.text)).toEqual([text]);
     });
   }
+
+  const picture: ChatImage = { mime: "image/png", data: "AA==", path: "/tmp/a.png" };
+  const pictureBlock = { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } };
+
+  it("goes in with its pictures, which Claude takes mid-turn", async () => {
+    const { ctrl, written, print } = await chat();
+    ctrl.send("one");
+    print(echo("one") + toolUse("t1"));
+    ctrl.send("look", true, [picture]);
+    expect(ctrl.state.queue).toEqual([]);
+    expect(JSON.parse(written.at(-1)!).message.content).toEqual([pictureBlock, { type: "text", text: "look" }]);
+    expect(pending(ctrl)).toEqual(["look"]);
+    // 2.1.325 echoes it, picture and all, after the running tool's result, and one `success` result covers both.
+    print(toolResult("t1") + line({ type: "user", isReplay: true, uuid: "u-look", message: { role: "user", content: [pictureBlock, { type: "text", text: "look" }] } }));
+    expect(pending(ctrl)).toEqual([]);
+    print(reply("m2", "FINISHED. The picture is red.") + result("r1"));
+    expect(ctrl.state.busy).toBe(false);
+  });
+
+  it("sends a picture waiting behind a command now by steering it, with no stop", async () => {
+    const { ctrl, written, print } = await chat();
+    ctrl.send("one");
+    print(echo("one") + toolUse("t1"));
+    ctrl.send("/compact");
+    ctrl.send("look", true, [picture]);
+    expect(ctrl.state.queue.map((q) => q.text)).toEqual(["/compact", "look"]);
+    ctrl.sendNow(ctrl.state.queue[1].id);
+    expect(ctrl.state.queue.map((q) => q.text)).toEqual(["/compact"]);
+    const lines = written.map((l) => JSON.parse(l));
+    expect(lines.some((l) => l.type === "control_request" && l.request?.subtype === "interrupt")).toBe(false);
+    expect(lines.at(-1).message.content).toEqual([pictureBlock, { type: "text", text: "look" }]);
+  });
+
+  it("goes in with its pictures past the daemon's queue too", async () => {
+    const { ctrl, written, queued, print } = await chat(createClaudeAdapter, { daemonQueue: true });
+    print(toolUse("t1"));
+    ctrl.set("busy", true);
+    ctrl.send("look", true, [picture]);
+    expect(queued).toEqual([]);
+    expect(JSON.parse(written.at(-1)!).message.content).toEqual([pictureBlock, { type: "text", text: "look" }]);
+  });
+
+  it("queues a picture for an agent that takes only text mid-turn", async () => {
+    const { ctrl, said } = await chat(createCodexAdapter as typeof createClaudeAdapter);
+    ctrl.set("busy", true);
+    ctrl.send("look", true, [picture]);
+    expect(said()).toEqual([]);
+    expect(ctrl.state.queue.map((q) => q.text)).toEqual(["look"]);
+  });
 
   it("stays behind what already waits, so that messages keep their order", async () => {
     const { ctrl, said, print } = await chat();
@@ -157,6 +206,82 @@ describe("a message sent while the agent works", () => {
     const log = echo("one") + toolUse("t1") + toolResult("t1") + echo("two") + result("r1");
     const { ctrl, said } = await chat(createClaudeAdapter, { log });
     expect(said()).toEqual([]);
+    expect(ctrl.state.busy).toBe(false);
+  });
+});
+
+// Lines as `claude -p` 2.1.325 printed them (C:\Temp\steer-probe): an interrupt is acknowledged at once, the run then writes a
+// `[Request interrupted by user…]` user line and ends with `error_during_execution`; a user line it had not read yet starts a
+// new run at once (`system/init`), whose echo comes a few seconds later.
+const init = line({ type: "system", subtype: "init", session_id: "c1", model: "claude-haiku-4-5" });
+const ack = (n: number) => line({ type: "control_response", response: { subtype: "success", request_id: `kelpie-interrupt-${n}` } });
+const marker = line({ type: "user", message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user for tool use]" }] } });
+const stoppedResult = (uuid: string) =>
+  line({ type: "result", subtype: "error_during_execution", is_error: true, uuid, result: null, num_turns: 3, stop_reason: "tool_use", duration_ms: 1300, errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"] });
+const results = (c: ChatController) => c.state.items.filter((i) => i.kind === "result").map((i) => (i as { text: string }).text);
+
+describe("a result the CLI follows with more work", () => {
+  it("does not end the turn when a message it had not read runs next", async () => {
+    const { ctrl, print } = await chat();
+    ctrl.send("describe a river");
+    print(init + echo("describe a river") + reply("m1", "Rivers carve…"));
+    ctrl.send("also say BANANA");
+    print(result("r1") + init);
+    expect(ctrl.state.busy).toBe(true);
+    expect(pending(ctrl)).toEqual(["also say BANANA"]);
+    print(echo("also say BANANA") + reply("m2", "BANANA") + result("r2"));
+    expect(ctrl.state.busy).toBe(false);
+    expect(results(ctrl).some((r) => r.startsWith("Error"))).toBe(false);
+  });
+
+  it("says Stopped, not Error, for a stop the person asked for", async () => {
+    const { ctrl, written, print } = await chat();
+    ctrl.send("sleep three times");
+    print(init + echo("sleep three times") + toolUse("t1"));
+    ctrl.interrupt();
+    expect(JSON.parse(written.at(-1)!).request).toEqual({ subtype: "interrupt" });
+    print(ack(1) + toolResult("t1") + marker + stoppedResult("r1"));
+    expect(ctrl.state.busy).toBe(false);
+    expect(results(ctrl)).toEqual(["Stopped · 1.3s · 3 turns"]);
+  });
+
+  it("stays working, with no error, when a message written before the stop runs after it", async () => {
+    const { ctrl, said, print } = await chat();
+    ctrl.send("sleep three times");
+    print(init + echo("sleep three times") + toolUse("t1"));
+    ctrl.send("also say BANANA");
+    ctrl.interrupt();
+    print(ack(1) + toolResult("t1") + marker + stoppedResult("r1") + init);
+    expect(ctrl.state.busy).toBe(true);
+    expect(results(ctrl)).toEqual(["Stopped · 1.3s · 3 turns"]);
+    print(echo("also say BANANA") + toolUse("t2") + toolResult("t2") + reply("m3", "FINISHED BANANA") + result("r2"));
+    expect(ctrl.state.busy).toBe(false);
+    expect(pending(ctrl)).toEqual([]);
+    expect(said()).toEqual(["sleep three times", "also say BANANA"]);
+  });
+
+  it("still shows a run that failed by itself as an error", async () => {
+    const { ctrl, print } = await chat();
+    ctrl.send("go");
+    print(init + echo("go") + toolUse("t1") + toolResult("t1") + stoppedResult("r1"));
+    expect(results(ctrl)[0]).toMatch(/^Error: \[ede_diagnostic\]/);
+  });
+
+  it("does not carry an answered stop into the next run", async () => {
+    const { ctrl, print } = await chat();
+    // A stop with nothing running is acknowledged too; the next run starts afresh.
+    ctrl.interrupt();
+    print(ack(1));
+    ctrl.send("go");
+    print(init + echo("go") + stoppedResult("r1"));
+    expect(results(ctrl)[0]).toMatch(/^Error:/);
+  });
+
+  it("shows a replayed stop the same way, and writes nothing", async () => {
+    const log = init + echo("one") + toolUse("t1") + ack(1) + toolResult("t1") + marker + stoppedResult("r1") + init + echo("two") + result("r2");
+    const { ctrl, said } = await chat(createClaudeAdapter, { log });
+    expect(said()).toEqual([]);
+    expect(results(ctrl)[0]).toMatch(/^Stopped/);
     expect(ctrl.state.busy).toBe(false);
   });
 });

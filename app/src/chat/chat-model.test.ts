@@ -105,10 +105,12 @@ describe("ChatController queue", () => {
     await ctrl.attach(1);
     const pic = { mime: "image/png", data: "AA==", path: "/tmp/a.png" };
     ctrl.send("one");
+    // Behind a command, which waits for the turn to end, pictures wait too.
+    ctrl.send("/compact");
     ctrl.send("two", true, [pic]);
     ctrl.send("", true, [pic]);
     feed(new TextEncoder().encode(`${JSON.stringify({ type: "kelpie_exit", code: 0 })}\n`));
-    expect(ctrl.state.items.at(-1)).toMatchObject({ kind: "system", text: "Not sent:\ntwo\n[a.png]\n[a.png]" });
+    expect(ctrl.state.items.at(-1)).toMatchObject({ kind: "system", text: "Not sent:\n/compact\ntwo\n[a.png]\n[a.png]" });
     expect(ctrl.state.queue).toEqual([]);
   });
 

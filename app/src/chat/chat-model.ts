@@ -192,8 +192,10 @@ export interface Adapter {
   onMessage(msg: any, raw: string): void;
   /** `typed`: the user wrote it in the composer (not text Kelpie sends for them). */
   send(text: string, typed?: boolean, images?: ChatImage[]): void;
-  /** Delivers `text` into the running turn; false when the agent cannot take it mid-turn. */
-  steer?(text: string): boolean;
+  /** Delivers `text` (and `images`, when `steersPictures`) into the running turn; false when the agent cannot take it mid-turn. */
+  steer?(text: string, images?: ChatImage[]): boolean;
+  /** `steer` takes pictures too (Claude); without it a message with pictures waits for the turn to end. */
+  steersPictures?: boolean;
   /** Text that starts no turn (a picker command, a terminal-only one): never queued. */
   immediate?(text: string, typed: boolean): boolean;
   interrupt(): void;
@@ -704,9 +706,15 @@ export class ChatController {
     return !!this.adapter.steer;
   }
 
-  /** A message that can go into the running turn: a command starts something of its own, and a steer carries text only. */
+  /** Whether a message can ride in a turn: a command (`/compact`, `!ls`) starts something of its own, and pictures go only to an
+   *  agent that takes them mid-turn. */
+  private rides(text: string, images?: ChatImage[]) {
+    return this.canSteer && !/^[/!]/.test(text.trim()) && (!images?.length || !!this.adapter.steersPictures);
+  }
+
+  /** A message that can go into the running turn now. */
   private steerable(text: string, images?: ChatImage[]) {
-    return this.canSteer && this.live && this.state.ready && this.state.busy && !this.state.queue.length && !images?.length && !/^[/!]/.test(text.trim());
+    return this.rides(text, images) && this.live && this.state.ready && this.state.busy && !this.state.queue.length;
   }
 
   /** Into the running turn when it can go there; else sends now, or queues while the agent works (or while earlier queued messages wait). */
@@ -717,7 +725,7 @@ export class ChatController {
     if (!text.trim()) text = "";
     // As in the agent's own terminal: what is said while it works reaches it at its next step, and it sorts out what to do.
     // What is already waiting goes first, so that messages stay in order.
-    if (this.steerable(text, images) && this.adapter.steer!(text)) return;
+    if (this.steerable(text, images) && this.adapter.steer!(text, images)) return;
     if (this.queued()) {
       // A message that starts no turn (a picker command, a terminal-only one) runs at once; every other one waits its
       // turn in the daemon's queue, behind whatever a phone sent before it.
@@ -773,12 +781,10 @@ export class ChatController {
     const m = this.state.queue.find((x) => x.id === id);
     if (!m || this.state.exited || !this.state.ready) return;
     if (this.queued()) return void this.sendNowQueued(m);
-    // A command (`/compact`, `!ls`) starts something of its own: it never rides in a turn.
-    const command = /^[/!]/.test(m.text.trim());
     if (!this.state.busy) {
       this.unqueue(id);
       this.adapter.send(m.text, m.typed, m.images);
-    } else if (!command && !m.images?.length && this.adapter.steer?.(m.text)) {
+    } else if (this.rides(m.text, m.images) && this.adapter.steer!(m.text, m.images)) {
       this.unqueue(id);
     } else {
       this.set("queue", (q) => [m, ...q.filter((x) => x.id !== id)]);
@@ -840,17 +846,15 @@ export class ChatController {
     const noop = () => {};
     const own = m.cid ? this.mine.get(m.cid) : undefined;
     if (!this.state.busy) return void this.transport.queueOp!("front", m.id).catch(noop);
-    // A command (`/compact`, `!ls`) starts something of its own: it never rides in a turn. Another device's message is not
-    // here to steer with.
-    const command = /^[/!]/.test(m.text.trim());
-    if (own && !command && !own.images?.length && this.adapter.steer) {
+    // Another device's message is not here to steer with.
+    if (own && this.rides(own.text, own.images)) {
       try {
         await this.transport.queueOp!("take", m.id);
       } catch {
         return; // it went out meanwhile
       }
       if (m.cid) this.mine.delete(m.cid);
-      if (!this.adapter.steer(own.text)) this.enqueueNew(own.text, own.typed, undefined, true);
+      if (!this.adapter.steer!(own.text, own.images)) this.enqueueNew(own.text, own.typed, own.images, true);
       return;
     }
     await this.transport.queueOp!("front", m.id, { interrupt: true }).catch(noop);

@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 mod queue;
+mod steers;
 mod turns;
 
 use queue::{Dropped, Entry, InFlight, NewEntry, Origin, Queue, Refused, State, TooLate};
@@ -127,6 +128,10 @@ struct Inner {
     /// User turns written to the agent (a message that starts a turn, whoever built it). Permission answers, interrupts and other
     /// lines are not turns. Sub-sessions' reports are judged turn by turn (see `ChildWatch::sync_turn`).
     turn_count: u64,
+    /// Claude: what was said during the running turn and not read yet, which a `result` does not end (`chat/steers.rs`).
+    steers: steers::Steers,
+    /// Claude: a stop was written during the run going on, so its `error_during_execution` is that stop and no failure.
+    stop_asked: bool,
 }
 
 /// The ACP calls that open a conversation and carry the agent's `mcpServers`.
@@ -687,6 +692,8 @@ impl ChatSession {
                 perm_bypass: false,
                 acp_mcp: None,
                 turn_count: 0,
+                steers: steers::Steers::default(),
+                stop_asked: false,
             }),
         })
     }
@@ -758,6 +765,8 @@ impl ChatSession {
             g.pending.clear();
             g.conv = Conversation::default();
             g.q.flight = None;
+            g.steers.clear();
+            g.stop_asked = false;
         }
         tokio::spawn(async move {
             while let Some(bytes) = in_rx.recv().await {
@@ -818,12 +827,35 @@ impl ChatSession {
             line = json!({"type": "kelpie_stderr", "text": format!("[dropped a {} byte line]", line.len())}).to_string();
         }
         let now = Instant::now();
-        let derived = classify(&line);
-        let failed_turn = derived == Some(Status::Idle) && turn_failed(&line);
+        let mut derived = classify(&line);
         let title = conversation_title(&line);
         let ask = ask_of(&line);
+        let echo = steers::echo_text(&line);
+        let run_start = steers::starts_run(&line);
         let mut g = self.inner.lock();
         let before = Self::shape(&g);
+        // A run the person stopped ends in `error_during_execution`: that is the stop, not a failure.
+        let mut failed_turn = derived == Some(Status::Idle) && turn_failed(&line) && !(g.stop_asked && stop_result(&line));
+        if g.dialect == Dialect::Claude {
+            if let Some(text) = &echo {
+                g.steers.echoed(text);
+            }
+            if run_start || matches!(derived, Some(Status::Working | Status::Waiting)) {
+                g.steers.went_on();
+            }
+            // A stop is over with the run it stopped (its `result`); one written as a run starts is that run's, so `system/init`
+            // does not end it.
+            if derived == Some(Status::Idle) {
+                g.stop_asked = false;
+            }
+            // Claude goes on at once with what it was told during the run and has not read: the turn is not over, and the stop
+            // (if that ended the run) is done.
+            if derived == Some(Status::Idle) && g.steers.result(now, failed_turn) {
+                derived = Some(Status::Working);
+                failed_turn = false;
+                g.q.stopped_at = None;
+            }
+        }
         self.note_agent_line(&mut g, &line, derived);
         if title.is_some() {
             g.title = title;
@@ -1018,6 +1050,11 @@ impl ChatSession {
                     g.q.mail_hold = false;
                     if g.q.flight.is_none() {
                         g.q.flight = Some(InFlight { qid: None, req, since: now, output: false });
+                        g.steers.started(&v);
+                        g.stop_asked = false;
+                    } else if dialect == Dialect::Claude {
+                        // Said during the running turn: Claude reads it at its next step, or runs it right after the turn's result.
+                        g.steers.written(&v);
                     }
                 }
                 Written::Interrupt => {
@@ -1025,6 +1062,7 @@ impl ChatSession {
                     if g.q.flight.is_some() || !Self::idle(g, now) {
                         g.q.stopped_at = Some(now);
                         g.q.released = false;
+                        g.stop_asked = true;
                     }
                     g.q.interrupted(now);
                 }
@@ -1152,6 +1190,10 @@ impl ChatSession {
             if let Ok(v) = serde_json::from_str::<Value>(line) {
                 g.conv.learn_written(dialect, &v);
                 if let Written::Turn { req: r } = turns::written(dialect, &v) {
+                    if !turn_line {
+                        g.steers.started(&v);
+                        g.stop_asked = false;
+                    }
                     turn_line = true;
                     req = req.or(r);
                 }
@@ -1486,6 +1528,7 @@ impl ChatSession {
         }
         g.q.stopped_at = Some(now);
         g.q.released = false;
+        g.stop_asked = true;
         if let Some(stdin) = &g.stdin {
             let _ = stdin.send(format!("{line}\n").into_bytes());
         }
@@ -1948,6 +1991,7 @@ impl ChatSession {
             let qid = g.q.flight.as_ref().and_then(|f| f.qid.clone()).unwrap_or_default();
             tracing::warn!("chat {}: the turn written for {qid:?} drew no answer; the queue goes on", self.spec.lock().id);
             g.q.flight = None;
+            g.steers.clear();
         }
         // A stop the agent never answered with anything at all: it is not running a turn any more (what it was doing was over, or
         // it went quiet); the queue must not wait for it for ever. This is the queue's view only: the session's status, turns and
@@ -1961,7 +2005,15 @@ impl ChatSession {
                 tracing::warn!("chat {}: a stopped turn printed nothing for {} s; the queue goes on", self.spec.lock().id, queue::STOP_GRACE.as_secs());
                 g.q.flight = None;
                 g.q.released = true;
+                g.steers.clear();
             }
+        }
+        // A `result` held for a line Claude had not read, and no run or work followed it: it did not go on after all.
+        if let Some(failed) = g.steers.expired(now) {
+            tracing::warn!("chat {}: Claude did not go on after a result that left a message unread; the turn is over", self.spec.lock().id);
+            g.steers.clear();
+            g.q.flight = None;
+            g.activity.on_hook(Status::Idle, failed, now);
         }
         // Offers that timed out, and a queue that can go on.
         let dropped = self.pump(&mut g, now);
@@ -2068,6 +2120,11 @@ fn classify(line: &str) -> Option<Status> {
         return Some(Status::Idle);
     }
     None
+}
+
+/// Whether a Claude `result` is how a stopped run ends (`error_during_execution`): with a stop seen, that is no failure.
+fn stop_result(line: &str) -> bool {
+    serde_json::from_str::<Value>(line).is_ok_and(|v| v.get("subtype").and_then(Value::as_str) == Some("error_during_execution"))
 }
 
 /// Whether a turn-ending line reports an error (Claude `result.is_error`, Codex failed turn).
@@ -3622,6 +3679,191 @@ mod tests {
         assert!(texts(&c).is_empty() && written_lines(&mut stdin).is_empty());
         assert_eq!(c.sent_state("p1", "a"), None, "and it is remembered as nothing");
         assert!(c.enqueue_if(from_phone("p1", "b", "allowed"), &|| true).is_ok());
+    }
+
+    // Claude Code 2.1.325's lines (C:\Temp\steer-probe): a user line written during a run is echoed (`isReplay`) when the CLI
+    // reads it; one it has not read when the run ends (by itself or by a stop) gets a run of its own at once, after the `result`.
+    fn said(text: &str) -> Vec<u8> {
+        format!("{}\n", json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})).into_bytes()
+    }
+    fn echoed(text: &str) -> String {
+        json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": [{"type": "text", "text": text}]}}).to_string()
+    }
+    const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"c1"}"#;
+    const SUCCESS: &str = r#"{"type":"result","subtype":"success","is_error":false}"#;
+    const STOPPED: &str = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":null,"stop_reason":"tool_use","errors":["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"]}"#;
+    const INTERRUPT: &str = "{\"type\":\"control_request\",\"request_id\":\"kelpie-interrupt-1\",\"request\":{\"subtype\":\"interrupt\"}}\n";
+    const TOOL_USE: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#;
+
+    fn status(c: &ChatSession) -> Status {
+        c.inner.lock().activity.status(Instant::now())
+    }
+
+    #[test]
+    fn a_result_claude_follows_with_a_message_it_had_not_read_does_not_end_the_turn() {
+        let (c, mut stdin) = live();
+        c.input(said("describe a river"));
+        c.ingest_line(echoed("describe a river"));
+        c.ingest_line(TOOL_USE.into());
+        // Said during the run, and the run ends before Claude reads it.
+        c.input(said("also say BANANA"));
+        c.enqueue(from_phone("p1", "a", "after it")).unwrap();
+        written_lines(&mut stdin);
+        c.ingest_line(SUCCESS.into());
+        c.tick(Instant::now());
+        assert_eq!(status(&c), Status::Working, "Claude goes on with it");
+        assert_eq!(c.queue_view()["in_flight"], true);
+        assert!(written_lines(&mut stdin).is_empty(), "nothing is written into the turn that goes on");
+        c.ingest_line(INIT.into());
+        c.ingest_line(echoed("also say BANANA"));
+        c.ingest_line(SUCCESS.into());
+        assert_eq!(written_lines(&mut stdin).iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["after it"], "the turn is over now");
+    }
+
+    #[test]
+    fn a_message_read_during_the_run_lets_its_result_end_the_turn() {
+        let (c, _stdin) = live();
+        c.input(said("one"));
+        c.ingest_line(echoed("one"));
+        c.ingest_line(TOOL_USE.into());
+        c.input(said("two"));
+        c.ingest_line(echoed("two"));
+        c.ingest_line(SUCCESS.into());
+        assert_eq!(status(&c), Status::Idle);
+    }
+
+    #[test]
+    fn a_stop_with_a_message_written_before_it_keeps_the_turn_going_and_is_no_failure() {
+        let (c, _stdin) = live();
+        c.input(said("sleep three times"));
+        c.ingest_line(echoed("sleep three times"));
+        c.ingest_line(TOOL_USE.into());
+        c.input(said("also say BANANA"));
+        c.input(INTERRUPT.as_bytes().to_vec());
+        c.ingest_line(r#"{"type":"control_response","response":{"subtype":"success","request_id":"kelpie-interrupt-1"}}"#.into());
+        c.ingest_line(r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#.into());
+        c.ingest_line(STOPPED.into());
+        assert_eq!(status(&c), Status::Working);
+        assert!(!c.inner.lock().activity.failed);
+        assert!(c.inner.lock().q.stopped_at.is_none(), "the stopped run is over; what runs now is the message");
+        c.ingest_line(INIT.into());
+        c.ingest_line(echoed("also say BANANA"));
+        c.ingest_line(SUCCESS.into());
+        assert_eq!(status(&c), Status::Idle);
+    }
+
+    #[test]
+    fn a_stop_is_no_failure_and_a_run_that_fails_by_itself_is_one() {
+        let (c, _stdin) = live();
+        c.input(said("go"));
+        c.ingest_line(TOOL_USE.into());
+        c.input(INTERRUPT.as_bytes().to_vec());
+        c.ingest_line(STOPPED.into());
+        assert_eq!(status(&c), Status::Idle);
+        assert!(!c.inner.lock().activity.failed, "the person stopped it");
+
+        let (f, _fstdin) = live();
+        f.input(said("go"));
+        f.ingest_line(TOOL_USE.into());
+        f.ingest_line(STOPPED.into());
+        assert!(f.inner.lock().activity.failed, "nobody stopped it");
+    }
+
+    #[test]
+    fn a_held_result_claude_printed_nothing_after_ends_the_turn_after_a_grace() {
+        let (c, mut stdin) = live();
+        c.input(said("one"));
+        c.ingest_line(TOOL_USE.into());
+        c.input(said("never read"));
+        c.enqueue(from_phone("p1", "a", "waiting")).unwrap();
+        written_lines(&mut stdin);
+        c.ingest_line(SUCCESS.into());
+        c.tick(Instant::now() + Duration::from_secs(5));
+        assert!(written_lines(&mut stdin).is_empty());
+        c.tick(Instant::now() + steers::GRACE + Duration::from_secs(1));
+        assert_eq!(status(&c), Status::Idle);
+        assert_eq!(written_lines(&mut stdin).iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["waiting"]);
+    }
+
+    #[test]
+    fn stderr_or_a_stop_answered_after_a_held_result_does_not_hold_the_queue_for_ever() {
+        let (c, mut stdin) = live();
+        c.input(said("one"));
+        c.ingest_line(TOOL_USE.into());
+        c.input(said("echo lost"));
+        c.enqueue(from_phone("p1", "a", "waiting")).unwrap();
+        written_lines(&mut stdin);
+        c.ingest_line(SUCCESS.into());
+        // Neither is a sign that Claude went on: a line on stderr, and a Stop it acknowledged with nothing running.
+        c.ingest_line(json!({"type": "kelpie_stderr", "text": "warning"}).to_string());
+        c.ingest_line(r#"{"type":"control_response","response":{"subtype":"success","request_id":"kelpie-interrupt-1"}}"#.into());
+        c.tick(Instant::now() + steers::GRACE + Duration::from_secs(1));
+        assert_eq!(status(&c), Status::Idle);
+        assert_eq!(written_lines(&mut stdin).iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["waiting"]);
+    }
+
+    #[test]
+    fn a_stop_that_takes_longer_than_the_queue_s_grace_is_still_no_failure() {
+        let (c, _stdin) = live();
+        c.input(said("go"));
+        c.ingest_line(TOOL_USE.into());
+        c.input(INTERRUPT.as_bytes().to_vec());
+        // The tool keeps printing for a while; the queue's own wait for the stop is over meanwhile.
+        c.ingest_line(r#"{"type":"stream_event","event":{"type":"content_block_delta"}}"#.into());
+        c.tick(Instant::now() + queue::STOP_GRACE + Duration::from_secs(1));
+        c.ingest_line(STOPPED.into());
+        assert!(!c.inner.lock().activity.failed);
+    }
+
+    #[test]
+    fn a_stop_written_before_the_run_s_init_is_still_that_run_s_stop() {
+        let (c, _stdin) = live();
+        c.input(said("go"));
+        c.input(INTERRUPT.as_bytes().to_vec());
+        c.ingest_line(INIT.into());
+        c.ingest_line(STOPPED.into());
+        assert!(!c.inner.lock().activity.failed);
+    }
+
+    #[test]
+    fn a_held_error_that_claude_does_not_follow_ends_the_turn_failed() {
+        let (c, _stdin) = live();
+        c.input(said("go"));
+        c.ingest_line(TOOL_USE.into());
+        c.input(said("never read"));
+        c.ingest_line(r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#.into());
+        assert!(!c.inner.lock().activity.failed, "held: Claude may go on");
+        c.tick(Instant::now() + steers::GRACE + Duration::from_secs(1));
+        assert_eq!(status(&c), Status::Idle);
+        assert!(c.inner.lock().activity.failed);
+    }
+
+    #[test]
+    fn a_picture_alone_sent_during_the_turn_is_not_read_by_the_echo_of_the_one_that_started_it() {
+        let (c, mut stdin) = live();
+        let picture = |text: &str| {
+            let mut content = vec![json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}})];
+            if !text.is_empty() {
+                content.push(json!({"type": "text", "text": text}));
+            }
+            content
+        };
+        let line = |content: Vec<Value>| format!("{}\n", json!({"type": "user", "message": {"role": "user", "content": content}})).into_bytes();
+        let echo = |content: Vec<Value>| json!({"type": "user", "isReplay": true, "message": {"role": "user", "content": content}}).to_string();
+        c.input(line(picture("")));
+        c.ingest_line(TOOL_USE.into());
+        c.input(line(picture("")));
+        c.enqueue(from_phone("p1", "a", "after both")).unwrap();
+        written_lines(&mut stdin);
+        // The first picture's echo comes late, after the second was written.
+        c.ingest_line(echo(picture("")));
+        c.ingest_line(SUCCESS.into());
+        assert_eq!(status(&c), Status::Working, "the second picture is still unread");
+        assert!(written_lines(&mut stdin).is_empty());
+        c.ingest_line(INIT.into());
+        c.ingest_line(echo(picture("")));
+        c.ingest_line(SUCCESS.into());
+        assert_eq!(written_lines(&mut stdin).iter().map(|l| text_of(l).to_string()).collect::<Vec<_>>(), ["after both"]);
     }
 
     #[test]
