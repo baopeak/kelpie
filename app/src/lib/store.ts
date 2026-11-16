@@ -652,6 +652,7 @@ function createAppStore() {
       for (const x of ids) {
         delete s.workspaces[x];
         if (s.collapsed) delete s.collapsed[x];
+        if (s.worktreesExpanded) delete s.worktreesExpanded[x];
         if (s.promptHistory) delete s.promptHistory[x];
       }
       s.recent = (s.recent ?? []).filter((r) => !ids.has(r.projectId) && !(r.kind === "project" && ids.has(r.id)));
@@ -1556,6 +1557,15 @@ function createAppStore() {
     });
   }
 
+  /** Lists a repository's quiet worktrees in full (`true`) or folds them under "N more worktrees". */
+  function setWorktreesExpanded(projectId: string, expanded: boolean) {
+    update((s) => {
+      s.worktreesExpanded ??= {};
+      if (expanded) s.worktreesExpanded[projectId] = true;
+      else delete s.worktreesExpanded[projectId];
+    });
+  }
+
   async function markUnread(sessionId: string, unread: boolean) {
     const s = sessions[sessionId];
     if (s) await ipc.daemon("session.set_unread", { handle: s.handle, unread }).catch((e) => notify(String(e)));
@@ -1890,7 +1900,7 @@ function createAppStore() {
     resumeSession, resumeInterrupted, setChatResumer,
     replacePaneIn, updatePane, resizeSplit, setRightPanel, showRightPanel, setSettings, replaceSettings, saveNow, canPersist, zoomed, toggleZoom,
     topProjects, childrenOf, setProjectStatus, togglePin, approveSetup, approveChecks, linkHost, unlinkHost,
-    projectInfo, refreshProjectInfo, recordRecent, setCollapsed, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
+    projectInfo, refreshProjectInfo, recordRecent, setCollapsed, setWorktreesExpanded, markUnread, renameSession, profileLaunch, setShortcut, setProfile,
     registryAgent, settingsSection, setSettingsSection, settingsItem, openSettings, paneLocation, isSessionVisible, refreshSessions, setSessions,
     addInbox, markInbox, clearInbox, unreadInbox, desktopNotify, meta, metaFor, setComment, loadMeta,
     pendingEntries, daemonNeedsSwitch, switchDaemon, handOverHeldFor, daemonApi, daemonExe, legacyNotify, openAnswer, revealNextWaiting, sessionTree, showInPane, familyFallback,

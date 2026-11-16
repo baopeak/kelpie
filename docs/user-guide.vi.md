@@ -99,6 +99,8 @@ Chi tiết nằm ở phần [Sub-sessions](user-guide.md#sub-sessions).
 
 **Tạo worktree.** Bạn nhấp chuột phải vào một repository và chọn *New worktree…*. Hộp thoại gợi ý sẵn tên nhánh, nhánh gốc và thư mục (`<repo>-worktrees/<branch>`). Worktree mới hiện dưới repository với phiên và bố cục riêng. Khi bạn chọn *Remove worktree…*, Kelpie liệt kê trước những gì sẽ mất rồi mới dừng phiên và xoá worktree, nhưng luôn giữ lại nhánh.
 
+**Danh sách worktree trên thanh bên.** Mỗi worktree chiếm một dòng dưới repository của nó, và dấu `*`, ↑ (commit chưa push) hay ↓ (commit chưa kéo về) chỉ hiện khi thực sự có; nếu tên nhánh khác tên worktree thì bạn rê chuột lên dòng đó để xem. Khi một repository có hơn bốn worktree, thanh bên chỉ liệt kê worktree đang mở, những worktree có phiên đang chạy hoặc đang cần bạn và những worktree có thay đổi chưa commit hay chưa push, còn các worktree yên lặng được gom vào dòng *Còn N worktree khác* mà bạn có thể mở ra, và Kelpie nhớ lựa chọn đó cho từng repository (riêng một worktree yên lặng duy nhất thì không bị gom). Một worktree đang bị gom sẽ hiện lại khi bạn mở nó, khi nó có phiên mới hoặc khi Kelpie đọc lại và thấy trong đó có thay đổi chưa commit hay chưa push, còn khi bạn thu gọn repository bằng mũi tên thì số worktree hiện ở cuối dòng của repository.
+
 **Tệp `.kelpie.yaml`.** Một repository có thể chứa tệp này để chuẩn bị cho worktree mới. Kelpie hiển thị nội dung tệp theo commit gốc và chỉ chạy các bước trong đó khi bạn đánh dấu đồng ý. Tệp có dạng như sau:
 
 ```yaml
