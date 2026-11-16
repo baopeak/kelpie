@@ -393,7 +393,20 @@ fn find_cycle(tasks: &[Task]) -> Option<Vec<String>> {
 impl Runs {
     pub fn load(dir: &Path) -> Runs {
         let path = dir.join("runs.json");
-        let mut list: Vec<Run> = crate::persist::load_state_or_default(&path);
+        // Removed stays removed. Restored from its previous version (a save behind), a task that had not started there may have
+        // started in the save that was lost: nothing more starts without the person's approval.
+        let (mut list, restored): (Vec<Run>, bool) = match crate::persist::load_state_from(&path, |b| serde_json::from_slice::<Vec<Run>>(b), true) {
+            Ok(Some(l)) => (l.value, l.source == kelpie_proto::durable::Source::Previous),
+            _ => (Vec::new(), false),
+        };
+        if restored {
+            for t in list.iter_mut().flat_map(|r| r.tasks.iter_mut()) {
+                if t.session_id.is_none() && matches!(t.status, TaskStatus::Pending | TaskStatus::WaitingApproval | TaskStatus::Starting) {
+                    t.approve = true;
+                    t.approved = false;
+                }
+            }
+        }
         // Tasks caught half-started by a daemon restart start again.
         for r in &mut list {
             for t in &mut r.tasks {
@@ -724,6 +737,25 @@ mod tests {
         let r = &runs.list[0];
         assert_eq!(r.tasks.iter().map(|t| t.status).collect::<Vec<_>>(), vec![TaskStatus::Failed, TaskStatus::Skipped, TaskStatus::Skipped]);
         assert_eq!(r.status, RunStatus::Failed);
+    }
+
+    #[test]
+    fn a_run_restored_from_its_previous_version_starts_nothing_without_approval() {
+        let dir = std::env::temp_dir().join(format!("kelpie-runs-restored-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut runs = Runs { path: dir.join("runs.json"), list: vec![run_of(vec![new_task("a", &[])])] };
+        runs.save().unwrap();
+        runs.list[0].tasks[0].status = TaskStatus::Running;
+        runs.list[0].tasks[0].session_id = Some("s-a".into());
+        runs.save().unwrap();
+        // The file is damaged: the version from before `a` started comes back, and `a` may have started in the lost save.
+        std::fs::write(dir.join("runs.json"), b"").unwrap();
+        let mut back = Runs::load(&dir);
+        assert!(back.list[0].tasks[0].approve && !back.list[0].tasks[0].approved);
+        let (acts, _) = back.step(0, |_| None);
+        assert!(acts.is_empty(), "{acts:?}");
+        assert_eq!(back.list[0].tasks[0].status, TaskStatus::WaitingApproval);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

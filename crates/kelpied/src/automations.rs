@@ -1222,7 +1222,7 @@ impl Automations {
     fn migrate(&mut self) -> Result<()> {
         let bak = self.path.with_file_name("automations.json.bak");
         if !bak.exists() {
-            std::fs::copy(&self.path, &bak)?;
+            kelpie_proto::durable::copy(&self.path, &bak)?;
         }
         self.write()
     }

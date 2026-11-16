@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use kelpie_proto::durable::{LoadError, Source};
+use kelpie_proto::durable::{LoadError, Loaded, Source};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::session::SessionSpec;
@@ -87,7 +87,13 @@ pub fn load_state<T: DeserializeOwned>(path: &Path) -> std::result::Result<Optio
 
 /// [`load_state`] with a parser of its own (one that also rejects a document of the wrong shape).
 pub fn load_state_with<T, E: std::fmt::Display>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Result<T, E>) -> std::result::Result<Option<T>, LoadError> {
-    let loaded = kelpie_proto::durable::load(path, parse);
+    load_state_from(path, parse, false).map(|o| o.map(|l| l.value))
+}
+
+/// The load behind [`load_state`], saying which version was used. `unless_removed`: a missing file stays
+/// missing (a store whose removal is a reset, or whose previous version could undo a revocation).
+pub fn load_state_from<T, E: std::fmt::Display>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Result<T, E>, unless_removed: bool) -> std::result::Result<Option<Loaded<T>>, LoadError> {
+    let loaded = if unless_removed { kelpie_proto::durable::load_unless_removed(path, parse) } else { kelpie_proto::durable::load(path, parse) };
     match &loaded {
         Ok(Some(l)) if l.source == Source::Previous => match &l.damaged {
             Some(d) => tracing::warn!("{} is damaged ({}); restored its previous version{}", path.display(), d.reason, d.kept_at.as_ref().map(|k| format!(", a copy was kept at {}", k.display())).unwrap_or_default()),
@@ -96,7 +102,7 @@ pub fn load_state_with<T, E: std::fmt::Display>(path: &Path, parse: impl Fn(&[u8
         Err(e) => tracing::warn!("{}: {e}", path.display()),
         _ => {}
     }
-    loaded.map(|o| o.map(|l| l.value))
+    loaded
 }
 
 /// [`load_state`] for a store that starts empty when nothing usable is there, as it always did.

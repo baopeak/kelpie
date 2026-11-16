@@ -199,6 +199,9 @@ pub struct Daemon {
     /// Path of this executable; agents call it back as `kelpied hook …`.
     pub exe: PathBuf,
     meta_dirty: AtomicBool,
+    /// Held while sessions and snapshots are written: one save at a time, so an older one never lands after a newer
+    /// one (the shutdown's last save waits for the ticker's), and the ticker skips a round while one is under way.
+    persisting: Mutex<()>,
     pub shutdown: tokio::sync::Notify,
     workspace_meta: Mutex<MetaStore>,
     /// Review notes on worktrees' diffs (see `notes.rs`).
@@ -397,6 +400,7 @@ impl Daemon {
                 data_dir,
                 exe,
                 meta_dirty: AtomicBool::new(false),
+                persisting: Mutex::new(()),
                 shutdown: tokio::sync::Notify::new(),
             }
         })
@@ -1727,6 +1731,7 @@ impl Daemon {
 
     /// Persists metadata (when dirty) and screen snapshots (when changed or `force`).
     pub fn persist(&self, force: bool) {
+        let _one_at_a_time = self.persisting.lock();
         if force || self.meta_dirty.swap(false, Ordering::Relaxed) {
             if let Err(e) = self.store.save_sessions(&self.saved_sessions()) {
                 tracing::warn!("save sessions: {e:#}");
@@ -1873,20 +1878,24 @@ impl Daemon {
                     }
                 }
             }
-            if now.duration_since(last_persist) > Duration::from_secs(30) || self.meta_dirty.load(Ordering::Relaxed) {
+            // Not awaited: every file is flushed to the disk, which a busy disk makes slow, and the ticker never waits on it.
+            // A round that finds a save under way is left to the next tick.
+            if (now.duration_since(last_persist) > Duration::from_secs(30) || self.meta_dirty.load(Ordering::Relaxed)) && !self.persisting.is_locked() {
                 let me = self.clone();
                 let full = now.duration_since(last_persist) > Duration::from_secs(30);
                 if full {
                     last_persist = now;
                 }
-                let _ = tokio::task::spawn_blocking(move || {
+                tokio::task::spawn_blocking(move || {
                     if full {
                         me.persist(false)
-                    } else if me.meta_dirty.swap(false, Ordering::Relaxed) {
-                        let _ = me.store.save_sessions(&me.saved_sessions());
+                    } else if me.meta_dirty.load(Ordering::Relaxed) {
+                        let _one_at_a_time = me.persisting.lock();
+                        if me.meta_dirty.swap(false, Ordering::Relaxed) {
+                            let _ = me.store.save_sessions(&me.saved_sessions());
+                        }
                     }
-                })
-                .await;
+                });
             }
         }
     }
@@ -2597,7 +2606,7 @@ fn policy_object(bytes: &[u8]) -> Result<Value, String> {
 }
 
 fn load_policy(data_dir: &std::path::Path) -> Policy {
-    let file = crate::persist::load_state_with(&data_dir.join(POLICY_FILE), policy_object).ok().flatten();
+    let file = crate::persist::load_state_from(&data_dir.join(POLICY_FILE), policy_object, true).ok().flatten().map(|l| l.value);
     let get = |key: &str| file.as_ref().and_then(|v| v.get(key));
     Policy {
         agents_control_others: get("agents_control_others").and_then(Value::as_bool).unwrap_or(true),
@@ -2614,8 +2623,8 @@ fn save_policy(data_dir: &std::path::Path, policy: &Policy) {
     let path = data_dir.join(POLICY_FILE);
     // A damaged file comes back from its previous version. One that cannot be read as settings, with
     // no usable previous version, is kept beside the new one, not written over.
-    let parsed = match crate::persist::load_state_with(&path, policy_object) {
-        Ok(found) => found,
+    let parsed = match crate::persist::load_state_from(&path, policy_object, true) {
+        Ok(found) => found.map(|l| l.value),
         Err(LoadError::Damaged(_)) => {
             if let Err(e) = std::fs::read(&path).and_then(|bytes| kelpie_proto::durable::write(&data_dir.join(format!("{POLICY_FILE}.unreadable")), &bytes)) {
                 tracing::warn!("keep the unreadable {POLICY_FILE}: {e}");

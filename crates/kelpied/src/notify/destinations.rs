@@ -345,7 +345,9 @@ impl Destinations {
     }
 
     fn remove(&self, dest: &Dest) {
-        if let Some(worker) = self.workers.lock().remove(dest) {
+        // The workers' lock is let go first: a save under way may hold `retired`, and nothing else waits on the disk.
+        let worker = self.workers.lock().remove(dest);
+        if let Some(worker) = worker {
             *worker.retired.lock() = true;
         }
         let _ = std::fs::remove_file(path_of(&self.shared.dir, dest));

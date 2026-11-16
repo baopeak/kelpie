@@ -45,8 +45,8 @@ pub fn askpass_env(exe: &Path, host_id: &str) -> Vec<(String, String)> {
 /// host without a user logs in as whoever ssh's config says: `user@alias` gets its password only when `ssh -G`
 /// reports that same user for the alias.
 pub fn host_id_for_alias(dest: &str) -> Option<String> {
-    let bytes = std::fs::read(hosts_path()).ok()?;
-    host_id_in(&serde_json::from_slice(&bytes).ok()?, dest, config_user)
+    let hosts = crate::durable::read_either(&hosts_path(), |b| serde_json::from_slice::<serde_json::Value>(b))?;
+    host_id_in(&hosts, dest, config_user)
 }
 
 /// The user ssh logs in as for `alias` with Kelpie's config (`ssh -G`, which reads the config and connects nowhere).

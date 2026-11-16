@@ -104,10 +104,13 @@ function createAppStore() {
   let saveTimer = 0;
   /** Set when saving could destroy data we could not back up or do not understand. */
   let persistBlocked = false;
+  /** Saves run one at a time, in order: each is flushed to the disk, and on a slow disk an older one must not land after a newer one. */
+  let saving: Promise<unknown> = Promise.resolve();
+  const queueSave = (snapshot: unknown) => (saving = saving.catch(() => {}).then(() => ipc.saveState(snapshot)));
   const persist = () => {
     if (!loaded() || persistBlocked) return;
     clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => void ipc.saveState(JSON.parse(JSON.stringify(state))).catch(() => {}), 400);
+    saveTimer = window.setTimeout(() => void queueSave(JSON.parse(JSON.stringify(state))).catch(() => {}), 400);
   };
   const update = (fn: (s: AppState) => void) => {
     setState(produce(fn));
@@ -117,7 +120,7 @@ function createAppStore() {
   async function saveNow() {
     if (!loaded() || persistBlocked) throw new Error(t("App state cannot be saved in this session."));
     clearTimeout(saveTimer);
-    await ipc.saveState(JSON.parse(JSON.stringify(state)));
+    await queueSave(JSON.parse(JSON.stringify(state)));
   }
   const canPersist = () => loaded() && !persistBlocked;
 

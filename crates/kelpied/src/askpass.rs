@@ -7,7 +7,7 @@
 
 /// Prints the answer for `prompt` and returns the exit code (1 = no answer).
 pub fn run(prompt: &str) -> i32 {
-    let hosts = std::fs::read(kelpie_proto::data_dir().join("ssh").join("hosts.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(serde_json::Value::Null);
+    let hosts = kelpie_proto::durable::read_either(&kelpie_proto::ssh::hosts_path(), |b| serde_json::from_slice::<serde_json::Value>(b)).unwrap_or(serde_json::Value::Null);
     let preferred = std::env::var("KELPIE_ASKPASS").unwrap_or_default();
     match answer(prompt, &hosts, &preferred).and_then(|key| secret(&key)) {
         Some(s) => {

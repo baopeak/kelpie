@@ -768,8 +768,19 @@ impl Notifier {
     pub fn with_destinations(data_dir: &std::path::Path, secrets: Arc<dyn SecretStore>, destinations: Arc<destinations::Destinations>) -> Notifier {
         let path = data_dir.join("notify.json");
         // A file that is not there is no channel on. One that cannot be read says nothing, and what the channels had to send stays until it can.
-        let read = match crate::persist::load_state::<Config>(&path) {
-            Ok(found) => Some(found.unwrap_or_default()),
+        // A file that was removed stays removed. One restored from its previous version (a save behind) ends a Telegram approval
+        // binding: the save it misses may have unbound it, and a kill switch that comes back on its own is none.
+        let read = match crate::persist::load_state_from(&path, |b| serde_json::from_slice::<Config>(b), true) {
+            Ok(Some(l)) if l.source == kelpie_proto::durable::Source::Previous => {
+                let mut c = l.value;
+                if c.telegram.mode == TelegramMode::ApproveLow {
+                    c.telegram.mode = TelegramMode::AlertLink;
+                    c.telegram.user_id.clear();
+                    c.telegram.user_name.clear();
+                }
+                Some(c)
+            }
+            Ok(found) => Some(found.map(|l| l.value).unwrap_or_default()),
             Err(_) => None,
         };
         destinations.set_config_known(read.is_some());

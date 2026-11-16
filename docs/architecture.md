@@ -71,8 +71,11 @@ their full size with every byte zero. Every file Kelpie owns is therefore writte
 `kelpie_proto::durable` (app and daemon alike): a uniquely named temporary file beside the target, `sync_all`,
 then one atomic replace (on Windows a POSIX-semantics rename on the open handle, so readers of the old file
 keep reading it, flushed again afterwards, with `MoveFileEx` write-through on file systems without POSIX
-renames; on Unix `rename` and an fsync of the folder). A refused replace (a scanner holding the file) is
-retried briefly; a failed one removes its temporary file and leaves the target as it was.
+renames; on Unix `rename` and an fsync of the folder, the temporary file created with the target's
+permissions). A refused replace (a scanner holding the file) is retried for up to about a second; a failed
+one removes its temporary file and leaves the target as it was. The daemon's ticker hands its periodic saves
+(`sessions.json`, snapshots) to a blocking task and never waits on them; saves run one at a time, and the
+shutdown's last save waits for one under way. The window's app-state saves are queued the same way.
 
 State files also keep their last good version as `<name>.prev` (`write_with_prev`). The current file is
 copied there (itself atomically) only when it is whole and valid JSON, and only then is the target
@@ -80,18 +83,28 @@ replaced, so at every instant at least one of the two is complete, and a damaged
 previous one. `durable::load` reads the file and falls back to `.prev` when it is missing, empty, all zero
 bytes or does not parse. It keeps a copy of the damaged file as `<name>.damaged-<ms>` (the newest three,
 not repeated for the same bytes), sweeps temporary files older than a day, and reports which one it used. A
-file that cannot be read at all (locked, no permission) is an error, never a fallback, and nothing is
-written over it. Only when both are unusable does each caller do what it did before (the window's
+read that fails for another reason (a scanner holding the file) is tried again for about 300 ms; a file that
+still cannot be read is an error, never a fallback, handled as before: the window copies the file aside
+before it starts fresh, or saves nothing; saved replies turn read-only; the mobile store, automations and the
+transfer journal write nothing over it; the daemon's other stores start empty. Only when both are unusable does each caller do what it did before (the window's
 backup-and-fresh-start, the mobile store's `unreadable` copy with phone access off, the automations file set
 aside, the transfer journal's damaged copy, an empty store for the rest).
 
+The previous version is one save behind, so a restore undoes the last change. Where that change can be a
+revocation or a started action, a removed file stays removed (`load_unless_removed`: removing it is a reset)
+and a restore fails closed: `mobile.v2.json` comes back with phone access off, `notify.json` without a
+Telegram approval binding (back to alert links), and a run in `runs.json` starts none of its unstarted tasks
+without approval. `policy.json` also stays removed when removed. Plugin approvals keep no previous version:
+a damaged file approves nothing.
+
 | Kept with `.prev` | Durable only, and why |
 |---|---|
-| App: `app-state.json`, `chat-bookmarks.json`, `ssh/hosts.json`, `plugins/approvals.json`. Daemon: `sessions.json`, `policy.json`, `custom-agents.json`, `automations.json`, `workspace-meta.json`, `review-notes.json`, `runs.json`, `scheduled.json` (both removed when empty), the sub-session outcome record, `checkpoints/config.json`, `notify.json`, `mobile.v2.json`, `transfers.json` | Rebuilt or rewritten anyway: `usage-cache.json` and `history-cache.json` (caches), `snapshots/<id>.ansi` (the last screen, rewritten on every save), checkpoint logs (rebuilt from their git refs), `automations.json.v2` (a copy itself), generated agent settings and MCP config, the generated SSH config, the daemon slot's files, the auth token (new at each daemon start; written private). Transient: the notify outbox (an older version would send delivered alerts again). The user's or an agent's files: the editor's saves, agent configuration and its backups, `known_hosts`, exports and settings backups, account homes, moved transcripts, the data-folder migration |
+| App: `app-state.json`, `chat-bookmarks.json`, `ssh/hosts.json` (also read with its previous version by `askpass` and the host-id lookup). Daemon: `sessions.json`, `policy.json`, `custom-agents.json`, `automations.json`, `workspace-meta.json`, `review-notes.json`, `runs.json`, `scheduled.json` (both removed when empty), the sub-session outcome record, `checkpoints/config.json`, `notify.json`, `mobile.v2.json`, `transfers.json` | Rebuilt or rewritten anyway: `usage-cache.json` and `history-cache.json` (caches), `snapshots/<id>.ansi` (the last screen, rewritten on every save), checkpoint logs (rebuilt from their git refs), `automations.json.v2` (a copy itself), generated agent settings and MCP config, the generated SSH config, the daemon slot's files, the auth token (new at each daemon start; written private). Transient: the notify outbox (an older version would send delivered alerts again). Security: `plugins/approvals.json` (above). Copies kept once: `automations.json.bak`, `known_hosts.old`, installed plugin files. The user's or an agent's files: the editor's saves, agent configuration and its backups, `known_hosts`, imported SSH keys, exports and settings backups, account homes, moved transcripts, the data-folder migration |
 
-Not changed: append-only logs (daemon log, phone audit log, browser-agent log) and pid files, browser
-screenshots and pasted attachments (each a new file), and file transfers, which have their own partial file,
-rename and fsync option.
+Not changed: append-only logs (daemon log, phone audit log, browser-agent log), pid files and the empty
+data-folder migration markers, browser screenshots and pasted attachments (each a new file), and file
+transfers, which have their own partial file, rename and fsync option. A restored `scheduled.json` can report
+a timer that was cancelled in the lost save as lost; such timers are only reported, never fired.
 
 ### Platforms
 

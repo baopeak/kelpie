@@ -112,11 +112,23 @@ impl std::error::Error for LoadError {}
 /// Reads `path` with `parse`, falling back to `<name>.prev` when the file is missing, empty, all
 /// zeros or rejected by `parse`. A damaged file is left in place (the next write replaces it) and a
 /// timestamped copy is kept beside it for diagnosis. `Ok(None)`: there is no file at all, or only a
-/// damaged previous copy, which is what a first start looks like.
+/// damaged previous copy, which is what a first start looks like. A read that fails for another
+/// reason (a scanner holding the file) is tried again briefly before it is an error.
 pub fn load<T, E: Display>(path: &Path, parse: impl Fn(&[u8]) -> Result<T, E>) -> Result<Option<Loaded<T>>, LoadError> {
+    load_with(path, parse, true)
+}
+
+/// [`load`] for a file whose previous version must not come back when the file was removed (by the
+/// person, as a reset): only a file that is there and damaged falls back to `<name>.prev`.
+pub fn load_unless_removed<T, E: Display>(path: &Path, parse: impl Fn(&[u8]) -> Result<T, E>) -> Result<Option<Loaded<T>>, LoadError> {
+    load_with(path, parse, false)
+}
+
+fn load_with<T, E: Display>(path: &Path, parse: impl Fn(&[u8]) -> Result<T, E>, when_missing: bool) -> Result<Option<Loaded<T>>, LoadError> {
     sweep_stale_temps(path, STALE_TEMP);
     let damaged = match read_usable(path, &parse) {
         Ok(Some(value)) => return Ok(Some(Loaded { value, source: Source::Current, damaged: None })),
+        Ok(None) if !when_missing => return Ok(None),
         Ok(None) => None,
         Err(Bad::Io(e)) => return Err(LoadError::Io(e)),
         Err(Bad::Damaged(reason, bytes)) => Some(Damaged { reason, kept_at: keep_damaged(path, &bytes) }),
@@ -128,6 +140,12 @@ pub fn load<T, E: Display>(path: &Path, parse: impl Fn(&[u8]) -> Result<T, E>) -
     }
 }
 
+/// The file, or else its previous version, when one of them is usable; `None` otherwise. Never writes (no damaged
+/// copy, no sweep): for a helper process that only looks.
+pub fn read_either<T, E: Display>(path: &Path, parse: impl Fn(&[u8]) -> Result<T, E>) -> Option<T> {
+    [path.to_path_buf(), prev_path(path)].iter().find_map(|p| std::fs::read(p).ok().filter(|b| damage(b).is_none()).and_then(|b| parse(&b).ok()))
+}
+
 enum Bad {
     Io(io::Error),
     Damaged(String, Vec<u8>),
@@ -135,10 +153,18 @@ enum Bad {
 
 /// `Ok(None)`: no such file.
 fn read_usable<T, E: Display>(path: &Path, parse: &impl Fn(&[u8]) -> Result<T, E>) -> Result<Option<T>, Bad> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Bad::Io(e)),
+    let mut tries = 0;
+    let bytes = loop {
+        match std::fs::read(path) {
+            Ok(b) => break b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // A folder, or a file that stays locked: an error, never a fallback.
+            Err(e) if tries >= 3 || std::fs::metadata(path).is_ok_and(|m| m.is_dir()) => return Err(Bad::Io(e)),
+            Err(_) => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     };
     if let Some(reason) = damage(&bytes) {
         return Err(Bad::Damaged(reason.into(), bytes));
@@ -231,6 +257,21 @@ enum NewMode {
     Like(u32),
 }
 
+/// The permissions of a file being replaced: its temporary file has them from the start, so a private
+/// file's new content is never readable by others, even for a moment.
+fn existing_mode(target: &Path) -> Option<NewMode> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(target).ok().map(|m| NewMode::Like(m.permissions().mode() & 0o7777))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        None
+    }
+}
+
 /// A copy of `path` gets its permissions (a private file's copy stays private).
 fn mode_of(path: &Path) -> NewMode {
     #[cfg(unix)]
@@ -266,7 +307,7 @@ fn replace_with(path: &Path, mode: NewMode, fill: impl FnOnce(&mut std::fs::File
     for _ in 0..16 {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
         let tmp = dir.join(format!(".{name}.{}-{}-{nanos:08x}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
-        match open_new(&tmp, mode) {
+        match open_new(&tmp, existing_mode(&target).unwrap_or(mode)) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             r => {
                 opened = Some(r.map(|f| (tmp, f)));
@@ -321,9 +362,9 @@ fn retrying(mut op: impl FnMut() -> io::Result<()>) -> io::Result<()> {
     loop {
         match op() {
             // 32: ERROR_SHARING_VIOLATION.
-            Err(e) if (e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(32)) && attempt < 5 => {
+            Err(e) if (e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(32)) && attempt < 8 => {
                 attempt += 1;
-                std::thread::sleep(Duration::from_millis(20 * attempt));
+                std::thread::sleep(Duration::from_millis(25 * attempt));
             }
             done => return done,
         }
@@ -526,6 +567,20 @@ mod tests {
         std::fs::write(prev_path(&path), br#"{"v":1}"#).unwrap();
         let loaded = load_json(&path).unwrap().unwrap();
         assert_eq!((loaded.value, loaded.source, loaded.damaged), (serde_json::json!({"v": 1}), Source::Previous, None));
+    }
+
+    #[test]
+    fn a_removed_file_does_not_come_back_when_asked_but_a_damaged_one_does() {
+        let d = Dir::new();
+        let path = d.0.join("state.json");
+        write_with_prev(&path, br#"{"v":1}"#, is_json).unwrap();
+        write_with_prev(&path, br#"{"v":2}"#, is_json).unwrap();
+        std::fs::write(&path, [0u8; 7]).unwrap();
+        let loaded = load_unless_removed(&path, parse).unwrap().unwrap();
+        assert_eq!((loaded.value, loaded.source), (serde_json::json!({"v": 1}), Source::Previous));
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_unless_removed(&path, parse).unwrap().is_none(), "removed: a reset, not damage");
+        assert!(load_json(&path).unwrap().is_some(), "the plain load still restores it");
     }
 
     #[test]

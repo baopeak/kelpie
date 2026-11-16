@@ -647,8 +647,8 @@ pub async fn ssh_key_import(source: String, name: String, passphrase: String) ->
         let e = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if e.contains("incorrect passphrase") || passphrase.is_empty() && e.contains("passphrase") { "this key needs its passphrase".into() } else { format!("not a usable private key: {e}") });
     }
-    std::fs::copy(&source, &target).map_err(err)?;
-    std::fs::write(dir.join(format!("{name}.pub")), &out.stdout).map_err(err)?;
+    kelpie_proto::durable::copy(Path::new(&source), &target).map_err(err)?;
+    kelpie_proto::durable::write(&dir.join(format!("{name}.pub")), &out.stdout).map_err(err)?;
     Ok(target.to_string_lossy().into_owned())
 }
 
@@ -754,7 +754,7 @@ pub async fn ssh_known_hosts_remove(lines: Vec<usize>) -> CmdResult<()> {
         let file = known_hosts_file();
         let text = std::fs::read_to_string(&file).map_err(err)?;
         let kept: Vec<&str> = text.lines().enumerate().filter(|(i, _)| !lines.contains(i)).map(|(_, l)| l).collect();
-        std::fs::copy(&file, file.with_extension("old")).map_err(err)?;
+        kelpie_proto::durable::copy(&file, &file.with_extension("old")).map_err(err)?;
         write_atomic(&file, format!("{}\n", kept.join("\n")).as_bytes()).map_err(err)
     })
     .await

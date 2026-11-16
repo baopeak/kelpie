@@ -37,15 +37,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The approved manifests; a file damaged by a power cut comes back from its previous version, and one
-/// that cannot be used approves nothing.
+/// The approved manifests. A file that cannot be used approves nothing: it keeps no previous version, which could
+/// bring back an approval the person withdrew; the plugins are approved again.
 fn approvals() -> BTreeMap<String, String> {
-    crate::fs_ops::load_state(&plugins_dir().join("approvals.json")).ok().flatten().unwrap_or_default()
+    std::fs::read(plugins_dir().join("approvals.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 fn save_approvals(map: &BTreeMap<String, String>) -> CmdResult<()> {
     std::fs::create_dir_all(plugins_dir()).map_err(err)?;
-    crate::fs_ops::save_state(&plugins_dir().join("approvals.json"), &serde_json::to_vec_pretty(map).map_err(err)?)
+    kelpie_proto::durable::write(&plugins_dir().join("approvals.json"), &serde_json::to_vec_pretty(map).map_err(err)?).map_err(err)
 }
 
 /// What a manifest may contain; anything else is reported, not silently used.
@@ -205,7 +205,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
         if ty.is_dir() {
             copy_dir(&e.path(), &to.join(&name))?;
         } else if ty.is_file() {
-            std::fs::copy(e.path(), to.join(&name))?;
+            kelpie_proto::durable::copy(&e.path(), &to.join(&name))?;
         }
     }
     Ok(())

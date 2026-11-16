@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, Mac};
-use kelpie_proto::durable::LoadError;
+use kelpie_proto::durable::{LoadError, Source};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -454,14 +454,23 @@ pub struct Loaded {
     pub fresh: bool,
 }
 
-/// A file damaged by a power cut comes back from its previous version (`<file>.prev`) when that one is whole.
+/// A file damaged by a power cut comes back from its previous version (`<file>.prev`) when that one is whole, with phone access
+/// off: that version is one save behind, and the save it misses may have revoked a phone. A file that was removed stays removed.
 pub fn load(dir: &Path) -> Loaded {
     let path = dir.join(FILE);
-    match crate::persist::load_state::<Store>(&path) {
-        Ok(Some(store)) if store.version == VERSION => Loaded { store, broken: None, fresh: false },
-        Ok(Some(store)) => {
-            let bytes = std::fs::read(&path).unwrap_or_default();
-            broken(&path, &bytes, format!("{FILE} has format {} (this Kelpie reads {VERSION}): it was written by another version", store.version), None)
+    match crate::persist::load_state_from(&path, |b| serde_json::from_slice::<Store>(b), true) {
+        Ok(Some(l)) if l.value.version == VERSION => {
+            let mut store = l.value;
+            if l.source == Source::Previous && store.enabled {
+                tracing::warn!("{FILE} was restored from its previous version: phone access is off until it is turned on again");
+                store.enabled = false;
+            }
+            Loaded { store, broken: None, fresh: false }
+        }
+        Ok(Some(l)) => {
+            let read_from = if l.source == Source::Previous { kelpie_proto::durable::prev_path(&path) } else { path.clone() };
+            let bytes = std::fs::read(&read_from).unwrap_or_default();
+            broken(&path, &bytes, format!("{FILE} has format {} (this Kelpie reads {VERSION}): it was written by another version", l.value.version), None)
         }
         Ok(None) => Loaded { store: from_legacy(dir), broken: None, fresh: true },
         Err(LoadError::Damaged(d)) => {
@@ -1125,8 +1134,12 @@ mod tests {
         std::fs::write(d.join(FILE), vec![0u8; size]).unwrap();
         let l = load(&d);
         assert!(l.broken.is_none(), "{:?}", l.broken);
-        assert!(l.store.enabled);
+        assert!(!l.store.enabled, "phone access is off: the lost save may have revoked a phone");
         assert_eq!(l.store.port, Some(4321));
+        // Removed rather than damaged: a reset, so its previous version does not come back.
+        std::fs::remove_file(d.join(FILE)).unwrap();
+        assert!(load(&d).fresh);
+        std::fs::write(d.join(FILE), vec![0u8; size]).unwrap();
         // With no usable previous version, it is reported as before and phone access stays off.
         std::fs::write(d.join(format!("{FILE}.prev")), b"{trunc").unwrap();
         let l = load(&d);
