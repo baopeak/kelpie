@@ -836,7 +836,9 @@ impl Controller {
             self.hw_times.pop_front();
         }
         let p95 = percentile(self.hw_times.iter().map(|(_, ms)| *ms), 0.95);
-        if self.rung() == LOWEST && p95.is_some_and(|p| p > HW_SLOW_MS) {
+        // A stream started low is at the lowest rung for the machine's load, not because the encoder fell there: on a loaded machine the
+        // software encoder would cost more CPU still, so the hardware one is judged only once the encoder's own load has had its say.
+        if self.rung() == LOWEST && !self.started_low && p95.is_some_and(|p| p > HW_SLOW_MS) {
             let since = *self.hw_slow_since.get_or_insert(now);
             if now.saturating_sub(since) >= HW_SLOW_FOR_MS {
                 self.asked_software = true;
@@ -1544,6 +1546,11 @@ mod tests {
             c.on_encoded(150.0, t);
         }
         assert_eq!(c.rung(), LOWEST);
+        // A slow hardware encoder at the lowest rung it started at is not swapped for the software one, which costs the loaded machine more.
+        let mut slow = Controller::new((1920, 1080), false, false, 0);
+        slow.set_level(2, 0);
+        slow.start_low();
+        assert!((0..60_000).step_by(200).all(|t| slow.on_encoded(60.0, t).is_none()), "no UseSoftware while started low");
         // However far it climbs, the level's cap holds: 15 fps and 720 lines at L2.
         c.overuse.rung = 0;
         assert_eq!((c.params().fps, c.params().h), (15, 720));

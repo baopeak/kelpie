@@ -34,8 +34,8 @@ export function busyText(reason: string | null | undefined, busy: BusyInfo | nul
   switch (why) {
     case "memory":
       return pct !== null && mb !== null
-        ? t("Only {pct} % of the computer's memory is free ({mb} MB): too little to show its screen. Close some programs on the computer.", { pct, mb })
-        : t("The computer is short of memory: too little to show its screen. Close some programs on the computer.");
+        ? t("Only {pct} % of the computer's memory is free ({mb} MB). Close some programs on the computer.", { pct, mb })
+        : t("The computer is short of memory. Close some programs on the computer.");
     case "cpu":
       return `${cpu !== null ? t("The computer's processor is fully busy ({cpu} %).", { cpu }) : t("The computer's processor is fully busy.")} ${heavy}`;
     case "lag":

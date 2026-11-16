@@ -5,8 +5,8 @@ const t = (s: string, vars?: Record<string, string | number>) => (vars ? s.repla
 
 describe("why the computer is too busy for its screen", () => {
   it("names the reason with the computer's numbers and what helps", () => {
-    expect(busyText("memory", { memory_free: 11.4, memory_free_mb: 812 }, "x", t)).toBe("Only 11 % of the computer's memory is free (812 MB): too little to show its screen. Close some programs on the computer.");
-    expect(busyText("memory", { memory_free: null, memory_free_mb: null }, "x", t), "the test hook pins the load: no numbers").toBe("The computer is short of memory: too little to show its screen. Close some programs on the computer.");
+    expect(busyText("memory", { memory_free: 11.4, memory_free_mb: 812 }, "x", t)).toBe("Only 11 % of the computer's memory is free (812 MB). Close some programs on the computer.");
+    expect(busyText("memory", { memory_free: null, memory_free_mb: null }, "x", t), "the test hook pins the load: no numbers").toBe("The computer is short of memory. Close some programs on the computer.");
     expect(busyText("cpu", { cpu: 98.6 }, "x", t)).toBe("The computer's processor is fully busy (99 %). Wait for a build or another heavy task on it to finish.");
     expect(busyText("cpu", {}, "x", t)).toBe("The computer's processor is fully busy. Wait for a build or another heavy task on it to finish.");
     expect(busyText("lag", { lag_ms: 250 }, "x", t)).toBe("The computer is responding slowly. Wait for a build or another heavy task on it to finish.");

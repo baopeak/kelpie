@@ -455,7 +455,7 @@ describe("one screen from the phone", () => {
     const r = rig({}, { startQueue: [busy, busy] });
     await r.s.openPicker();
     await r.s.pick("w:1:2");
-    expect(r.s.state).toMatchObject({ phase: "pick", message: "Only 6 % of the computer's memory is free (480 MB): too little to show its screen. Close some programs on the computer.", retry: { target: "w:1:2", attempt: 0, at: r.now() + BUSY_RETRY_MS[0] } });
+    expect(r.s.state).toMatchObject({ phase: "pick", message: "Only 6 % of the computer's memory is free (480 MB). Close some programs on the computer.", retry: { target: "w:1:2", attempt: 0, at: r.now() + BUSY_RETRY_MS[0] } });
     r.advance(BUSY_RETRY_MS[0] - 1);
     await settle();
     expect(r.starts.length, "not before the wait").toBe(1);
@@ -493,6 +493,15 @@ describe("one screen from the phone", () => {
     stopped.advance(10 * 60_000);
     await settle();
     expect(stopped.starts.length, "Stop trying stops it").toBe(1);
+
+    const locked = rig({ start: busy });
+    await locked.s.openPicker();
+    await locked.s.pick("w:1:2");
+    locked.s.locked();
+    locked.advance(10 * 60_000);
+    await settle();
+    expect(locked.starts.length, "the phone locking stops it").toBe(1);
+    expect(locked.s.state?.retry).toBeNull();
 
     const closed = rig({ start: busy });
     await closed.s.openPicker();

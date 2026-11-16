@@ -1108,13 +1108,16 @@ fn a_screen_is_gated_by_the_memory_it_needs_not_by_a_share_of_all_memory() {
     assert_eq!((r.code, r.reason), ("host_busy", Some("memory")));
     let busy = r.busy.expect("the numbers");
     assert_eq!((busy["memory_free"].as_u64(), busy["memory_free_mb"].as_u64(), busy["min_free_mb"].as_u64(), busy["level"].as_u64()), (Some(14), Some(MIN_FREE_MB - 1), Some(MIN_FREE_MB), Some(1)));
-    assert!(r.message.contains("Only 14 %") && r.message.contains(&format!("{} MB", MIN_FREE_MB - 1)), "{}", r.message);
+    assert!(r.message.contains("Only 14 %") && r.message.contains(&format!("({} MB)", MIN_FREE_MB - 1)), "{}", r.message);
     // Exactly the floor is enough.
     assert_eq!(admit(&status(Level::L0, &[]), Some(&measured(30.0, MIN_FREE_MB, 10.0, 1.0))), Admit::Start);
     // L3 refuses, and names what overloads it first.
     let Admit::Busy(r) = admit(&status(Level::L3, &["lag", "cpu"]), Some(&measured(40.0, 3000, 99.0, 250.0))) else { panic!("L3 refuses") };
     assert_eq!(r.reason, Some("lag"));
     assert_eq!((r.busy.as_ref().unwrap()["lag_ms"].as_u64(), r.busy.as_ref().unwrap()["cpu"].as_u64()), (Some(250), Some(99)));
+    // The reasons come in the order they were measured (lag, CPU, memory): memory, which is what raised it to L3 here, is named.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["cpu", "memory"]), Some(&measured(6.0, 1200, 99.0, 20.0))) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("memory"));
     let Admit::Busy(r) = admit(&status(Level::L3, &["cpu"]), Some(&measured(40.0, 3000, 99.4, 20.0))) else { panic!("L3 refuses") };
     assert!(r.message.contains("(99 %)"), "{}", r.message);
     let Admit::Busy(r) = admit(&status(Level::L3, &["thermal"]), Some(&measured(40.0, 3000, 20.0, 5.0))) else { panic!("L3 refuses") };

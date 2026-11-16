@@ -1153,6 +1153,7 @@ export class ScreenSession {
 
   /** The computer was too busy (`host_busy`): its reason on the picker, and one more try after the next wait, until they run out. */
   private busy(target: string, r: { message: string; reason?: string | null; busy?: BusyInfo | null }, attempt: number) {
+    this.stopRetry();
     const text = busyText(r.reason, r.busy, r.message, this.t);
     const wait = BUSY_RETRY_MS[attempt];
     if (wait === undefined) {
@@ -1437,6 +1438,8 @@ export class ScreenSession {
 
   /** This phone locked (it left the app, or its idle time ran out): the computer has ended the screen, and so does the page, at once. */
   locked() {
+    // A try waiting after a busy refusal ends too: it would start a screen with no tap once the phone is unlocked.
+    this.cancelRetry();
     if (this.state?.sc && this.state.phase !== "ended" && this.state.phase !== "pick") this.ended(this.t("Ended when this phone locked."));
   }
 

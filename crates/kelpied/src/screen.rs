@@ -75,9 +75,10 @@ pub const ROOM_FOR_VIDEO: usize = 3;
 const KEY_GAP: Duration = Duration::from_secs(1);
 /// Starting the helper and its first look can take a while on a busy machine. The app answers within its own shorter budget.
 pub const START_LIMIT: Duration = Duration::from_secs(15);
-/// New screens are refused with less memory free than this (MiB): what a stream takes on this computer (the helper's capture, colour
-/// conversion, encoder and peer, measured at about 150 MiB at 1080p), with room to spare for the rest of the machine. A share of all memory
-/// would refuse an 8 GB computer most of the day while a stream needs a small part of what is free.
+/// New screens are refused with less memory free than this (MiB): what a stream takes on this computer, with room to spare for the rest of
+/// the machine. The helper's capture, colour conversion, encoder and peer measured at most 170 MiB of its own and 72 MiB of GPU memory shared
+/// with the system for a 1080p monitor at full quality, peer to peer (a window started low: 100 and 32), so the floor is about 2.5 times
+/// that. A share of all memory would refuse an 8 GB computer most of the day while a stream needs a small part of what is free.
 pub const MIN_FREE_MB: u64 = 600;
 
 fn refused(code: &'static str, message: impl Into<String>) -> Refused {
@@ -97,6 +98,8 @@ pub enum Admit {
 
 /// Whether a new screen may start under `status`, with what the last second `measured` (none while the test hook pins the load: the level
 /// then stands for everything). L3 refuses, and so does free memory under `MIN_FREE_MB`; L2 starts low. A refusal says why, with the numbers.
+/// L3 includes memory under 8 % free (`load::Sample::wants`), which on a computer of about 7.5 GB or more is reached before the floor: the
+/// floor is what holds on smaller ones, and whatever the level holds back for a moment after memory comes back (it falls after ten seconds).
 pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample>) -> Admit {
     let free_mb = measured.and_then(|m| m.reading.memory_free_mb);
     let short = free_mb.is_some_and(|mb| mb < MIN_FREE_MB);
@@ -104,7 +107,7 @@ pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample
         return if status.level >= Level::L2 { Admit::Low } else { Admit::Start };
     }
     // The reason the phone names: memory when it is short here, else the first the level gives (`load::Sample::wants`).
-    let reason = if short { "memory" } else { status.reasons.iter().find_map(|r| BUSY_REASONS.iter().copied().find(|k| k == r)).unwrap_or("load") };
+    let reason = if short { "memory" } else { BUSY_REASONS.iter().copied().find(|k| status.reasons.iter().any(|r| r == k)).unwrap_or("load") };
     let reading = measured.map(|m| &m.reading);
     let whole = |v: Option<f64>| v.filter(|v| v.is_finite()).map(|v| v.round() as u64);
     let pct = whole(reading.and_then(|r| r.memory_free));
@@ -112,18 +115,19 @@ pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample
     let lag = whole(measured.map(|m| m.lag_p95_ms));
     let busy = json!({"level": status.level.number(), "reasons": status.reasons, "reason": reason, "memory_free": pct, "memory_free_mb": free_mb, "min_free_mb": MIN_FREE_MB, "cpu": cpu, "lag_ms": lag});
     let message = match (reason, pct, free_mb, cpu) {
-        ("memory", Some(pct), Some(mb), _) => format!("Only {pct} % of the computer's memory is free ({mb} MB): too little to show its screen. Close some programs on it; the phone tries again."),
-        ("memory", ..) => "The computer is short of memory: too little to show its screen. Close some programs on it; the phone tries again.".to_string(),
-        ("cpu", _, _, Some(cpu)) => format!("The computer's processor is fully busy ({cpu} %). The phone tries again when it is less busy."),
-        ("lag", ..) => "The computer is responding slowly. The phone tries again when it is less busy.".to_string(),
-        ("thermal", ..) => "The computer is too hot and slowed itself down. The phone tries again when it has cooled.".to_string(),
-        _ => "The computer is too busy to show its screen now. The phone tries again in a moment.".to_string(),
+        ("memory", Some(pct), Some(mb), _) => format!("Only {pct} % of the computer's memory is free ({mb} MB). Close some programs on it, then try again."),
+        ("memory", ..) => "The computer is short of memory. Close some programs on it, then try again.".to_string(),
+        ("cpu", _, _, Some(cpu)) => format!("The computer's processor is fully busy ({cpu} %). Try again when it is less busy."),
+        ("lag", ..) => "The computer is responding slowly. Try again when it is less busy.".to_string(),
+        ("thermal", ..) => "The computer is too hot and slowed itself down. Try again when it has cooled.".to_string(),
+        _ => "The computer is too busy to show its screen now. Try again in a moment.".to_string(),
     };
     Admit::Busy(Refused { code: "host_busy", message, reason: Some(reason), busy: Some(busy) })
 }
 
-/// The reasons that raise the load to L3 or hold it at L2, as a refusal names them (`load::Sample::wants`).
-const BUSY_REASONS: &[&str] = &["memory", "cpu", "lag", "thermal"];
+/// The reasons a refusal names, the first the load gives in this order (`load::Sample::wants`): memory and the event loop's lag are what raise
+/// it to L3; the CPU and heat hold it at L2 (or a test hook pins them).
+const BUSY_REASONS: &[&str] = &["memory", "lag", "cpu", "thermal"];
 
 /// The phone connection a verb came on.
 pub struct Phone<'a> {
