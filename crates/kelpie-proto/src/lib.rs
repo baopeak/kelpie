@@ -13,6 +13,7 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod durable;
 pub mod materialize;
 pub mod procs;
 pub mod redact;
@@ -301,15 +302,8 @@ pub fn write_user_token(endpoint: &Endpoint, token: &str) -> io::Result<()> {
         }
         let _ = ensure_private_dir(dir)?;
     }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    use std::io::Write as _;
-    opts.open(&path)?.write_all(token.as_bytes())
+    // Replaced whole: a client reading it never meets an empty or half-written token.
+    durable::write_private(&path, token.as_bytes())
 }
 
 /// `auth` params for a command-line client. Inside a session of this daemon it speaks for that
@@ -618,18 +612,11 @@ fn move_tree(from: &std::path::Path, to: &std::path::Path, top: bool, failed: &m
         }
         if is_dir {
             move_tree(&src, &dest, false, failed);
-        } else if let Err(e) = copy_file(&src, &dest) {
+        // Through a temporary name, flushed to the disk: an interrupted copy never looks like a finished file.
+        } else if let Err(e) = durable::copy(&src, &dest) {
             failed.push(io::Error::new(e.kind(), format!("{}: {e}", src.display())));
         }
     }
-}
-
-/// Copies through a temporary name, so an interrupted copy never looks like a finished file.
-fn copy_file(src: &std::path::Path, dest: &std::path::Path) -> io::Result<()> {
-    let mut part = dest.as_os_str().to_owned();
-    part.push(".part");
-    std::fs::copy(src, &part)?;
-    std::fs::rename(&part, dest)
 }
 
 /// Account homes created by the old install carry its marker file; Kelpie only removes folders
@@ -657,9 +644,7 @@ fn rewrite_state(dir: &std::path::Path, legacy: &std::path::Path, failed: &mut V
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         let new = rewrite_legacy_refs(&text, legacy, dir);
         if new != text {
-            let mut part = path.as_os_str().to_owned();
-            part.push(".part");
-            if let Err(e) = std::fs::write(&part, new).and_then(|_| std::fs::rename(&part, &path)) {
+            if let Err(e) = durable::write(&path, new.as_bytes()) {
                 failed.push(e);
             }
         }

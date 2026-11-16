@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::persist::write_atomic;
+use crate::persist::save_state;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -393,7 +393,7 @@ fn find_cycle(tasks: &[Task]) -> Option<Vec<String>> {
 impl Runs {
     pub fn load(dir: &Path) -> Runs {
         let path = dir.join("runs.json");
-        let mut list: Vec<Run> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut list: Vec<Run> = crate::persist::load_state_or_default(&path);
         // Tasks caught half-started by a daemon restart start again.
         for r in &mut list {
             for t in &mut r.tasks {
@@ -416,7 +416,7 @@ impl Runs {
     }
 
     pub fn save(&self) -> Result<()> {
-        write_atomic(&self.path, &serde_json::to_vec_pretty(&self.list)?)
+        save_state(&self.path, &serde_json::to_vec_pretty(&self.list)?)
     }
 
     pub fn get(&self, id: &str) -> Option<&Run> {

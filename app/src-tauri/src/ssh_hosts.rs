@@ -121,17 +121,21 @@ pub fn set_user_config(config: Option<String>) {
 }
 
 pub fn load() -> Vault {
-    std::fs::read(vault_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    load_strict().unwrap_or_default()
 }
 
 /// The saved hosts, or an error when the file exists but cannot be read or understood: a caller that
-/// writes the vault back must never take a damaged file for an empty one.
+/// writes the vault back must never take a damaged file for an empty one. A file damaged by a power cut
+/// comes back from its previous version.
 pub fn load_strict() -> CmdResult<Vault> {
-    match std::fs::read(vault_path()) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("the saved SSH hosts could not be read: {e}")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vault::default()),
-        Err(e) => Err(format!("the saved SSH hosts could not be read: {e}")),
-    }
+    crate::fs_ops::load_state::<Vault>(&vault_path()).map(Option::unwrap_or_default).map_err(|e| format!("the saved SSH hosts could not be read: {e}"))
+}
+
+/// Saves the vault, keeping the version it replaces as `ssh-hosts.json.prev`.
+fn save_vault(v: &Vault) -> CmdResult<()> {
+    let path = vault_path();
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(err)?;
+    crate::fs_ops::save_state(&path, &serde_json::to_vec_pretty(v).map_err(err)?)
 }
 
 /// Replaces the vault only while it is still `expected` (what the caller looked at); returns what was saved.
@@ -141,9 +145,7 @@ pub fn save_checked(expected: &Vault, next: Vault) -> CmdResult<Vault> {
     if &load_strict()? != expected {
         return Err("the saved SSH hosts changed since the preview; import again".into());
     }
-    let path = vault_path();
-    std::fs::create_dir_all(path.parent().unwrap()).map_err(err)?;
-    write_atomic(&path, &serde_json::to_vec_pretty(&v).map_err(err)?).map_err(err)?;
+    save_vault(&v)?;
     write_config(&v)?;
     Ok(v)
 }
@@ -180,11 +182,9 @@ fn not_found(program: &str) -> impl Fn(std::io::Error) -> String + '_ {
     move |e| if e.kind() == std::io::ErrorKind::NotFound { format!("{program} is not installed (OpenSSH client)") } else { format!("{program}: {e}") }
 }
 
-/// Temp file + rename, so a crash never leaves a torn file.
+/// Replaced whole and flushed to the disk, so neither a crash nor a power cut leaves a torn file.
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)
+    kelpie_proto::durable::write(path, data)
 }
 
 // ---------- validation and the generated config ----------
@@ -377,9 +377,7 @@ pub async fn ssh_vault_save(vault: Vault) -> CmdResult<Vault> {
     blocking(move || {
         let v = normalize(vault)?;
         let _guard = WRITE.lock().unwrap();
-        let path = vault_path();
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(err)?;
-        write_atomic(&path, &serde_json::to_vec_pretty(&v).map_err(err)?).map_err(err)?;
+        save_vault(&v)?;
         write_config(&v)?;
         Ok(v)
     })
@@ -403,7 +401,7 @@ pub async fn ssh_host_touch(id: String, os: Option<String>) -> CmdResult<Vault> 
             if let Some(os) = os.as_deref().map(token).filter(|o| !o.is_empty()) {
                 h.os = os;
             }
-            write_atomic(&vault_path(), &serde_json::to_vec_pretty(&v).map_err(err)?).map_err(err)?;
+            save_vault(&v)?;
         }
         Ok(v)
     })

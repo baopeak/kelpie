@@ -1806,8 +1806,11 @@ function createAppStore() {
     let saved: any = null;
     let problem: "unreadable" | "unknown" | null = null;
     let problemDetail = "";
+    let restored: { copy: string | null } | null = null;
     try {
-      saved = await ipc.loadState();
+      const loaded = await ipc.loadState();
+      saved = loaded.state;
+      if (loaded.restored) restored = { copy: loaded.damaged_copy };
     } catch (e) {
       problem = "unreadable";
       problemDetail = String(e);
@@ -1815,6 +1818,10 @@ function createAppStore() {
     const version = saved && typeof saved === "object" ? saved.version : undefined;
     if (saved !== null && !problem && !(Number.isInteger(version) && version >= 1)) problem = "unknown";
     let migrate = false;
+    if (restored && !problem) {
+      // The previous save was used instead of a file a sudden shutdown damaged: nothing was lost but the last changes.
+      notify(restored.copy ? t("Kelpie restored the app state from the previous save because the saved file was damaged. A copy of the damaged file was kept at {path}.", { path: restored.copy }) : t("Kelpie restored the app state from the previous save because the saved file was missing or damaged."), undefined, 12000);
+    }
     if (problem) {
       const copy = await ipc.stateBackup("unreadable").catch(() => null);
       if (copy) notify(problem === "unreadable" ? t("Saved app state could not be read ({error}); a copy was kept at {path}. Starting fresh.", { error: problemDetail, path: copy }) : t("Saved app state has an unknown format; a copy was kept at {path}. Starting fresh.", { path: copy }), undefined, 12000);

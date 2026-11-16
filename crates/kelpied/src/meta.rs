@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::persist::write_atomic;
+use crate::persist::save_state;
 use crate::session::now_millis;
 
 pub const STATUSES: &[&str] = &["todo", "progress", "review", "done"];
@@ -51,7 +51,7 @@ pub fn key(path: &str) -> String {
 impl MetaStore {
     pub fn load(dir: &Path) -> MetaStore {
         let path = dir.join("workspace-meta.json");
-        let map = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let map = crate::persist::load_state_or_default(&path);
         MetaStore { path, map }
     }
 
@@ -79,7 +79,7 @@ impl MetaStore {
         if out.comment.is_none() && out.status.is_none() {
             self.map.remove(&k);
         }
-        write_atomic(&self.path, &serde_json::to_vec_pretty(&self.map)?)?;
+        save_state(&self.path, &serde_json::to_vec_pretty(&self.map)?)?;
         Ok((k, out))
     }
 

@@ -1,10 +1,12 @@
 //! Durable session metadata (`sessions.json`) and last-screen snapshots (`snapshots/<id>.ansi`).
-//! All writes are atomic (temp file + rename) so a crash never leaves a torn file.
+//! All writes are atomic and flushed to the disk before the rename, so neither a crash nor a power
+//! cut leaves a torn or zero-filled file; `sessions.json` also keeps its previous version.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use kelpie_proto::durable::{LoadError, Source};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::session::SessionSpec;
 
@@ -40,14 +42,11 @@ impl Store {
     }
 
     pub fn load_sessions(&self) -> Vec<SavedSession> {
-        std::fs::read(self.dir.join("sessions.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        load_state_or_default(&self.dir.join("sessions.json"))
     }
 
     pub fn save_sessions(&self, sessions: &[SavedSession]) -> Result<()> {
-        write_atomic(&self.dir.join("sessions.json"), &serde_json::to_vec_pretty(sessions)?)
+        save_state(&self.dir.join("sessions.json"), &serde_json::to_vec_pretty(sessions)?)
     }
 
     fn snapshot_path(&self, id: &str) -> PathBuf {
@@ -68,90 +67,62 @@ impl Store {
     }
 }
 
+/// Atomically and durably replaces `path` (see [`kelpie_proto::durable`]). For files that are
+/// rebuilt or rewritten anyway (snapshots, generated configuration); state uses [`save_state`].
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Unique temp name: concurrent writers (ticker vs shutdown) never share a temp file.
-    let tmp = path.with_extension(format!("{}.{n}.tmp", std::process::id()));
-    let result = std::fs::write(&tmp, data).and_then(|()| {
-        #[cfg(windows)]
-        {
-            replace_open_file(&tmp, path)
-        }
-        #[cfg(not(windows))]
-        {
-            std::fs::rename(&tmp, path)
-        }
-    });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result.map_err(Into::into)
+    kelpie_proto::durable::write(path, data).map_err(Into::into)
 }
 
-#[cfg(windows)]
-fn replace_open_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::mem::{align_of, offset_of, size_of};
-    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{SetFileInformationByHandle, FileRenameInfoEx, DELETE, FILE_RENAME_INFO};
+/// Saves a JSON state file, keeping its last good version as `<name>.prev` for [`load_state`].
+pub fn save_state(path: &Path, data: &[u8]) -> Result<()> {
+    kelpie_proto::durable::write_with_prev(path, data, kelpie_proto::durable::is_json).map_err(Into::into)
+}
 
-    // Unlike MoveFileEx, POSIX replacement keeps old readers usable and lets new
-    // readers open the new file instead of encountering a delete-pending name.
-    // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
-    const REPLACE_IF_EXISTS: u32 = 1;
-    const POSIX_SEMANTICS: u32 = 2;
-    const { assert!(align_of::<usize>() >= align_of::<FILE_RENAME_INFO>()) };
-    let destination = std::path::absolute(destination)?;
-    let name_units = destination.as_os_str().encode_wide().count();
-    let name_bytes = u32::try_from(name_units.checked_mul(2).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination path is too long"))?)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination path is too long"))?;
-    let offset = offset_of!(FILE_RENAME_INFO, FileName);
-    let size = size_of::<FILE_RENAME_INFO>().max(offset + name_bytes as usize + 2);
-    let size_u32 = u32::try_from(size).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination path is too long"))?;
-    let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
-    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    // SAFETY: usize storage supplies native alignment, all bytes are initialized,
-    // and the allocation includes the complete variable-length UTF-16 filename.
-    unsafe {
-        (*info).Anonymous.Flags = REPLACE_IF_EXISTS | POSIX_SEMANTICS;
-        (*info).FileNameLength = name_bytes;
-        let name = storage.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>();
-        for (i, unit) in destination.as_os_str().encode_wide().chain([0]).enumerate() {
-            name.add(i).write(unit);
-        }
+/// Reads a state file written by [`save_state`]: from its previous version when the file is
+/// missing or damaged (a power cut), which is logged. `Ok(None)`: no file yet. `Err`: a file is
+/// there and neither it nor its previous version can be used (a copy of the damaged one was kept).
+pub fn load_state<T: DeserializeOwned>(path: &Path) -> std::result::Result<Option<T>, LoadError> {
+    load_state_with(path, |b| serde_json::from_slice::<T>(b))
+}
+
+/// [`load_state`] with a parser of its own (one that also rejects a document of the wrong shape).
+pub fn load_state_with<T, E: std::fmt::Display>(path: &Path, parse: impl Fn(&[u8]) -> std::result::Result<T, E>) -> std::result::Result<Option<T>, LoadError> {
+    let loaded = kelpie_proto::durable::load(path, parse);
+    match &loaded {
+        Ok(Some(l)) if l.source == Source::Previous => match &l.damaged {
+            Some(d) => tracing::warn!("{} is damaged ({}); restored its previous version{}", path.display(), d.reason, d.kept_at.as_ref().map(|k| format!(", a copy was kept at {}", k.display())).unwrap_or_default()),
+            None => tracing::warn!("{} is missing; restored its previous version", path.display()),
+        },
+        Err(e) => tracing::warn!("{}: {e}", path.display()),
+        _ => {}
     }
-    let file = std::fs::OpenOptions::new().access_mode(DELETE).open(source)?;
-    // SAFETY: the file owns a live handle with DELETE access; info points to the
-    // initialized, aligned buffer above and stays alive until this synchronous call ends.
-    let renamed = unsafe { SetFileInformationByHandle(file.as_raw_handle(), FileRenameInfoEx, info.cast(), size_u32) };
-    if renamed == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    loaded.map(|o| o.map(|l| l.value))
+}
+
+/// [`load_state`] for a store that starts empty when nothing usable is there, as it always did.
+pub fn load_state_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
+    load_state(path).ok().flatten().unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
-    fn replacing_a_published_file_preserves_old_and_new_readers() {
-        use std::io::Read;
-
-        let dir = std::env::temp_dir().join(format!("kelpie-publish-reader-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("state-雪.json");
-        write_atomic(&path, br#"{"revision":1}"#).unwrap();
-        let mut old_reader = std::fs::File::open(&path).unwrap();
-        write_atomic(&path, br#"{"revision":2}"#).unwrap();
-        let new_bytes = std::fs::read(&path).unwrap();
-        let mut old_bytes = Vec::new();
-        old_reader.read_to_end(&mut old_bytes).unwrap();
-        drop(old_reader);
-        std::fs::remove_dir_all(dir).unwrap();
-        assert_eq!(old_bytes, br#"{"revision":1}"#);
-        assert_eq!(new_bytes, br#"{"revision":2}"#);
+    fn sessions_zeroed_by_a_power_cut_come_back_from_the_previous_save() {
+        let dir = std::env::temp_dir().join(format!("kelpie-persist-{}", uuid::Uuid::new_v4()));
+        let store = Store::new(&dir);
+        let one = |id: &str| serde_json::from_str::<Vec<SavedSession>>(&format!(r#"[{{"spec":{{"id":"{id}","kind":"shell","cwd":"."}},"cols":80,"rows":24}}]"#)).unwrap();
+        store.save_sessions(&one("a")).unwrap();
+        store.save_sessions(&one("b")).unwrap();
+        assert_eq!(store.load_sessions()[0].spec.id, "b");
+        let file = dir.join("sessions.json");
+        std::fs::write(&file, vec![0u8; std::fs::metadata(&file).unwrap().len() as usize]).unwrap();
+        assert_eq!(store.load_sessions()[0].spec.id, "a", "the previous save");
+        // The next save replaces the zeroed file and keeps the good previous version.
+        store.save_sessions(&one("c")).unwrap();
+        assert_eq!(std::fs::read(dir.join("sessions.json.prev")).unwrap(), serde_json::to_vec_pretty(&one("a")).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

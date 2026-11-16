@@ -694,9 +694,9 @@ impl Checkpoints {
     pub fn new(data_dir: &Path, emit: Emit) -> Checkpoints {
         let dir = data_dir.join("checkpoints");
         let _ = std::fs::create_dir_all(&dir);
-        let enabled = std::fs::read(dir.join("config.json"))
+        let enabled = crate::persist::load_state::<Value>(&dir.join("config.json"))
             .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .flatten()
             .and_then(|v| v.get("enabled").and_then(Value::as_bool))
             .unwrap_or(DEFAULT_ENABLED);
         // Left over from a daemon that was killed mid-snapshot: stale index copies and their locks.
@@ -741,7 +741,7 @@ impl Checkpoints {
         }
         if let Some(on) = enabled {
             self.enabled.store(on, Ordering::Relaxed);
-            if let Err(e) = write_atomic(&self.dir.join("config.json"), json!({"enabled": on}).to_string().as_bytes()) {
+            if let Err(e) = crate::persist::save_state(&self.dir.join("config.json"), json!({"enabled": on}).to_string().as_bytes()) {
                 tracing::warn!("save checkpoint settings: {e:#}");
             }
         }

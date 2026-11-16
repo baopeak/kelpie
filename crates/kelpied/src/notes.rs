@@ -11,7 +11,7 @@ use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoints::{find_top, git};
-use crate::persist::write_atomic;
+use crate::persist::save_state;
 
 const MAX_NOTES: usize = 500;
 const MAX_NOTE: usize = 4000;
@@ -144,12 +144,12 @@ pub fn locate(top: &Path, file: &str, line: u32, old: bool, base: Option<&str>) 
 impl NoteStore {
     pub fn load(dir: &Path) -> NoteStore {
         let path = dir.join("review-notes.json");
-        let map = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let map = crate::persist::load_state_or_default(&path);
         NoteStore { path, map }
     }
 
     fn save(&self) -> Result<()> {
-        write_atomic(&self.path, &serde_json::to_vec_pretty(&self.map)?)
+        save_state(&self.path, &serde_json::to_vec_pretty(&self.map)?)
     }
 
     pub fn list(&self, key: &str) -> Vec<Note> {

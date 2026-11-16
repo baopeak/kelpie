@@ -35,16 +35,6 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 48 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-fn private(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
-
 /// Saves `old` (the file's content, none when it did not exist) and returns the copy's id.
 pub fn save(dir: &Path, path: &Path, old: Option<&str>, root: Option<&Path>) -> Res<String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("could not make the backup folder: {e}"))?;
@@ -58,13 +48,12 @@ pub fn save(dir: &Path, path: &Path, old: Option<&str>, root: Option<&Path>) -> 
     }
     if let Some(text) = old {
         let bak = dir.join(format!("{id}.bak"));
-        std::fs::write(&bak, text).map_err(|e| format!("could not write the backup: {e}"))?;
-        private(&bak);
+        kelpie_proto::durable::write_private(&bak, text.as_bytes()).map_err(|e| format!("could not write the backup: {e}"))?;
     }
     let info = BackupInfo { id: id.clone(), path: path.to_string_lossy().into_owned(), at: (now / 1000) as u64, existed: old.is_some(), bytes: old.map_or(0, |t| t.len() as u64), root: root.map(|r| r.to_string_lossy().into_owned()) };
     let meta = dir.join(format!("{id}.json"));
-    std::fs::write(&meta, serde_json::to_vec(&info).map_err(|e| e.to_string())?).map_err(|e| format!("could not write the backup: {e}"))?;
-    private(&meta);
+    // The record last, flushed like the copy: a backup that is listed is whole.
+    kelpie_proto::durable::write_private(&meta, &serde_json::to_vec(&info).map_err(|e| e.to_string())?).map_err(|e| format!("could not write the backup: {e}"))?;
     prune(dir, &hash);
     Ok(id)
 }

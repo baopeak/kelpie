@@ -17,7 +17,7 @@ use anyhow::{bail, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::persist::write_atomic;
+use crate::persist::save_state;
 
 /// What is typed.
 pub const CONTINUE_TEXT: &str = "continue";
@@ -59,19 +59,20 @@ impl ScheduledInputs {
     /// Reads what an earlier run left in `<dir>/scheduled.json` as lost, and starts empty.
     pub fn open(dir: &std::path::Path) -> ScheduledInputs {
         let path = dir.join("scheduled.json");
-        let lost: Vec<Scheduled> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let lost: Vec<Scheduled> = crate::persist::load_state_or_default(&path);
         ScheduledInputs { path: Some(path), items: Mutex::new(Vec::new()), lost: Mutex::new(lost) }
     }
 
     fn save(&self, items: &[Scheduled]) {
         let Some(path) = &self.path else { return };
         let written: Result<()> = if items.is_empty() {
-            match std::fs::remove_file(path) {
+            // The previous version goes first: left alone, it would come back as lost timers.
+            [kelpie_proto::durable::prev_path(path), path.clone()].iter().try_for_each(|p| match std::fs::remove_file(p) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
                 _ => Ok(()),
-            }
+            })
         } else {
-            serde_json::to_vec(items).map_err(anyhow::Error::from).and_then(|b| write_atomic(path, &b))
+            serde_json::to_vec(items).map_err(anyhow::Error::from).and_then(|b| save_state(path, &b))
         };
         if let Err(e) = written {
             tracing::warn!("save scheduled timers: {e:#}");
@@ -198,6 +199,7 @@ mod tests {
         assert_eq!((lost[0].session.as_str(), lost[0].generation, lost[0].turn), ("a", 2, 3));
         assert!(again.take_lost().is_empty(), "reported once");
         assert!(!dir.join("scheduled.json").exists(), "and not again after another restart");
+        assert!(!dir.join("scheduled.json.prev").exists(), "nor from the previous version");
         assert!(ScheduledInputs::open(&dir).take_lost().is_empty());
         // The last timer going away empties the file.
         again.schedule("c", 1, None, 1, 10_000, "meter", 0).unwrap();

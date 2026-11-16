@@ -67,7 +67,7 @@ pub(crate) fn seed_account(agent: &str, dir: &Path, src: &Path) -> CmdResult<()>
         _ => {
             let to = dir.join("config.toml");
             let base = std::fs::read_to_string(if to.exists() { to.clone() } else { src.join("config.toml") }).unwrap_or_default();
-            std::fs::write(&to, codex_file_store(&base)?).map_err(err)?;
+            kelpie_proto::durable::write(&to, codex_file_store(&base)?.as_bytes()).map_err(err)?;
         }
     }
     Ok(())
@@ -80,7 +80,7 @@ fn create_blocking(agent: &str, id: &str) -> CmdResult<String> {
     valid_id(id)?;
     let dir = account_dir(agent, id);
     std::fs::create_dir_all(&dir).map_err(err)?;
-    std::fs::write(dir.join(MARKER), format!("{agent}\n")).map_err(err)?;
+    kelpie_proto::durable::write(&dir.join(MARKER), format!("{agent}\n").as_bytes()).map_err(err)?;
     seed_account(agent, &dir, &default_home(agent))?;
     Ok(dir.to_string_lossy().into_owned())
 }
@@ -317,13 +317,8 @@ fn transcript_move(agent: &str, from: &Path, to: &Path, cwd: &str, id: &str, app
             if let Some(dir) = dst.parent() {
                 std::fs::create_dir_all(dir).map_err(err)?;
             }
-            // Through a temporary name: an interrupted copy never looks like a conversation.
-            let mut part = dst.as_os_str().to_owned();
-            part.push(".part");
-            if let Err(e) = std::fs::copy(src, &part).and_then(|_| std::fs::rename(&part, dst)) {
-                let _ = std::fs::remove_file(&part);
-                return Err(err(e));
-            }
+            // Through a temporary name, flushed to the disk: an interrupted copy never looks like a conversation.
+            kelpie_proto::durable::copy(src, dst).map_err(err)?;
         }
     }
     Ok(TranscriptMove { refusal: None, files: moves.len() as u32, bytes })

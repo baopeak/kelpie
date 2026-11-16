@@ -25,7 +25,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::persist::write_atomic;
+use crate::persist::save_state;
 use crate::session::{now_millis, SessionInfo};
 use crate::status::Status;
 
@@ -768,9 +768,8 @@ impl Notifier {
     pub fn with_destinations(data_dir: &std::path::Path, secrets: Arc<dyn SecretStore>, destinations: Arc<destinations::Destinations>) -> Notifier {
         let path = data_dir.join("notify.json");
         // A file that is not there is no channel on. One that cannot be read says nothing, and what the channels had to send stays until it can.
-        let read = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Config>(&bytes).ok(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Config::default()),
+        let read = match crate::persist::load_state::<Config>(&path) {
+            Ok(found) => Some(found.unwrap_or_default()),
             Err(_) => None,
         };
         destinations.set_config_known(read.is_some());
@@ -1102,7 +1101,7 @@ impl Notifier {
             if c.ntfy.enabled && self.secrets.get(K_TOPIC).is_none() {
                 self.secrets.set(K_TOPIC, &random_topic())?;
             }
-            write_atomic(&self.path, &serde_json::to_vec_pretty(&c)?)?;
+            save_state(&self.path, &serde_json::to_vec_pretty(&c)?)?;
             self.active.store(c.any_enabled(), Ordering::Relaxed);
             // In this order: a thread ending because its channel went looks at the configuration, and must find it off.
             *self.config.lock() = c.clone();

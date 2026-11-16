@@ -121,6 +121,28 @@ fn stale_runs_are_skipped() {
 // ---------- storage ----------
 
 #[test]
+fn a_file_zeroed_by_a_power_cut_comes_back_from_its_previous_version() {
+    let dir = scratch("zeroed");
+    let path = dir.join("automations.json");
+    let mut s = Automations::load(&dir);
+    s.upsert(auto(Every::Daily, "09:00", 0)).unwrap();
+    s.upsert(Automation { id: "b".into(), ..auto(Every::Daily, "10:00", 0) }).unwrap();
+    let size = std::fs::metadata(&path).unwrap().len() as usize;
+    std::fs::write(&path, vec![0u8; size]).unwrap();
+    let s = Automations::load(&dir);
+    assert!(s.broken().is_none(), "{:?}", s.broken());
+    assert_eq!(s.list.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["a"], "the version before the last save");
+    let told = s.unannounced.clone().expect("the user is told");
+    assert!(told.contains("previous version") && told.contains("damaged"), "{told}");
+    let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("automations.json.damaged-")).collect();
+    assert_eq!(std::fs::read(kept[0].path()).unwrap(), vec![0u8; size]);
+    // Missing altogether: the previous version too.
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(Automations::load(&dir).list.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_damaged_file_is_set_aside_and_never_overwritten() {
     let dir = scratch("corrupt");
     let path = dir.join("automations.json");

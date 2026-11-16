@@ -71,35 +71,45 @@ fn term_input(client: State<'_, Arc<DaemonClient>>, handle: u32, data: String, b
     client.input(handle, bytes).map_err(|e| e.to_string())
 }
 
-/// App UI state (projects, layouts, settings) — a single JSON document owned by the UI.
-#[tauri::command]
-async fn state_load() -> CmdResult<Value> {
-    crate::fs_ops::blocking(state_load_blocking).await
+/// The saved app state and where it came from.
+#[derive(serde::Serialize, Debug, PartialEq)]
+struct LoadedState {
+    /// `null`: nothing saved yet.
+    state: Value,
+    /// The file was missing or damaged (a power cut) and its previous save was used.
+    restored: bool,
+    /// Where a copy of the damaged file was kept.
+    damaged_copy: Option<String>,
 }
 
-fn state_load_blocking() -> CmdResult<Value> {
-    let path = kelpie_proto::data_dir().join("app-state.json");
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(err),
-        // Only a missing file means "no state yet"; a locked or unreadable one is an error the
-        // UI must not paper over with a fresh state (it would be saved over the file).
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
-        Err(e) => Err(err(e)),
+/// App UI state (projects, layouts, settings) — a single JSON document owned by the UI.
+#[tauri::command]
+async fn state_load() -> CmdResult<LoadedState> {
+    crate::fs_ops::blocking(|| state_load_from(&kelpie_proto::data_dir())).await
+}
+
+fn state_load_from(dir: &std::path::Path) -> CmdResult<LoadedState> {
+    // Only no file at all means "no state yet". A damaged file comes back from its previous save; one
+    // that cannot be read, or damaged with no usable previous save, is an error the UI must not paper
+    // over with a fresh state (it would be saved over the file).
+    match crate::fs_ops::load_state_from(&dir.join("app-state.json"), |b| serde_json::from_slice::<Value>(b)).map_err(err)? {
+        Some(l) => Ok(LoadedState {
+            state: l.value,
+            restored: l.source == kelpie_proto::durable::Source::Previous,
+            damaged_copy: l.damaged.and_then(|d| d.kept_at).map(|p| p.to_string_lossy().into_owned()),
+        }),
+        None => Ok(LoadedState { state: Value::Null, restored: false, damaged_copy: None }),
     }
 }
 
 #[tauri::command]
 async fn state_save(state: Value) -> CmdResult<()> {
-    crate::fs_ops::blocking(move || state_save_blocking(state)).await
+    crate::fs_ops::blocking(move || state_save_to(&kelpie_proto::data_dir(), &state)).await
 }
 
-fn state_save_blocking(state: Value) -> CmdResult<()> {
-    let dir = kelpie_proto::data_dir();
-    std::fs::create_dir_all(&dir).map_err(err)?;
-    let path = dir.join("app-state.json");
-    let tmp = dir.join("app-state.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&state).map_err(err)?).map_err(err)?;
-    std::fs::rename(&tmp, &path).map_err(err)
+fn state_save_to(dir: &std::path::Path, state: &Value) -> CmdResult<()> {
+    std::fs::create_dir_all(dir).map_err(err)?;
+    crate::fs_ops::save_state(&dir.join("app-state.json"), &serde_json::to_vec_pretty(state).map_err(err)?)
 }
 
 /// Copies `app-state.json` to `app-state.<label>-<time>.bak.json` before a migration or a
@@ -120,7 +130,7 @@ fn state_backup_blocking(label: String) -> CmdResult<Option<String>> {
     }
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let dst = dir.join(format!("app-state.{label}-{secs}.bak.json"));
-    std::fs::copy(&src, &dst).map_err(err)?;
+    kelpie_proto::durable::write(&dst, &std::fs::read(&src).map_err(err)?).map_err(err)?;
     // A migration that may run at every start (review notes) leaves a few copies, not one per start.
     if label == "notes" {
         prune_backups(&dir, "notes", 3);
@@ -167,46 +177,79 @@ mod backup_tests {
     }
 }
 
+#[cfg(test)]
+mod state_tests {
+    use super::{state_load_from, state_save_to};
+    use serde_json::{json, Value};
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kelpie-app-state-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn no_file_is_no_state_and_a_good_file_is_not_restored() {
+        let dir = dir("fresh");
+        let loaded = state_load_from(&dir).unwrap();
+        assert_eq!((loaded.state, loaded.restored), (Value::Null, false));
+        state_save_to(&dir, &json!({"version": 3, "projects": [1]})).unwrap();
+        let loaded = state_load_from(&dir).unwrap();
+        assert_eq!((loaded.state, loaded.restored, loaded.damaged_copy), (json!({"version": 3, "projects": [1]}), false, None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_state_zeroed_by_a_power_cut_is_restored_from_the_previous_save() {
+        let dir = dir("zeroed");
+        state_save_to(&dir, &json!({"version": 3, "projects": ["a"]})).unwrap();
+        state_save_to(&dir, &json!({"version": 3, "projects": ["a", "b"]})).unwrap();
+        let path = dir.join("app-state.json");
+        let zeros = vec![0u8; std::fs::metadata(&path).unwrap().len() as usize];
+        std::fs::write(&path, &zeros).unwrap();
+        let loaded = state_load_from(&dir).unwrap();
+        assert_eq!(loaded.state, json!({"version": 3, "projects": ["a"]}));
+        assert!(loaded.restored);
+        assert_eq!(std::fs::read(loaded.damaged_copy.unwrap()).unwrap(), zeros, "the damaged file is kept for diagnosis");
+        // Truncated instead of zeroed: the same.
+        std::fs::write(&path, br#"{"version": 3, "proj"#).unwrap();
+        assert!(state_load_from(&dir).unwrap().restored);
+        // Missing, with the previous save there: the same.
+        std::fs::remove_file(&path).unwrap();
+        assert!(state_load_from(&dir).unwrap().restored);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_state_with_no_usable_previous_save_is_an_error_and_is_not_written_over() {
+        let dir = dir("both");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app-state.json"), [0u8; 64]).unwrap();
+        std::fs::write(dir.join("app-state.json.prev"), b"{\"version\": 3, \"pro").unwrap();
+        let e = state_load_from(&dir).unwrap_err();
+        assert!(e.contains("zero"), "{e}");
+        assert_eq!(std::fs::read(dir.join("app-state.json")).unwrap(), [0u8; 64]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Replies the user saved from chats, with their full text: they outlast the session, and
 /// `app-state.json` is rewritten too often to carry them.
 const BOOKMARKS_FILE: &str = "chat-bookmarks.json";
 
 const MAX_BOOKMARKS_PER_PROJECT: usize = 500;
-/// A temporary file this old was left by a crash, not by a write under way.
-const BOOKMARKS_STALE_TEMP: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 #[tauri::command]
 async fn bookmarks_load() -> CmdResult<Vec<Value>> {
-    crate::fs_ops::blocking(|| {
-        let dir = kelpie_proto::data_dir();
-        if let Some(cutoff) = std::time::SystemTime::now().checked_sub(BOOKMARKS_STALE_TEMP) {
-            bookmarks_sweep_temps(&dir, cutoff);
-        }
-        bookmarks_read(&dir)
-    })
-    .await
-}
-
-/// Removes temporary files of writes that never finished (see `write_file_atomic`), older than `cutoff`.
-fn bookmarks_sweep_temps(dir: &std::path::Path, cutoff: std::time::SystemTime) {
-    let prefix = format!(".{BOOKMARKS_FILE}.");
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|at| at < cutoff);
-        if old && name.starts_with(&prefix) && name.ends_with(".tmp") {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
+    // Reading also sweeps temporary files of writes that never finished.
+    crate::fs_ops::blocking(|| bookmarks_read(&kelpie_proto::data_dir())).await
 }
 
 fn bookmarks_read(dir: &std::path::Path) -> CmdResult<Vec<Value>> {
-    match std::fs::read(dir.join(BOOKMARKS_FILE)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(err),
-        // As with the app state: only a missing file means "none yet". A file that is corrupt or
-        // locked is an error, and the UI then keeps its hands off it.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(err(e)),
-    }
+    // As with the app state: only no file means "none yet", and a damaged one comes back from its
+    // previous version. A file that is corrupt with no usable previous version, or locked, is an
+    // error, and the UI then keeps its hands off it.
+    crate::fs_ops::load_state::<Vec<Value>>(&dir.join(BOOKMARKS_FILE)).map(Option::unwrap_or_default).map_err(err)
 }
 
 /// The file after a change. `at_limit`: `add` was refused, its project has this many.
@@ -247,7 +290,7 @@ fn bookmarks_change(dir: &std::path::Path, add: Option<Value>, remove: Option<&s
     }
     if changed {
         std::fs::create_dir_all(dir).map_err(err)?;
-        config_transfer::write_file_atomic(&dir.join(BOOKMARKS_FILE), &serde_json::to_vec_pretty(&items).map_err(err)?)?;
+        crate::fs_ops::save_state(&dir.join(BOOKMARKS_FILE), &serde_json::to_vec_pretty(&items).map_err(err)?)?;
     }
     Ok(BookmarksApplied { items, at_limit })
 }
@@ -262,7 +305,7 @@ fn same_bookmark(a: &Value, b: &Value) -> bool {
 
 #[cfg(test)]
 mod bookmarks_tests {
-    use super::{bookmarks_change, bookmarks_read, bookmarks_sweep_temps, BOOKMARKS_FILE, MAX_BOOKMARKS_PER_PROJECT};
+    use super::{bookmarks_change, bookmarks_read, BOOKMARKS_FILE, MAX_BOOKMARKS_PER_PROJECT};
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
@@ -282,8 +325,12 @@ mod bookmarks_tests {
     }
 
     fn names(dir: &Path) -> Vec<String> {
-        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+        let mut n: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        n.sort();
+        n
     }
+
+    const PREV: &str = "chat-bookmarks.json.prev";
 
     #[test]
     fn a_missing_file_is_an_empty_list() {
@@ -302,7 +349,22 @@ mod bookmarks_tests {
         let done = bookmarks_change(&dir, None, Some("a")).unwrap();
         assert_eq!(done.items, [item("b", "p", "2")]);
         assert_eq!(bookmarks_read(&dir).unwrap(), done.items);
-        assert_eq!(names(&dir), [BOOKMARKS_FILE]);
+        assert_eq!(names(&dir), [BOOKMARKS_FILE, PREV], "only the previous version beside it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_zeroed_by_a_power_cut_comes_back_from_its_previous_version() {
+        let dir = dir("zeroed");
+        bookmarks_change(&dir, Some(item("a", "p", "1")), None).unwrap();
+        bookmarks_change(&dir, Some(item("b", "p", "2")), None).unwrap();
+        let path = dir.join(BOOKMARKS_FILE);
+        std::fs::write(&path, vec![0u8; std::fs::metadata(&path).unwrap().len() as usize]).unwrap();
+        assert_eq!(ids(&bookmarks_read(&dir).unwrap()), ["a"], "the previous save");
+        // A change goes on from it, and the good previous version is not replaced by the zeroed file.
+        let done = bookmarks_change(&dir, Some(item("c", "p", "3")), None).unwrap();
+        assert_eq!(ids(&done.items), ["a", "c"]);
+        assert_eq!(ids(&serde_json::from_slice::<Vec<Value>>(&std::fs::read(dir.join(PREV)).unwrap()).unwrap()), ["a"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -396,7 +458,7 @@ mod bookmarks_tests {
             }
         });
         assert_eq!(bookmarks_read(&dir).unwrap().len(), 16);
-        assert_eq!(names(&dir), [BOOKMARKS_FILE]);
+        assert_eq!(names(&dir), [BOOKMARKS_FILE, PREV]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -416,15 +478,13 @@ mod bookmarks_tests {
         write("chat-bookmarks.json.tmp", old);
         write(".chat-bookmarks.json.bak", old);
 
-        bookmarks_sweep_temps(&dir, SystemTime::now() - Duration::from_secs(24 * 60 * 60));
-        let mut left = names(&dir);
-        left.sort();
-        assert_eq!(left, [".chat-bookmarks.json.4-5-6.tmp", ".chat-bookmarks.json.bak", ".other.json.1-2-3.tmp", BOOKMARKS_FILE, "chat-bookmarks.json.tmp"]);
+        kelpie_proto::durable::sweep_stale_temps(&dir.join(BOOKMARKS_FILE), Duration::from_secs(24 * 60 * 60));
+        assert_eq!(names(&dir), [".chat-bookmarks.json.4-5-6.tmp", ".chat-bookmarks.json.bak", ".other.json.1-2-3.tmp", BOOKMARKS_FILE, "chat-bookmarks.json.tmp"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_corrupt_file_errors_and_stays_byte_identical() {
+    fn a_corrupt_file_with_no_previous_version_errors_and_stays_byte_identical() {
         let dir = dir("corrupt");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(BOOKMARKS_FILE);
@@ -435,7 +495,8 @@ mod bookmarks_tests {
             bookmarks_change(&dir, Some(item("new", "p", "1")), None).unwrap_err();
             bookmarks_change(&dir, None, Some("a")).unwrap_err();
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
-            assert_eq!(names(&dir), [BOOKMARKS_FILE]);
+            // A copy of it is kept for diagnosis, and nothing else is written.
+            assert!(names(&dir).iter().all(|n| n == BOOKMARKS_FILE || n.starts_with("chat-bookmarks.json.damaged-")), "{:?}", names(&dir));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

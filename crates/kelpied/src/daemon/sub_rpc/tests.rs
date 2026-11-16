@@ -921,6 +921,20 @@ fn an_unreadable_policy_file_is_kept_not_written_over() {
 }
 
 #[test]
+fn a_policy_file_zeroed_by_a_power_cut_comes_back_from_its_previous_version() {
+    let (d, dir) = daemon("sub-policy-prev");
+    call(&d, "daemon.set_policy", json!({"sub_sessions": "allow", "agents_control_others": false})).unwrap();
+    call(&d, "daemon.set_policy", json!({"sub_sessions": "ask"})).unwrap();
+    let size = std::fs::metadata(dir.join(POLICY_FILE)).unwrap().len() as usize;
+    std::fs::write(dir.join(POLICY_FILE), vec![0u8; size]).unwrap();
+    let policy = crate::daemon::load_policy(&dir);
+    assert_eq!(policy.sub.mode.as_str(), "allow", "the version before the last save");
+    assert!(!policy.agents_control_others);
+    assert!(!dir.join(format!("{POLICY_FILE}.unreadable")).exists(), "nothing was lost, so nothing is set aside");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_create_from_a_session_asks_the_user_like_a_spawn() {
     let Some(agent) = agents::installed_presets().first().copied() else { return };
     let (d, dir) = daemon("sub-create-ask");

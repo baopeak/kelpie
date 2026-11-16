@@ -1728,7 +1728,9 @@ a setting.
   and log, *Export and import settings*, *Stop daemon & all sessions*.
 
 Settings and layouts live in `app-state.json` in the data folder; when its format changes the
-old file is first copied to `app-state.v<N>.bak.json`.
+old file is first copied to `app-state.v<N>.bak.json`. If the computer loses power and the file is damaged,
+Kelpie restores it from the previous save (`app-state.json.prev`), says so when it starts, and keeps a copy of
+the damaged file beside it; only the last changes before the shutdown are lost.
 
 ### Export and import settings
 

@@ -14,7 +14,10 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +111,9 @@ pub struct Outbox {
     path: PathBuf,
     /// False when the file could not be read: nothing is written over what may still be there.
     durable: bool,
+    /// Set when the destination is taken away. Every write and removal checks it under its lock, so one under way
+    /// finishes before it is set, and none follows: the file is gone for good once the remover has deleted it.
+    retired: Option<Arc<Mutex<bool>>>,
     entries: Vec<Entry>,
     failures: u32,
     next_at: u64,
@@ -115,7 +121,7 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn open(path: &Path) -> Outbox {
-        let mut out = Outbox { path: path.to_path_buf(), durable: true, entries: Vec::new(), failures: 0, next_at: 0 };
+        let mut out = Outbox { path: path.to_path_buf(), durable: true, retired: None, entries: Vec::new(), failures: 0, next_at: 0 };
         match std::fs::read(path) {
             Ok(bytes) => match serde_json::from_slice::<OnDisk>(&bytes) {
                 Ok(d) if d.version == VERSION => {
@@ -140,8 +146,16 @@ impl Outbox {
         out
     }
 
+    /// [`Outbox::open`] for a destination's thread, which stops touching the file once `retired` is set.
+    pub fn open_retirable(path: &Path, retired: Arc<Mutex<bool>>) -> Outbox {
+        let mut out = Outbox::open(path);
+        out.retired = Some(retired);
+        out
+    }
+
     fn save(&self) {
-        if !self.durable {
+        let gate = self.retired.as_ref().map(|r| r.lock());
+        if !self.durable || gate.as_ref().is_some_and(|retired| **retired) {
             return;
         }
         if self.entries.is_empty() {
@@ -310,7 +324,8 @@ impl Outbox {
     /// The destination is gone, and what it had to send with it.
     pub fn discard(&mut self) {
         self.entries.clear();
-        if self.durable {
+        let gate = self.retired.as_ref().map(|r| r.lock());
+        if self.durable && !gate.as_ref().is_some_and(|retired| **retired) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
