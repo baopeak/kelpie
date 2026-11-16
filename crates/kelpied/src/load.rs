@@ -173,6 +173,13 @@ pub struct Reading {
     pub thermal: bool,
 }
 
+impl Reading {
+    /// Memory so short it overloads the machine (L3): the system's low-memory signal, or under 8 % free.
+    pub fn short_of_memory(&self) -> bool {
+        self.low_memory || self.memory_free.is_some_and(|m| m < 8.0)
+    }
+}
+
 /// One second's measurements.
 #[derive(Debug, Clone, Default)]
 pub struct Sample {
@@ -205,7 +212,7 @@ impl Sample {
         } else if r.cpu.is_some_and(|c| c > 85.0) {
             ask(Level::L1, "cpu");
         }
-        if r.low_memory || r.memory_free.is_some_and(|m| m < 8.0) {
+        if r.short_of_memory() {
             ask(Level::L3, "memory");
         } else if r.memory_free.is_some_and(|m| m < 15.0) {
             ask(Level::L2, "memory");

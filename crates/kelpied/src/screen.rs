@@ -106,8 +106,10 @@ pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample
     if status.level < Level::L3 && !short {
         return if status.level >= Level::L2 { Admit::Low } else { Admit::Start };
     }
-    // The reason the phone names: memory when it is short here, else the first the level gives (`load::Sample::wants`).
-    let reason = if short { "memory" } else { BUSY_REASONS.iter().copied().find(|k| status.reasons.iter().any(|r| r == k)).unwrap_or("load") };
+    // The reason the phone names, from what was measured: memory when it is under the floor or short enough to overload the machine, else the
+    // first of the level's reasons in `BUSY_REASONS` (a computer held at L2 for memory and overloaded by lag is refused for the lag).
+    let memory = short || (status.level >= Level::L3 && measured.is_some_and(|m| m.reading.short_of_memory()));
+    let reason = if memory { "memory" } else { BUSY_REASONS.iter().copied().find(|k| status.reasons.iter().any(|r| r == k)).unwrap_or("load") };
     let reading = measured.map(|m| &m.reading);
     let whole = |v: Option<f64>| v.filter(|v| v.is_finite()).map(|v| v.round() as u64);
     let pct = whole(reading.and_then(|r| r.memory_free));
@@ -125,9 +127,10 @@ pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample
     Admit::Busy(Refused { code: "host_busy", message, reason: Some(reason), busy: Some(busy) })
 }
 
-/// The reasons a refusal names, the first the load gives in this order (`load::Sample::wants`): memory and the event loop's lag are what raise
-/// it to L3; the CPU and heat hold it at L2 (or a test hook pins them).
-const BUSY_REASONS: &[&str] = &["memory", "lag", "cpu", "thermal"];
+/// The reasons a refusal names, the first the load gives in this order (`load::Sample::wants`), when memory is not short (`admit` names it
+/// then): the event loop's lag raises it to L3; the CPU and heat hold it at L2; memory last, for a level held a moment after memory came back
+/// or pinned by the test hook.
+const BUSY_REASONS: &[&str] = &["lag", "cpu", "thermal", "memory"];
 
 /// The phone connection a verb came on.
 pub struct Phone<'a> {

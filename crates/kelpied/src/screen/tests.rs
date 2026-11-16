@@ -1118,6 +1118,9 @@ fn a_screen_is_gated_by_the_memory_it_needs_not_by_a_share_of_all_memory() {
     // The reasons come in the order they were measured (lag, CPU, memory): memory, which is what raised it to L3 here, is named.
     let Admit::Busy(r) = admit(&status(Level::L3, &["cpu", "memory"]), Some(&measured(6.0, 1200, 99.0, 20.0))) else { panic!("L3 refuses") };
     assert_eq!(r.reason, Some("memory"));
+    // The owner's computer held at L2 for memory (11 % free, above the floor), overloaded by a build's lag: refused for the lag.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["lag", "memory"]), Some(&measured(11.0, 900, 60.0, 250.0))) else { panic!("L3 refuses") };
+    assert_eq!(r.reason, Some("lag"));
     let Admit::Busy(r) = admit(&status(Level::L3, &["cpu"]), Some(&measured(40.0, 3000, 99.4, 20.0))) else { panic!("L3 refuses") };
     assert!(r.message.contains("(99 %)"), "{}", r.message);
     let Admit::Busy(r) = admit(&status(Level::L3, &["thermal"]), Some(&measured(40.0, 3000, 20.0, 5.0))) else { panic!("L3 refuses") };
