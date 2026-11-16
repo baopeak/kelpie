@@ -2,7 +2,10 @@
 // agents on a host, its files (two panes and a transfer queue, see files/), keys, known hosts and port forwards.
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { OsBadge } from "./host-target";
-import { findTerminalTheme, terminalThemes } from "../lib/terminal-themes";
+import { findTerminalTheme, isCustomTheme, terminalThemes } from "../lib/terminal-themes";
+import { CURSOR_STYLES, FONT_SIZE, LINE_HEIGHT, resolveAppearance } from "../lib/terminal-appearance";
+import { TerminalPreview } from "./terminal-preview";
+import { openThemeEditor } from "./theme-editor";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { store } from "../lib/store";
@@ -439,6 +442,17 @@ function HostEditor(props: { host: SshHost; onDone: (id?: string) => void }) {
   const [keys] = createResource(() => listKeys().catch(() => []));
   const [error, setError] = createSignal<string | null>(null);
   const set = <K extends keyof SshHost>(k: K, v: SshHost[K]) => setH({ ...h(), [k]: v });
+  const inRange = (v: number | null, r: { min: number; max: number }) => v === null || (Number.isFinite(v) && v >= r.min && v <= r.max);
+  const sizeOk = () => inRange(h().fontSize, FONT_SIZE);
+  const heightOk = () => inRange(h().lineHeight, LINE_HEIGHT);
+  const cursorLabel = (c: string) => (c === "block" ? t("Block") : c === "underline" ? t("Underline") : t("Bar"));
+  const ownFont = () => !!(h().fontFamily.trim() || h().fontSize !== null || h().lineHeight !== null || h().cursorStyle || h().cursorBlink !== null);
+  const hasOwnLook = () => !!h().terminalTheme || ownFont();
+  /** The Appearance row's summary: the theme, and whether the font or cursor is the host's own. */
+  const appearanceSummary = () => {
+    const theme = findTerminalTheme(h().terminalTheme)?.label ?? t("App's terminal theme");
+    return ownFont() ? t("{theme} · own font and cursor", { theme }) : theme;
+  };
   const envText = () => Object.entries(h().env).map(([k, v]) => `${k}=${v}`).join("\n");
   /** Saves the host (and its password); the saved id, or undefined after showing the error. */
   const save = async (): Promise<string | undefined> => {
@@ -549,17 +563,61 @@ function HostEditor(props: { host: SshHost; onDone: (id?: string) => void }) {
           <Opt label={t("Keepalive (s)")} value={String(h().keepalive || t("Default"))}>
             <input class="text-input" style={{ width: "80px" }} value={h().keepalive} onInput={(e) => set("keepalive", Number(e.currentTarget.value) || 0)} />
           </Opt>
-          <Opt label={t("Appearance")} value={findTerminalTheme(h().terminalTheme)?.label ?? t("App's terminal theme")}>
-            <div class="inline-fields">
+          <Opt label={t("Appearance")} value={appearanceSummary()}>
+            <div class="drawer-sub" id="host-label-colour">{t("Label colour")}</div>
+            <div class="inline-fields" role="group" aria-labelledby="host-label-colour">
               <For each={["", "#5b8def", "#3fb950", "#d29922", "#f85149", "#a371f7", "#39c5cf"]}>
-                {(c) => <button class={`host-swatch${h().color === c ? " on" : ""}`} style={{ background: c || "var(--bg-elev-2)" }} title={c || t("None")} onClick={() => set("color", c)} />}
+                {(c) => <button class={`host-swatch${h().color === c ? " on" : ""}`} style={{ background: c || "var(--bg-elev-2)" }} title={c || t("None")} aria-label={c || t("None")} aria-pressed={h().color === c} onClick={() => set("color", c)} />}
               </For>
             </div>
-            <select class="text-input" data-field="terminal-theme" value={h().terminalTheme} onChange={(e) => set("terminalTheme", e.currentTarget.value)}>
-              <option value="">{t("App's terminal theme")}</option>
-              <For each={terminalThemes()}>{(th) => <option value={th.id}>{th.label}</option>}</For>
-            </select>
-            <div class="form-note">{t("Panes on this host use this terminal theme, so they never look like another machine.")}</div>
+            <div class="drawer-field">
+              <label for="host-terminal-theme">{t("Colour theme")}</label>
+              <div class="inline-fields">
+                <select id="host-terminal-theme" class="text-input" data-field="terminal-theme" style={{ flex: 1, width: "auto" }} value={h().terminalTheme} onChange={(e) => set("terminalTheme", e.currentTarget.value)}>
+                  <option value="">{t("App's terminal theme")}</option>
+                  <For each={terminalThemes()}>{(th) => <option value={th.id}>{th.label}</option>}</For>
+                </select>
+                <button class="btn" data-action="edit-themes" onClick={() => openThemeEditor(isCustomTheme(h().terminalTheme) ? h().terminalTheme : undefined)}>{t("Edit themes…")}</button>
+              </div>
+            </div>
+            <label class="drawer-field">
+              <span>{t("Font")}</span>
+              <input class="text-input mono" data-field="font-family" value={h().fontFamily} placeholder={t("App's font")} onInput={(e) => set("fontFamily", e.currentTarget.value)} />
+            </label>
+            <div class="inline-fields">
+              <label class="drawer-field">
+                <span>{t("Font size")}</span>
+                <input class="text-input num" type="number" data-field="font-size" min={FONT_SIZE.min} max={FONT_SIZE.max} placeholder={String(store.state.settings.fontSize)} value={h().fontSize ?? ""}
+                  aria-invalid={!sizeOk()} onChange={(e) => set("fontSize", e.currentTarget.value === "" ? null : Number(e.currentTarget.value))} />
+              </label>
+              <label class="drawer-field">
+                <span>{t("Line height")}</span>
+                <input class="text-input num" type="number" data-field="line-height" step="0.05" min={LINE_HEIGHT.min} max={LINE_HEIGHT.max} placeholder={String(store.state.settings.lineHeight)} value={h().lineHeight ?? ""}
+                  aria-invalid={!heightOk()} onChange={(e) => set("lineHeight", e.currentTarget.value === "" ? null : Number(e.currentTarget.value))} />
+              </label>
+            </div>
+            <Show when={!sizeOk() || !heightOk()}>
+              <div class="form-note error">{t("Font size goes from {a} to {b}, line height from {c} to {d}; outside that the app's value is used.", { a: FONT_SIZE.min, b: FONT_SIZE.max, c: LINE_HEIGHT.min, d: LINE_HEIGHT.max })}</div>
+            </Show>
+            <div class="drawer-sub" id="host-cursor-style">{t("Cursor style")}</div>
+            <div class="seg" role="group" aria-labelledby="host-cursor-style" data-field="cursor-style">
+              <For each={[["", t("App's")], ...CURSOR_STYLES.map((c) => [c, cursorLabel(c)])]}>
+                {([v, label]) => <button class={h().cursorStyle === v ? "on" : ""} aria-pressed={h().cursorStyle === v} data-value={v} onClick={() => set("cursorStyle", v)}>{label}</button>}
+              </For>
+            </div>
+            <div class="drawer-sub" id="host-cursor-blink">{t("Cursor blink")}</div>
+            <div class="seg" role="group" aria-labelledby="host-cursor-blink" data-field="cursor-blink">
+              <For each={[[null, t("App's")], [true, t("On")], [false, t("Off")]] as [boolean | null, string][]}>
+                {([v, label]) => <button class={h().cursorBlink === v ? "on" : ""} aria-pressed={h().cursorBlink === v} data-value={String(v)} onClick={() => set("cursorBlink", v)}>{label}</button>}
+              </For>
+            </div>
+            <TerminalPreview look={resolveAppearance(store.state.settings, h())} host={h().alias || h().hostname || undefined} />
+            <div class="inline-fields">
+              <div class="form-note" style={{ flex: 1 }}>{t("Panes on this host look like this, so they never look like another machine.")}</div>
+              <Show when={hasOwnLook()}>
+                <button class="btn" data-action="reset-appearance" onClick={() => setH({ ...h(), terminalTheme: "", fontFamily: "", fontSize: null, lineHeight: null, cursorStyle: "", cursorBlink: null })}>{t("Use the app's")}</button>
+              </Show>
+            </div>
           </Opt>
           <Opt label={t("SSH alias")} value={h().alias || t("from the name")}>
             <input class="text-input mono" value={h().alias} placeholder={t("from the name")} onInput={(e) => set("alias", e.currentTarget.value)} />

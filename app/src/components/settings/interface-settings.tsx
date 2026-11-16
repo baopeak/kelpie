@@ -3,7 +3,8 @@ import { t } from "../../lib/i18n";
 import { For, Show, Suspense, lazy } from "solid-js";
 import { store } from "../../lib/store";
 import { NOTIFY_API } from "../../lib/notify-events";
-import { terminalThemes } from "../../lib/terminal-themes";
+import { isCustomTheme, terminalThemes } from "../../lib/terminal-themes";
+import { openThemeEditor } from "../theme-editor";
 import { applySettings, Choice, SettingRow, Toggle } from "./setting-row";
 
 const PushSettings = lazy(() => import("./push-settings"));
@@ -30,6 +31,9 @@ export function TerminalSettings() {
       <SettingRow id="renderer">
         <Choice value={s().webgl ? "gpu" : "dom"} options={[["gpu", t("WebGL (GPU)")], ["dom", t("DOM")]]} onChange={(v) => applySettings({ webgl: v === "gpu" })} />
       </SettingRow>
+      <SettingRow id="cursor-style">
+        <Choice value={s().cursorStyle ?? "bar"} options={[["block", t("Block")], ["underline", t("Underline")], ["bar", t("Bar")]]} onChange={(v) => applySettings({ cursorStyle: v })} />
+      </SettingRow>
       <SettingRow id="cursor-blink">
         <Toggle on={s().cursorBlink} onChange={(on) => applySettings({ cursorBlink: on })} />
       </SettingRow>
@@ -38,10 +42,13 @@ export function TerminalSettings() {
           onChange={(e) => applySettings({ shellArgs: e.currentTarget.value.trim() ? e.currentTarget.value.trim().split(/\s+/) : [] })} />
       </SettingRow>
       <SettingRow id="terminal-theme">
-        <select class="text-input" value={s().terminalTheme ?? "default"} onChange={(e) => applySettings({ terminalTheme: e.currentTarget.value })}>
-          <option value="default">{t("Default (follows the app theme)")}</option>
-          <For each={terminalThemes()}>{(th) => <option value={th.id}>{th.label}</option>}</For>
-        </select>
+        <div class="inline-fields">
+          <select class="text-input" aria-label={t("Colour theme")} value={s().terminalTheme ?? "default"} onChange={(e) => applySettings({ terminalTheme: e.currentTarget.value })}>
+            <option value="default">{t("Default (follows the app theme)")}</option>
+            <For each={terminalThemes()}>{(th) => <option value={th.id}>{th.label}</option>}</For>
+          </select>
+          <button class="btn" data-action="edit-themes" onClick={() => openThemeEditor(isCustomTheme(s().terminalTheme) ? s().terminalTheme : undefined)}>{t("Edit themes…")}</button>
+        </div>
       </SettingRow>
       <SettingRow id="floating-terminal">
         <Toggle on={s().floatingTerminal} onChange={(on) => { store.setSettings({ floatingTerminal: on }); if (!on) store.toggleFloating(false); }} />

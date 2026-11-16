@@ -494,10 +494,31 @@ prompt**; for a terminal it is a startup command.
 ### Terminals
 
 Right-click a terminal for copy / paste / select all / clear, **Copy Context** (the last 400
-lines as text), splits, your quick commands and hand-offs. `Ctrl/⌘+click` on an address opens it; on a file path
+lines as text), **Appearance…**, splits, your quick commands and hand-offs. `Ctrl/⌘+click` on an address opens it; on a file path
 (`src/a.ts:42`, `D:\w\x.py`, or a bare `name.py`) it opens the file in Kelpie's viewer at that line, looked for from session's folder, then the project's, then by its name in the project. Right-click a path for *Open*, *Copy Relative*, *Copy Path*, *Copy Name* and *Reveal in Explorer*, or an address for *Open Link* and *Copy Link*. Settings → Terminal → *Colour
-theme* offers Dracula, Nord, One Dark, Tokyo Night, Catppuccin, Gruvbox, Solarized and GitHub
-Light (agents are told the same colours when they ask).
+theme* offers Dracula, Nord, One Dark, Tokyo Night, Catppuccin, Gruvbox, Solarized, GitHub
+Light, Monokai, Material Dark, Ayu Dark and Light, Rosé Pine and Rosé Pine Dawn, Everforest Dark,
+Kanagawa and Night Owl (agents are told the same colours when they ask); *Cursor style* is block,
+underline or bar.
+
+**Your own themes.** *Edit themes…* (next to the colour theme in Settings → Terminal and in a host's
+Appearance) opens the theme editor: *New theme* starts from the app's palette, *Duplicate a theme…*
+copies any theme, built-in or from a plugin. Each theme has a name, a dark or light kind and a
+colour picker with a hex field for the background, text, cursor, selection and the 16 ANSI
+colours; the sample terminal above them and every pane using the theme change as you edit, and a
+note appears when text on the background falls under 4.5:1 contrast. *Import…* reads a Windows
+Terminal scheme (`.json`, one scheme, a list or a settings file's `schemes`), an iTerm2 preset
+(`.itermcolors`) or a base16 scheme (YAML or JSON); a file that is not one of these, has a colour
+missing or written another way than `#rrggbb`, or uses XML entities or YAML beyond `key: value`
+lines is refused with what is wrong, and nothing in it is ever run. *Export…* saves a theme as a
+Windows Terminal scheme. Your themes are kept with the app's settings (up to 100), appear in every
+theme picker and travel in a settings export; deleting one puts the panes that used it back on the
+app's theme.
+
+**One pane's theme.** *Appearance…* in a terminal's right-click menu lists the themes; click one, or
+move with the arrow keys, and only that pane changes, until its session closes (*App's terminal
+theme* or *Host's theme* clears it). On a saved host, *Save for this host* makes it that host's
+theme for all its panes.
 
 Programs that take over the mouse — Claude Code with `"tui": "fullscreen"` (`/tui fullscreen`),
 OMP — scroll their own view with the wheel and copy what you select in them to the clipboard
@@ -1083,8 +1104,13 @@ The **SSH hosts** page (the server icon at the bottom of the sidebar, `Ctrl+Alt+
   config. The box at the top filters by name, address, group or tag; type `user@host:port` and
   press Enter to add that address as a new host. Each host shows a badge of its OS (seen on the
   last connection).
-- **Appearance**: a colour and a **terminal theme** per host — every pane on that host uses it, so
-  production never looks like your laptop.
+- **Appearance**: a label colour and a **terminal look** per host — colour theme, font, font size,
+  line height, cursor style and blink, each left on *App's* unless you set it. A sample terminal
+  (a prompt, `ls` colours, a warning, an error and a selection) shows the result as you change
+  them, and *Use the app's* clears them. Every pane on that host uses them, open ones too as soon as
+  you save, without reconnecting, so production never looks like your laptop. A host with its own
+  font size keeps it when you zoom the terminals (zoom changes the app's size), and agents asking
+  for the terminal's colours are told the app's theme, not the host's.
 - **One click on a host**: *Terminal*, **Claude Code here** or any other agent the host has, in
   its folder and inside tmux. *Open in* chooses the host's own project or the local project you
   have open. *Install Claude Code* types the official installer into a terminal when the host
@@ -1747,8 +1773,8 @@ a setting.
 - **Agent setup**: MCP servers, instruction files, skills and the ACP registry (see above).
 - **Accounts**, **Integrations**, **Remote (SSH)**, **Mobile**, **Voice**, **Plugins**,
   **Layouts**, **Quick Commands**, **Automations**, **Shortcuts**: see above.
-- **Terminal**: font, size, line height, scrollback, renderer (WebGL / DOM), cursor blink,
-  default shell, colour theme, floating terminal.
+- **Terminal**: font, size, line height, scrollback, renderer (WebGL / DOM), cursor style and
+  blink, default shell, colour theme and your own themes, floating terminal.
 - **Appearance**: language, dark or light theme, compact density, interface text size, editor
   word wrap.
 - **Notifications**: desktop notifications and their sound, ntfy / Telegram / webhook messages

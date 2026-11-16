@@ -27,6 +27,8 @@ import { RunsPage } from "./runs-page";
 import { RemoteDialog } from "./remote-dialog";
 import { RootUserDialogHost } from "./root-user-dialog";
 import { CloseDialogHost } from "./close-dialog";
+import { ThemeEditorHost } from "./theme-editor";
+import { PaneAppearanceHost } from "./pane-appearance";
 import { HostsPage } from "./hosts-page";
 import { initSshHosts, vault } from "../lib/ssh-hosts";
 import { MobileApprovals } from "./settings/mobile-settings";
@@ -44,7 +46,9 @@ import { sessionFiles } from "./path-menu";
 import { isLocalUrl, openBrowser } from "../lib/browser";
 import "../lib/agent-web-pages";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { daemonPalette, findTerminalTheme } from "../lib/terminal-themes";
+import { daemonPalette, findTerminalTheme, setCustomThemes } from "../lib/terminal-themes";
+import { checkThemes } from "../lib/theme-io";
+import { paneThemes, prunePaneThemes } from "../lib/terminal-appearance";
 import { loadPlugins, syncPluginAgents } from "../lib/plugins";
 import { initVoice } from "../lib/voice";
 import { applyLocale } from "../lib/i18n";
@@ -134,9 +138,20 @@ export function App() {
     const on = store.state.settings.agentsScripting ?? true;
     if (store.connected()) void daemon("daemon.set_policy", { agents_control_others: on }).catch(() => {});
   });
-  // A host's terminal theme changed: repaint the terminals (those on that host pick it up).
-  const hostThemes = createMemo(() => vault().hosts.map((h) => `${h.alias}=${h.terminalTheme}`).join("|"));
-  createEffect(on(hostThemes, () => { for (const v of allViews()) v.applySettings(store.state.settings); }, { defer: true }));
+  // The person's own themes join every theme list (a damaged entry in the state file is left out).
+  createEffect(() => setCustomThemes(checkThemes(store.state.settings.customThemes)));
+  // A host's appearance, a pane's own theme or one of the person's themes changed: repaint the terminals
+  // (each picks up what applies to it), without reconnecting.
+  const looks = createMemo(() =>
+    JSON.stringify([
+      vault().hosts.map((h) => [h.alias, h.terminalTheme, h.fontFamily, h.fontSize, h.lineHeight, h.cursorStyle, h.cursorBlink]),
+      paneThemes(),
+      store.state.settings.customThemes,
+    ]),
+  );
+  createEffect(on(looks, () => { for (const v of allViews()) v.applySettings(store.state.settings); }, { defer: true }));
+  // A pane's own theme lasts until its session closes.
+  createEffect(() => prunePaneThemes((id) => !!store.sessions[id]));
   // Hibernated agents resume as soon as their pane is on screen.
   createEffect(() => store.wakeVisible());
   // Theme, density and interface scale are plain CSS switches on the root element.
@@ -233,6 +248,8 @@ export function App() {
       <RootUserDialogHost />
       <CloseDialogHost />
       <ContextMenuHost />
+      <PaneAppearanceHost />
+      <ThemeEditorHost />
       <ConflictDialog />
       <Show when={bookmarks.shown()}><SavedReplyDialog /></Show>
       <ImageLightbox />

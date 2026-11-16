@@ -50,9 +50,38 @@ pub struct Host {
     pub color: String,
     /// Terminal colour theme for its panes (a theme id; empty: the app's terminal theme).
     pub terminal_theme: String,
+    /// Its panes' font family (CSS font list; empty: the app's terminal font).
+    #[serde(deserialize_with = "lenient_text")]
+    pub font_family: String,
+    /// Its panes' font size in px, 8–28 (none: the app's).
+    #[serde(deserialize_with = "lenient_number")]
+    pub font_size: Option<f64>,
+    /// Its panes' line height, 1–2 (none: the app's).
+    #[serde(deserialize_with = "lenient_number")]
+    pub line_height: Option<f64>,
+    /// `block`, `underline` or `bar` (empty: the app's cursor style).
+    #[serde(deserialize_with = "lenient_text")]
+    pub cursor_style: String,
+    /// Cursor blink (none: the app's setting).
+    #[serde(deserialize_with = "lenient_bool")]
+    pub cursor_blink: Option<bool>,
     /// Operating system seen on the last check (`ubuntu`, `debian`, `darwin`…), for its badge.
     pub os: String,
     pub last_connected: u64,
+}
+
+// Appearance fields are display-only: a value of the wrong type (a hand-edited file, an import) reads as
+// "the app's setting" instead of failing the whole vault or dropping the host.
+fn lenient_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_f64())
+}
+
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool())
+}
+
+fn lenient_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_str().unwrap_or_default().to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -271,6 +300,13 @@ pub fn normalize(mut v: Vault) -> CmdResult<Vault> {
         h.os = token(&h.os);
         // Theme ids come from plugins too (`plugin.theme`, any characters): only kept on one line.
         h.terminal_theme = h.terminal_theme.trim().chars().filter(|c| !c.is_control()).take(200).collect();
+        // Appearance is display-only: a value out of range or unknown is dropped (the app's applies), never an error.
+        h.font_family = h.font_family.trim().chars().filter(|c| !c.is_control()).take(500).collect();
+        h.font_size = h.font_size.filter(|v| v.is_finite() && (8.0..=28.0).contains(v));
+        h.line_height = h.line_height.filter(|v| v.is_finite() && (1.0..=2.0).contains(v));
+        if !matches!(h.cursor_style.as_str(), "block" | "underline" | "bar") {
+            h.cursor_style.clear();
+        }
         let wanted = if h.alias.trim().is_empty() { slug(&h.label) } else { h.alias.trim().to_string() };
         if !valid_alias(&wanted) {
             return Err(format!("{}: the SSH alias may only have letters, digits, - _ .", h.label));
@@ -1007,6 +1043,40 @@ mod tests {
         let v = normalize(Vault { hosts: vec![h], ..Default::default() }).unwrap();
         assert_eq!(v.hosts[0].os, "Ubuntu22.04Host");
         assert_eq!(v.hosts[0].terminal_theme, "my plugin.Night Owl");
+    }
+
+    #[test]
+    fn appearance_overrides_are_kept_in_range_and_optional() {
+        // A host saved before these fields existed loads with no overrides.
+        let old: Vault = serde_json::from_str(r#"{"version":1,"hosts":[{"id":"h1","label":"a","alias":"a","hostname":"box","terminalTheme":"nord"}],"forwards":[]}"#).unwrap();
+        let h = &old.hosts[0];
+        assert_eq!((h.font_family.as_str(), h.font_size, h.line_height, h.cursor_style.as_str(), h.cursor_blink), ("", None, None, "", None));
+        assert_eq!(h.terminal_theme, "nord");
+        // Wrong types read as no override; the rest of the host still loads.
+        let odd: Vault = serde_json::from_str(r#"{"hosts":[{"label":"a","hostname":"box","fontSize":"16","lineHeight":null,"cursorBlink":"yes","fontFamily":7,"cursorStyle":["bar"]}]}"#).unwrap();
+        let h = &odd.hosts[0];
+        assert_eq!((h.font_family.as_str(), h.font_size, h.line_height, h.cursor_style.as_str(), h.cursor_blink, h.hostname.as_str()), ("", None, None, "", None, "box"));
+        let mut h = host("x", "box");
+        h.font_family = " Fira Code\n".into();
+        h.font_size = Some(15.5);
+        h.line_height = Some(1.4);
+        h.cursor_style = "block".into();
+        h.cursor_blink = Some(false);
+        let v = normalize(Vault { hosts: vec![h], ..Default::default() }).unwrap();
+        let json = serde_json::to_value(&v.hosts[0]).unwrap();
+        assert_eq!(json["fontFamily"], "Fira Code");
+        assert_eq!(json["fontSize"], 15.5);
+        assert_eq!(json["lineHeight"], 1.4);
+        assert_eq!(json["cursorStyle"], "block");
+        assert_eq!(json["cursorBlink"], false);
+        let mut h = host("x", "box");
+        h.font_size = Some(99.0);
+        h.line_height = Some(f64::NAN);
+        h.cursor_style = "beam".into();
+        let v = normalize(Vault { hosts: vec![h], ..Default::default() }).unwrap();
+        assert_eq!((v.hosts[0].font_size, v.hosts[0].line_height, v.hosts[0].cursor_style.as_str()), (None, None, ""));
+        let json = serde_json::to_value(&v.hosts[0]).unwrap();
+        assert!(json["fontSize"].is_null() && json["cursorBlink"].is_null());
     }
 
     #[test]

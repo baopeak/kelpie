@@ -13,6 +13,7 @@
 // No store import here: the window passes a `TransferContext` (tests pass a fake one).
 import { t } from "./i18n";
 import transferKeys from "./settings-transfer.json";
+import { checkThemes, mergeThemes } from "./theme-io";
 import type { AgentProfile, Automation, QuickCommand, SavedLayout, Settings } from "./types";
 import type { SshHost, Vault } from "./ssh-hosts";
 
@@ -172,6 +173,12 @@ const RULES: Record<string, (v: unknown) => unknown> = {
   daemonOnClose: oneOf("stop", "keep"),
   language: oneOf("system", "en", "vi"),
   terminalTheme: text(200),
+  cursorStyle: oneOf("block", "underline", "bar"),
+  // The person's own themes: taken only when every one is well formed (lib/theme-io.ts).
+  customThemes: (v) => {
+    const list = checkThemes(v);
+    return Array.isArray(v) && list.length === v.length ? list : undefined;
+  },
   integrations: (v) => {
     if (!isPlain(v) || typeof v.linear !== "boolean") return undefined;
     const hosts = shaped(v.gitlabHosts ?? [], []);
@@ -472,7 +479,7 @@ const show = (v: unknown): string | null => {
 const whenOf = (a: Automation | null) =>
   !a ? null : a.trigger ? `${a.trigger.event}${a.trigger.glob ? ` ${a.trigger.glob}` : ""} ≤${a.trigger.daily_cap}/day` : `${a.every} ${a.time}${a.every === "weekly" ? ` (${a.weekday})` : ""}`;
 
-const HOST_TEXT: (keyof SshHost)[] = ["label", "group", "user", "identityFile", "jump", "startup", "folder", "notes", "color", "terminalTheme"];
+const HOST_TEXT: (keyof SshHost)[] = ["label", "group", "user", "identityFile", "jump", "startup", "folder", "notes", "color", "terminalTheme", "fontFamily"];
 
 export function planImport(read: ImportRead, chosen: readonly ConfigSection[], cur: Current, opts: { defaults: Settings; newId: () => string }): ImportPlan {
   const s = read.doc.sections;
@@ -519,6 +526,8 @@ export function planImport(read: ImportRead, chosen: readonly ConfigSection[], c
     for (const f of read.argsLeftOut ?? []) {
       if (f.section === "settings") plan.argsNotImported.push({ section: "settings", item: f.name, reason: f.reason, leftOut: false });
     }
+    // Own themes join this computer's (same id: the file's version), never replace them all.
+    if (values.customThemes) values.customThemes = mergeThemes(checkThemes(cur.settings.customThemes), values.customThemes);
     const changed = Object.keys(values).filter((k) => !same(fieldOf(cur.settings, k), fieldOf(values, k)));
     next = { ...next, ...values };
     plan.sections.settings = { total: Object.keys(s.settings!).length, add: 0, replace: changed.length, skipped: unknown.length + invalid.length, changed, unknown, invalid };

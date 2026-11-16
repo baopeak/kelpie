@@ -14,7 +14,9 @@ config, an unknown host key shown with fingerprints before trusting it, logging 
 password (askpass), a terminal on the host in its remote project, files on the host (list, new
 folder, upload, download), local / remote / SOCKS forwards carrying traffic and stopping, a new
 key installed on the host and used to log in, known hosts, importing the SSH config, Claude Code
-on the host. Refresh in a host's Files pane (button and Ctrl+R, keeping the selection), New file on the host (refused
+on the host. Per-host appearance (theme, font size, cursor) in the editor's preview and on the open
+pane without reconnecting, a theme of one's own made in the theme editor, a pane's quick theme switch and
+"Save for this host". Refresh in a host's Files pane (button and Ctrl+R, keeping the selection), New file on the host (refused
 over a taken name), and Refresh in the keychain and known hosts (then Forget of the entry it found).
 """
 import http.server
@@ -132,6 +134,19 @@ def connects(port):
         return False
 
 
+def pane_look(session_id):
+    """The open pane's xterm options and the session handle it is attached to."""
+    return d.js("""const v = window.__kelpie.views().find((x) => x.sessionId === arguments[0]); if (!v) return null;
+      const o = v.term.options; return { bg: o.theme.background, fontSize: o.fontSize, cursorStyle: o.cursorStyle, cursorBlink: o.cursorBlink, handle: v.handle };""", session_id)
+
+
+def pane_menu(session_id, item):
+    d.js("document.querySelector(`.term-wrap[data-session='${arguments[0]}']`).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 600, clientY: 300 }))", session_id)
+    ok = d.js("const i = [...document.querySelectorAll('.ctx-item')].find((x) => x.textContent.trim() === arguments[0]); if (i) i.click(); return !!i;", item)
+    if not ok:
+        raise RuntimeError(f"no menu item {item!r}")
+
+
 def open_hosts():
     d.js("window.__kelpie.commands.find((c) => c.id === 'hosts').run()")
     wait(lambda: exists(".hosts-page"), 10)
@@ -191,6 +206,63 @@ try:
     daemon(d, "session.input", {"handle": sess["handle"], "data": "echo hosts-marker-$((40+2))\r"})
     run.check("commands run on the host", wait(lambda: "hosts-marker-42" in daemon(d, "session.read", {"handle": sess["handle"], "lines": 50})["text"], 30))
     run.shot("05-terminal-on-host")
+
+    # ---- the host's appearance: preview in the editor, then the open pane without reconnecting ----
+    open_hosts()
+    d.click("[data-host=test-box]")
+    click_text("Edit")
+    wait(lambda: exists("[data-host-editor]"), 5)
+    d.js("const o = [...document.querySelectorAll('[data-host-editor] details.drawer-opt')].find((x) => x.querySelector('[data-terminal-preview]')); o.open = true; o.scrollIntoView();")
+    d.js("const s = document.querySelector('[data-host-editor] [data-field=terminal-theme]'); s.value = 'kanagawa'; s.dispatchEvent(new Event('change', {bubbles: true}));")
+    fill("[data-host-editor] [data-field=font-size]", "16")
+    d.click("[data-host-editor] [data-field=cursor-style] button[data-value=block]")
+    d.click("[data-host-editor] [data-field=cursor-blink] button[data-value=false]")
+    preview = d.js("""const p = document.querySelector('[data-host-editor] [data-terminal-preview]'); const cs = getComputedStyle(p);
+      return { bg: cs.backgroundColor, size: cs.fontSize, cursor: p.querySelector('[data-cursor]').dataset.cursor, blink: p.querySelector('[data-cursor]').classList.contains('blink') };""")
+    run.check("the editor's preview shows the host's theme, size and cursor", preview == {"bg": "rgb(31, 31, 40)", "size": "16px", "cursor": "block", "blink": False}, str(preview))
+    run.shot("05a-host-appearance-preview")
+    before = pane_look(sess["id"])
+    d.click("[data-action=save-host]")
+    saved = wait(lambda: next((h for h in invoke("ssh_vault_load")["hosts"] if h["alias"] == "test-box" and h.get("terminalTheme") == "kanagawa"), None), 10)
+    run.check("the host keeps its appearance", saved and saved["fontSize"] == 16 and saved["cursorStyle"] == "block" and saved["cursorBlink"] is False and saved["lineHeight"] is None and saved["fontFamily"] == "", str(saved))
+    d.js(f"{S}.setOverlay(null)")
+    look = wait(lambda: (lambda x: x if x and x["bg"] == "#1f1f28" else None)(pane_look(sess["id"])), 10)
+    run.check("the open pane on the host takes it without reconnecting",
+              look and look["fontSize"] == 16 and look["cursorStyle"] == "block" and look["cursorBlink"] is False and look["handle"] == before["handle"], f"{before} -> {look}")
+    run.shot("05b-themed-ssh-pane")
+
+    # ---- a theme of one's own, then the pane's quick switch ----
+    pane_menu(sess["id"], "Appearance…")
+    run.check("the pane menu opens its theme switch", wait(lambda: exists("[data-pane-appearance]"), 5))
+    click_text("Edit themes…", "[data-pane-appearance]")
+    wait(lambda: exists("[data-theme-editor]"), 5)
+    d.click("[data-action=theme-new]")
+    wait(lambda: exists("[data-field=theme-name]"), 5)
+    d.js("const n = document.querySelector('[data-field=theme-name]'); n.value = 'E2E Harbour'; n.dispatchEvent(new Event('change', {bubbles: true}));")
+    fill("[data-color-slot='0'] .text-input", "#203040")
+    mine = wait(lambda: next((x for x in d.js(f"return {S}.state.settings.customThemes") if x["label"] == "E2E Harbour" and x["colors"][0] == "#203040"), None), 5)
+    run.check("a new theme is kept with the settings", mine and mine["id"].startswith("custom:"), str(d.js(f"return {S}.state.settings.customThemes")))
+    run.check("the editor's preview follows the edit", d.js("return getComputedStyle(document.querySelector('[data-theme-editor] [data-terminal-preview]')).backgroundColor") == "rgb(32, 48, 64)")
+    run.shot("05c-theme-editor")
+    click_text("Done", "[data-theme-editor]")
+    pane_menu(sess["id"], "Appearance…")
+    wait(lambda: exists("[data-pane-appearance]"), 5)
+    d.click(f"[data-pane-appearance] [data-theme-option='{mine['id']}']")
+    look = wait(lambda: (lambda x: x if x and x["bg"] == "#203040" else None)(pane_look(sess["id"])), 5)
+    host_theme = next(h for h in invoke("ssh_vault_load")["hosts"] if h["alias"] == "test-box")["terminalTheme"]
+    run.check("the quick switch changes only this pane", look is not None and host_theme == "kanagawa", f"{look} host={host_theme}")
+    run.shot("05d-pane-quick-switch")
+    d.click("[data-pane-appearance] [data-theme-option='night-owl']")
+    run.check("clicking another theme repaints the pane", wait(lambda: (pane_look(sess["id"]) or {}).get("bg") == "#011627", 5))
+    arrow = "document.querySelector('[data-pane-appearance] [role=listbox]').dispatchEvent(new KeyboardEvent('keydown', { key: arguments[0], bubbles: true }))"
+    d.js(arrow, "ArrowUp")
+    run.check("arrow keys move through the themes, the pane following", wait(lambda: (pane_look(sess["id"]) or {}).get("bg") == "#1f1f28", 5))  # Kanagawa, just before Night Owl
+    d.js(arrow, "ArrowDown")
+    wait(lambda: (pane_look(sess["id"]) or {}).get("bg") == "#011627", 5)
+    d.click("[data-action=save-host-theme]")
+    saved = wait(lambda: next((h for h in invoke("ssh_vault_load")["hosts"] if h["alias"] == "test-box" and h["terminalTheme"] == "night-owl"), None), 10)
+    run.check("Save for this host makes it the host's theme", saved is not None and saved["fontSize"] == 16)
+    run.check("the pane keeps it (now from its host)", wait(lambda: (pane_look(sess["id"]) or {}).get("bg") == "#011627", 5) and not d.js("return !!document.querySelector('[data-pane-appearance]')"))
 
     # ---- files on the host ----
     open_hosts()
