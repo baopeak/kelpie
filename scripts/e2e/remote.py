@@ -8,7 +8,9 @@ Remote: SSH config file). The "remote host" is this machine through Git Bash: th
 folder is a POSIX path (/c/Users/…), commands are bash, git is Git for Windows.
 
 Covers: hosts from the SSH config, the Add remote project dialog (connect, host check, folder
-browsing), the sidebar host label, branch info, file tree, viewing / editing / saving a file,
+browsing and Refresh), the sidebar host label, branch info, file tree, viewing / editing / saving a file,
+the editor's Reload and the Explorer's Refresh re-reading a host's file, a save refused when the file changed on the
+host within the same second (content compared, not only the time),
 create / rename / delete, search in files, quick open, the Changes panel (status, stage,
 commit), a terminal running on the host, chat view offered only for local sessions, resuming
 the remote terminal after the daemon restarts, removing the project.
@@ -116,6 +118,13 @@ try:
     parent = posix.rsplit("/", 1)[0]
     d.js("const i = document.querySelectorAll('.remote-dialog input.mono')[0]; i.value = arguments[0]; i.dispatchEvent(new InputEvent('input', {bubbles: true})); i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));", parent)
     d.wait("return [...document.querySelectorAll('.remote-folder')].some(f => f.textContent.trim() === 'remote-repo')", 20)
+    # A folder made on the host after the listing shows after Refresh.
+    later = os.path.join(os.path.dirname(repo), "made-later")
+    shutil.rmtree(later, ignore_errors=True)
+    os.makedirs(later)
+    d.click("[data-action=refresh-folders]")
+    run.check("Refresh in the folder picker lists a folder made meanwhile", d.wait("return [...document.querySelectorAll('.remote-folder')].some(f => f.textContent.trim() === 'made-later')", 20))
+    os.rmdir(later)
     d.js("[...document.querySelectorAll('.remote-folder')].find(f => f.textContent.trim() === 'remote-repo').click()")
     d.wait("return document.querySelector('.remote-dialog input.mono').value.endsWith('/remote-repo')", 20)
     run.shot("01-remote-dialog")
@@ -146,6 +155,36 @@ try:
     run.check("delete on the host", not os.path.exists(os.path.join(repo, "notes")))
     escape = d.invoke("fs_read_file", {"root": root, "path": "../../outside.txt"})
     run.check("paths cannot leave the project folder", "err" in escape)
+
+    # ---------- the editor on a host: Reload, Refresh, and saves that compare the content ----------
+    # A host has no file watcher: its files are read again on Reload, on the Explorer's Refresh, or when shown again.
+    edit_txt = os.path.join(repo, "src", "edit.txt")
+    open(edit_txt, "w", newline="\n").write("first\n")
+    d.js(f"{S}.openFile(arguments[0], 'src/edit.txt')", pid)
+    editor_text = lambda: d.js("return document.querySelector('.cm-content')?.textContent ?? ''")
+    run.check("a host's file opens in the editor", wait(lambda: "first" in editor_text(), 30), editor_text()[:80])
+    open(edit_txt, "w", newline="\n").write("changed on the host\n")
+    d.click("[data-action=reload-file]")
+    run.check("Reload reads the host's file again", wait(lambda: "changed on the host" in editor_text(), 30), editor_text()[:80])
+    open(edit_txt, "w", newline="\n").write("changed again\n")
+    d.js(f"{S}.showRightPanel('files')")
+    d.wait("return !!document.querySelector('.explorer-head button[title=\"Refresh\"]')", 10)
+    d.js("document.querySelector('.explorer-head button[title=\"Refresh\"]').click()")
+    run.check("the Explorer's Refresh reads open files again", wait(lambda: "changed again" in editor_text(), 30), editor_text()[:80])
+    run.shot("02a-remote-editor")
+    # Unsaved edits, then the host's file changes within the same second (its time stays): the save is refused.
+    d.click(".cm-content")
+    d.keys("ctrl+a", "mine")
+    st = os.stat(edit_txt)
+    open(edit_txt, "w", newline="\n").write("agent's edit\n")
+    os.utime(edit_txt, ns=(st.st_atime_ns, st.st_mtime_ns))
+    d.js("window.__asked = null; window.confirm = (m) => { window.__asked = String(m); return false; };")
+    d.keys("ctrl+s")
+    asked = wait(lambda: d.js("return window.__asked"), 20) or ""
+    run.check("a save over a change made on the host in the same second asks first", "changed on disk" in asked and open(edit_txt).read() == "agent's edit\n", asked[:120])
+    d.js("window.confirm = () => true;")
+    d.keys("ctrl+s")
+    run.check("…and overwrites only when told to", wait(lambda: open(edit_txt).read() == "mine", 20), open(edit_txt).read())
 
     # ---------- search / quick open ----------
     found = inv("search_text", {"root": root, "query": "remote-needle", "regex": False, "caseSensitive": False})

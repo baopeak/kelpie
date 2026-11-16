@@ -215,6 +215,10 @@ pub struct FileContent {
     mtime: u64,
     truncated: bool,
     binary: bool,
+    /// A host's file read whole: the POSIX `cksum` of its bytes, which a save compares (the text may be decoded
+    /// lossily, so the window cannot compute it from the text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cksum: Option<String>,
 }
 
 fn mtime_of(meta: &std::fs::Metadata) -> u64 {
@@ -227,7 +231,10 @@ pub async fn fs_read_file(root: String, path: String, max_bytes: Option<u64>, as
     if crate::remote::is_remote(&root) {
         let limit = max_bytes.unwrap_or(8 << 20);
         let (buf, size, mtime_s) = crate::remote::read_file(&root, &path, limit).await?;
-        return Ok(file_content(buf, size, mtime_s * 1000, size > limit, as_base64.unwrap_or(false)));
+        let sum = (size <= limit).then(|| crate::remote::cksum(&buf));
+        let mut content = file_content(buf, size, mtime_s * 1000, size > limit, as_base64.unwrap_or(false));
+        content.cksum = sum;
+        return Ok(content);
     }
     crate::fs_ops::blocking(move || fs_read_file_blocking(root, path, max_bytes, as_base64)).await
 }
@@ -249,7 +256,7 @@ fn fs_read_file_blocking(root: String, path: String, max_bytes: Option<u64>, as_
 /// A file's bytes as the viewers want them: base64 (images), or text unless binary.
 fn file_content(buf: Vec<u8>, size: u64, mtime: u64, truncated: bool, as_base64: bool) -> FileContent {
     if as_base64 {
-        return FileContent { text: None, base64: Some(base64::engine::general_purpose::STANDARD.encode(&buf)), size, mtime, truncated, binary: true };
+        return FileContent { text: None, base64: Some(base64::engine::general_purpose::STANDARD.encode(&buf)), size, mtime, truncated, binary: true, cksum: None };
     }
     let sniff = &buf[..buf.len().min(8192)];
     let binary = sniff.contains(&0);
@@ -261,7 +268,7 @@ fn file_content(buf: Vec<u8>, size: u64, mtime: u64, truncated: bool, as_base64:
             Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
         })
     };
-    FileContent { text, base64: None, size, mtime, truncated, binary }
+    FileContent { text, base64: None, size, mtime, truncated, binary, cksum: None }
 }
 
 #[derive(Serialize)]

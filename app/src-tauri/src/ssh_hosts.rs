@@ -747,15 +747,38 @@ pub async fn ssh_known_hosts_list() -> CmdResult<Vec<KnownHost>> {
     blocking(|| Ok(parse_known_hosts(&std::fs::read_to_string(known_hosts_file()).unwrap_or_default()))).await
 }
 
-/// Removes entries by line; the previous file is kept as `known_hosts.old` (as ssh-keygen does).
+/// An entry to remove as it was listed: its line, and what that line held then.
+#[derive(Debug, Deserialize)]
+pub struct KnownRef {
+    line: usize,
+    hosts: String,
+    fingerprint: String,
+    #[serde(default)]
+    marker: String,
+}
+
+/// `text` without the entries of `entries`, or an error when a line no longer holds the entry listed there (the file
+/// changed since: another removal, `ssh-keygen -R`, an edit), so a stale list never removes another host's key.
+pub fn without_known(text: &str, entries: &[KnownRef]) -> Result<String, String> {
+    let now = parse_known_hosts(text);
+    for e in entries {
+        if !now.iter().any(|k| k.line == e.line && k.hosts == e.hosts && k.fingerprint == e.fingerprint && k.marker == e.marker) {
+            return Err("known_hosts changed since it was listed: refresh the list and try again".into());
+        }
+    }
+    let kept: Vec<&str> = text.lines().enumerate().filter(|(i, _)| !entries.iter().any(|e| e.line == *i)).map(|(_, l)| l).collect();
+    Ok(format!("{}\n", kept.join("\n")))
+}
+
+/// Removes entries as listed (see [`without_known`]); the previous file is kept as `known_hosts.old` (as ssh-keygen does).
 #[tauri::command]
-pub async fn ssh_known_hosts_remove(lines: Vec<usize>) -> CmdResult<()> {
+pub async fn ssh_known_hosts_remove(entries: Vec<KnownRef>) -> CmdResult<()> {
     blocking(move || {
         let file = known_hosts_file();
         let text = std::fs::read_to_string(&file).map_err(err)?;
-        let kept: Vec<&str> = text.lines().enumerate().filter(|(i, _)| !lines.contains(i)).map(|(_, l)| l).collect();
+        let next = without_known(&text, &entries)?;
         kelpie_proto::durable::copy(&file, &file.with_extension("old")).map_err(err)?;
-        write_atomic(&file, format!("{}\n", kept.join("\n")).as_bytes()).map_err(err)
+        write_atomic(&file, next.as_bytes()).map_err(err)
     })
     .await
 }
@@ -1051,5 +1074,19 @@ mod tests {
         assert!(known[1].hashed);
         assert_eq!(known[2].marker, "@revoked");
         assert_eq!(known[0].fingerprint, fp);
+    }
+
+    #[test]
+    fn forgets_only_the_entry_that_was_listed() {
+        let a = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+        let text = format!("# c\nalpha {a}\nbeta {a}\n");
+        let listed = parse_known_hosts(&text);
+        let beta = || KnownRef { line: listed[1].line, hosts: listed[1].hosts.clone(), fingerprint: listed[1].fingerprint.clone(), marker: String::new() };
+        assert_eq!(without_known(&text, &[beta()]).unwrap(), format!("# c\nalpha {a}\n"));
+        // alpha was removed elsewhere meanwhile: beta moved up a line, and the stale entry is refused.
+        assert!(without_known(&format!("# c\nbeta {a}\n"), &[beta()]).is_err());
+        assert!(without_known(&format!("# c\nalpha {a}\ngamma {a}\n"), &[beta()]).is_err());
+        // Turned into a revocation in place since it was listed: not forgotten.
+        assert!(without_known(&format!("# c\nalpha {a}\n@revoked beta {a}\n"), &[beta()]).is_err());
     }
 }

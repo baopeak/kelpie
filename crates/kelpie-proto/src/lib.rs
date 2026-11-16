@@ -101,7 +101,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// as a `via`, `relay_only` in `sc_rtc_offer`, `turn_mb` in `sc_stats`, the `turn_budget_spent` end, TURN's caps and use in `mobile.set_screen`
 /// and `screen` of `mobile.status` (`turn_session_mb`, `turn_day_mb`, `turn_month_mb`, `turn_used_day_mb`, `turn_used_month_mb`, `turn`), and the
 /// relay's `POST /v1/turn` and `/v1/turn/revoke`. An older daemon lists no `relay_turn` way, so the phone asks for servers only at 43.
-pub const API_LEVEL: u32 = 43;
+/// 44: `sftp.create {dest, path}`: a new empty file on a host, refused when the name is taken. The Files tab offers *New file* on a
+/// host only at 44.
+pub const API_LEVEL: u32 = 44;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

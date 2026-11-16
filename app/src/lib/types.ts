@@ -569,6 +569,8 @@ export interface FileContent {
   mtime: number;
   truncated: boolean;
   binary: boolean;
+  /** A host's file read whole: the POSIX `cksum` of its bytes, for a save to compare (text may be decoded lossily). */
+  cksum?: string | null;
 }
 
 export interface GitFile {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bitsMode, changedBits, clickSelect, filterEntries, formatSize, joinPath, listNames, modeBits, modeString, octal, parentPath, parseOctal, pruneSelection, selectAll, sharedBits, sortEntries, withChange } from "./file-pane";
+import { bitsMode, changedBits, clickSelect, filterEntries, formatSize, homeRelative, joinPath, listNames, modeBits, modeString, octal, parentPath, parseOctal, pruneSelection, selectAll, sharedBits, sortEntries, withChange } from "./file-pane";
 import type { RemoteEntry } from "./types";
 
 const e = (name: string, over: Partial<RemoteEntry> = {}): RemoteEntry => ({
@@ -111,5 +111,19 @@ describe("deleting what is shown", () => {
   it("lists the first names and how many more", () => {
     expect(listNames(["a", "b"])).toEqual({ shown: ["a", "b"], more: 0 });
     expect(listNames(["1", "2", "3", "4", "5", "6", "7"])).toEqual({ shown: ["1", "2", "3", "4", "5"], more: 2 });
+  });
+});
+
+describe("paths typed from the login folder", () => {
+  it("reads ~ and ~/… as relative to the host's login folder", () => {
+    expect(homeRelative("~")).toBe("");
+    expect(homeRelative("")).toBe("");
+    expect(homeRelative(" ~/src/app ")).toBe("src/app");
+    expect(homeRelative("~//x")).toBe("x");
+    expect(homeRelative("~/")).toBe("");
+  });
+  it("leaves absolute paths and other users' homes alone", () => {
+    expect(homeRelative("/srv/app")).toBeNull();
+    expect(homeRelative("~bob/x")).toBeNull();
   });
 });

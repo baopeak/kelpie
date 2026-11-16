@@ -12,7 +12,7 @@ import { openRootUserGuide } from "../lib/root-user";
 import {
   CLAUDE_INSTALL, agentAdd, agentList, checkHost, connectHost, deleteKey, forwardStart, forwardStatus, forwardStop, generateKey, hasSecret, hostAddress, hostById, hostKeys,
   hostProject, importKey, importSshConfig, installKey, isHostKeyError, knownHosts, listKeys, loadVault, newForward, newHost, parseDestination, removeForward, removeHost, removeKnownHosts, runOnHosts,
-  saveForward, saveHost, saveVault, setSecret, trustHost, vault, type HostKeys, type SshForward, type SshHost,
+  saveForward, saveHost, saveVault, setSecret, trustHost, vault, type HostKeys, type KnownHost, type SshForward, type SshHost,
 } from "../lib/ssh-hosts";
 import { Icon } from "./icons";
 import { LoadBar } from "./load-bar";
@@ -142,6 +142,8 @@ function HostsTab() {
         <div class="inline-fields">
           <button class="btn primary" data-action="new-host" onClick={() => setEditing(newHost())}><Icon name="plus" size={13} /> {t("New host")}</button>
           <button class="btn" title={t("Add the hosts of your SSH config")} onClick={() => void importConfig()}>{t("Import")}</button>
+          <span style={{ flex: 1 }} />
+          <button class="icon-btn" data-action="refresh-hosts" title={t("Refresh")} onClick={() => { setError(null); void loadVault().catch((e) => setError(errText(e))); }}><Icon name="refresh" size={14} /></button>
         </div>
         <Show when={error()}><div class="form-note error">{error()}</div></Show>
         <Show when={typed()}>
@@ -398,7 +400,7 @@ function TrustPanel(props: { alias: string; onDone: (trusted: boolean) => void }
     if (!r?.keys) return;
     try {
       if (r.known && !r.matches) {
-        const stale = (await knownHosts()).filter((x) => x.hosts.split(",").includes(r.name)).map((x) => x.line);
+        const stale = (await knownHosts()).filter((x) => x.hosts.split(",").includes(r.name));
         if (stale.length) await removeKnownHosts(stale);
       }
       await trustHost(r.keys.map((x) => x.line));
@@ -752,6 +754,7 @@ function KeysTab() {
         <button class="btn" onClick={() => void doImport()}>{t("Import key…")}</button>
         <span style={{ flex: 1 }} />
         <span class="muted-inline">{agent()?.running ? t("SSH agent: {n} key(s) loaded", { n: agent()!.keys.length }) : t("SSH agent not running")}</span>
+        <button class="icon-btn" data-action="refresh-keys" title={t("Refresh")} onClick={() => { setError(null); void refetch(); void refetchAgent(); }}><Icon name="refresh" size={14} /></button>
       </div>
       <Show when={ask()} keyed>{(a) => <AskRow ask={a} onClose={() => setAsk(null)} />}</Show>
       <Show when={gen()}>
@@ -808,18 +811,23 @@ function KnownHostsTab() {
   const [query, setQuery] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
   const shown = () => (list() ?? []).filter((k) => !query().trim() || k.hosts.toLowerCase().includes(query().trim().toLowerCase()) || k.fingerprint.includes(query().trim()));
-  const remove = async (line: number, name: string) => {
+  const remove = async (k: KnownHost) => {
+    const name = k.hashed ? k.fingerprint : k.hosts;
     if (!(await confirmDialog(t("Forget the key of {name}? ssh asks to trust it again on the next connection.", { name })))) return;
+    setError(null);
     try {
-      await removeKnownHosts([line]);
-      void refetch();
+      await removeKnownHosts([k]);
     } catch (e) {
       setError(errText(e));
     }
+    void refetch();
   };
   return (
     <div class="hosts-section">
-      <input class="text-input" placeholder={t("Search known hosts")} value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
+      <div class="inline-fields">
+        <input class="text-input" style={{ flex: 1, width: "auto" }} placeholder={t("Search known hosts")} value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
+        <button class="icon-btn" data-action="refresh-known" title={t("Refresh")} onClick={() => { setError(null); void refetch(); }}><Icon name="refresh" size={14} /></button>
+      </div>
       <Show when={error()}><div class="form-note error">{error()}</div></Show>
       <For each={shown()} fallback={<div class="muted">{t("No known hosts.")}</div>}>
         {(k) => (
@@ -828,7 +836,7 @@ function KnownHostsTab() {
               <div class="mono">{k.hashed ? t("(hashed host name)") : k.hosts} <Show when={k.marker}><span class="chip">{k.marker}</span></Show></div>
               <div class="mono muted-inline" style={{ "font-size": "11.5px" }}>{k.kind} {k.fingerprint}</div>
             </div>
-            <button class="btn" onClick={() => void remove(k.line, k.hashed ? k.fingerprint : k.hosts)}>{t("Forget")}</button>
+            <button class="btn" onClick={() => void remove(k)}>{t("Forget")}</button>
           </div>
         )}
       </For>

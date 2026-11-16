@@ -112,5 +112,12 @@
   "Paused": "Đã tạm dừng",
   "this computer": "máy này",
   "Update {version} after file transfers": "Cập nhật {version} sau khi chuyển file xong",
-  "The new session daemon takes over once they have finished. Click to switch now: they stop and can be resumed afterwards.": "Dịch vụ phiên mới sẽ tiếp quản khi chúng xong. Bấm để chuyển ngay: chúng dừng lại và có thể tiếp tục sau."
+  "The new session daemon takes over once they have finished. Click to switch now: they stop and can be resumed afterwards.": "Dịch vụ phiên mới sẽ tiếp quản khi chúng xong. Bấm để chuyển ngay: chúng dừng lại và có thể tiếp tục sau.",
+  "Reload from the host": "Tải lại từ máy chủ",
+  "Reload from disk": "Tải lại từ đĩa",
+  "Refresh ({key})": "Làm mới ({key})",
+  "Open terminal here": "Mở terminal ở đây",
+  "Open a terminal in this folder": "Mở terminal trong thư mục này",
+  "New file": "Tệp mới",
+  "New file name": "Tên tệp mới"
 }

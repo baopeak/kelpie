@@ -27,14 +27,18 @@ export function RemoteDialog() {
   let hostInput!: HTMLInputElement;
   onMount(() => hostInput.focus());
 
+  const [browsing, setBrowsing] = createSignal(false);
   const browse = async (path: string) => {
     const { dest, port } = splitHost(host());
     setError(null);
+    setBrowsing(true);
     try {
       setFolders(await remoteFolders(port ? `${dest}:${port}` : dest, path));
       setFolder(path);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setBrowsing(false);
     }
   };
   const connect = async () => {
@@ -73,7 +77,7 @@ export function RemoteDialog() {
   return (
     <div class="overlay" onPointerDown={(e) => e.target === e.currentTarget && store.setOverlay(null)}>
       <div class="modal remote-dialog" onKeyDown={(e) => e.key === "Escape" && store.setOverlay(null)}>
-        <LoadBar when={checking() || hosts.loading} />
+        <LoadBar when={checking() || browsing() || hosts.loading} />
         <h2>{t("Add remote project")}</h2>
         <div class="form-row">
           <label>{t("SSH host")}</label>
@@ -101,6 +105,7 @@ export function RemoteDialog() {
             <div class="inline-fields">
               <button class="icon-btn" title={t("Parent folder")} onClick={up}><Icon name="up" size={14} /></button>
               <input class="text-input mono" value={folder()} onInput={(e) => setFolder(e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && void browse(folder())} />
+              <button class="icon-btn" data-action="refresh-folders" title={t("Refresh")} disabled={browsing()} onClick={() => void browse(folder())}><Icon name="refresh" size={14} /></button>
             </div>
             <div class="remote-folders">
               <For each={folders()} fallback={<div class="muted">{t("No folders here.")}</div>}>

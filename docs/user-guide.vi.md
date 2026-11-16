@@ -199,15 +199,15 @@ Chi tiết nằm ở phần [Letting agents use browser panes](user-guide.md#let
 
 ## Làm việc qua SSH
 
-**Project trên máy chủ.** Lệnh *Add Remote Project (SSH)…* cho bạn chọn một máy chủ và một thư mục trên máy chủ đó. Terminal và agent chạy trên máy chủ qua `ssh -t`, bên trong `tmux` nếu máy chủ có cài, nhờ đó phiên vẫn sống khi kết nối bị rớt. Cây tệp, trình soạn thảo, tìm kiếm và Git cũng hoạt động qua SSH. Kelpie dùng OpenSSH và cấu hình SSH sẵn có của bạn.
+**Project trên máy chủ.** Lệnh *Add Remote Project (SSH)…* cho bạn chọn một máy chủ và một thư mục trên máy chủ đó. Terminal và agent chạy trên máy chủ qua `ssh -t`, bên trong `tmux` nếu máy chủ có cài, nhờ đó phiên vẫn sống khi kết nối bị rớt. Cây tệp, trình soạn thảo, tìm kiếm và Git cũng hoạt động qua SSH. Kelpie dùng OpenSSH và cấu hình SSH sẵn có của bạn. Vì máy chủ không có cơ chế theo dõi thay đổi tệp, Kelpie chỉ đọc lại máy chủ khi bạn yêu cầu: nút *Refresh* trong Explorer đọc lại cây tệp cùng mọi tệp đang mở của project, mỗi tệp đang mở có nút *Reload*, còn tệp văn bản đang mở (tối đa 1 MiB) được đọc lại khi bạn quay về tab hoặc cửa sổ của nó. Những chỗ bạn sửa mà chưa lưu không bao giờ bị thay thế, vì trình soạn thảo chỉ báo rằng tệp đã đổi. Khi lưu, Kelpie so sánh nội dung tệp chứ không chỉ thời gian sửa, nên một thay đổi mà agent ghi trên máy chủ trong cùng một giây vẫn được hỏi lại thay vì bị ghi đè.
 
 **Trang SSH hosts (`Ctrl+Alt+H`).** Trang này quản lý máy chủ theo kiểu Termius, với các tính năng sau:
 
 - Mỗi máy chủ có tên, nhóm, thẻ, màu, ghi chú, địa chỉ, người dùng và cổng. Bạn đăng nhập bằng khoá, SSH agent hoặc mật khẩu được lưu trong kho thông tin xác thực của hệ điều hành.
 - Từng máy chủ có thể dùng màu và theme terminal riêng, nhờ đó môi trường production không bao giờ trông giống máy tính của bạn.
 - Một cú nhấp là bạn mở được *Terminal*, *Claude Code here* hoặc agent khác trên máy chủ.
-- Tab *Files* cho phép duyệt, tải lên, tải xuống, đổi tên và xoá tệp, kèm một hàng đợi truyền tệp.
-- Ngoài ra, bạn có thể chạy một lệnh trên nhiều máy chủ cùng lúc, quản lý khoá trong tab *Keychain*, xem *Known hosts* và tạo quy tắc *Port forwarding*.
+- Tab *Files* cho phép duyệt, làm mới (`Ctrl+R`), tạo thư mục hoặc tệp mới, tải lên, tải xuống, đổi tên và xoá tệp, kèm một hàng đợi truyền tệp. Mỗi khung mở lại thư mục mà nó hiện lần trước, và từ một thư mục trên máy chủ bạn có thể mở terminal hoặc mở thư mục đó thành project.
+- Ngoài ra, bạn có thể chạy một lệnh trên nhiều máy chủ cùng lúc, quản lý khoá trong tab *Keychain*, xem *Known hosts* và tạo quy tắc *Port forwarding*. Danh sách máy chủ, *Keychain* và *Known hosts* đều có nút *Refresh* để đọc lại những gì đã thay đổi bên ngoài Kelpie.
 
 **Khung SSH trong mọi project.** Một project trên máy tính của bạn có thể chứa terminal và agent chạy trên máy chủ, đặt cạnh các khung cục bộ. Khung mới và hộp thoại *New session…* có dòng *Run on* để chọn *This computer*, một máy chủ đã liên kết với project, hoặc *Other host…*. Mỗi khung chạy trên máy khác có một sọc mang màu của máy chủ đó.
 

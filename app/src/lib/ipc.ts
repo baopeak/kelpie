@@ -264,6 +264,9 @@ export const sftpRealpath = (dest: string, path = "~") => daemon<{ path: string 
 export const sftpMkdir = (dest: string, path: string) => daemon<boolean>("sftp.mkdir", { dest, path });
 /** Refuses an existing `to`. */
 export const sftpRename = (dest: string, from: string, to: string) => daemon<boolean>("sftp.rename", { dest, from, to });
+/** From this daemon API level a host's pane can make a new empty file (`sftp.create`, refused when the name is taken). */
+export const CREATE_API = 44;
+export const sftpCreate = (dest: string, path: string) => daemon<boolean>("sftp.create", { dest, path });
 /** Not recursive: a recursive change is a transfer job (`xferStart` with kind `chmod`). */
 export const sftpChmod = (dest: string, paths: string[], mode: number) => daemon<boolean>("sftp.chmod", { dest, paths, mode });
 /** `""` lists the drives on Windows. */
