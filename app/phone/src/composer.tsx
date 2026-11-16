@@ -358,11 +358,12 @@ export function ChatComposer(props: { id: string; alive: boolean }) {
           <button class="btn primary" disabled={!connected()} onClick={resumeChat}>{t("Resume")}</button>
         </div>
       </Show>
-      <Show when={busy()}>
-        <button class="btn danger stop" disabled={!connected() || stopping()} onClick={stopChat}>{stopping() ? t("Stopping…") : t("Stop")}</button>
-      </Show>
       <div class="send">
         <div class="send-row">
+          {/* While the agent works, Stop sits with the box: one tap, without a bar of its own over the conversation. */}
+          <Show when={busy()}>
+            <button class="btn danger stop" disabled={!connected() || stopping()} onClick={stopChat}>{stopping() ? t("Stopping…") : t("Stop")}</button>
+          </Show>
           <textarea
             ref={box} class="field" rows="1" enterkeyhint="enter" autocapitalize="sentences" autocomplete="off" spellcheck={true} disabled={!props.alive}
             placeholder={connected() ? t("Message the agent…") : t("Offline: your draft is kept")}

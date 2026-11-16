@@ -8,7 +8,8 @@ import { Composer } from "./composer";
 import { KeyBar } from "./key-bar";
 import { PromptCard } from "./prompt-card";
 import { TerminalText } from "./terminal-text";
-import { canSeeScreen, canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, openScreenPicker, openTakeoverPicker, paintedFrom, screen, sessions } from "./phone-state";
+import { canSeeScreen, canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, openScreenPicker, openTakeoverPicker, paintedFrom, screen, sessions, stateBannerShown } from "./phone-state";
+import { Icon } from "./icons";
 import { promptKey } from "./screen-sync";
 import { t } from "./i18n";
 
@@ -49,18 +50,19 @@ export function SessionView(props: { id: string }) {
           <div class="session" data-id={props.id} classList={{ dim: stale() }}>
             <AgeChip />
             <TakeOverButton project={s().project_id} />
-            <Show when={stale() && (paintedFrom() ?? lastLiveAt())}>
+            {/* The banner says it already, when it shows. */}
+            <Show when={stale() && !stateBannerShown() && (paintedFrom() ?? lastLiveAt())}>
               <div class="asof">{t("As of {time} ({ago})", { time: clock((paintedFrom() ?? lastLiveAt())!, true), ago: ago((paintedFrom() ?? lastLiveAt())!, now()) })}</div>
             </Show>
             <Show when={sessionNotice()?.session === props.id ? sessionNotice() : null}>
               {(n) => (
                 <div class="notice-bar" role="status">
                   <span>{n().text}</span>
-                  <button class="icon" aria-label={t("Dismiss")} onClick={dismissNotice}>×</button>
+                  <button class="icon" aria-label={t("Dismiss")} onClick={dismissNotice}><Icon name="close" size={18} /></button>
                 </div>
               )}
             </Show>
-            <Show when={waiting() && screen().prompt} fallback={<Show when={waiting()}><div class="needs">{t("This agent is waiting for you.")}</div><Show when={screen().wait?.command}><CommandBlock command={screen().wait?.command} risk={screen().wait?.risk} /></Show></Show>}>
+            <Show when={waiting() && screen().prompt} fallback={<Show when={waiting()}><div class="needs"><Icon name="needs" size={18} />{t("This agent is waiting for you.")}</div><Show when={screen().wait?.command}><CommandBlock command={screen().wait?.command} risk={screen().wait?.risk} /></Show></Show>}>
               {/* Keyed by the question: the next prompt gets a fresh card, not the last one's "Sent". */}
               <Show when={promptKey(screen().prompt!, screen().waitingSince ?? s().waiting_since)} keyed>
                 {(_key) => <PromptCard id={props.id} prompt={screen().prompt!} waitingSince={screen().waitingSince ?? s().waiting_since} canType={canType()} wait={screen().wait} />}
@@ -71,7 +73,8 @@ export function SessionView(props: { id: string }) {
               when={canType() && s().alive}
               fallback={
                 <div class="readonly">
-                  {!s().alive ? t("This session has stopped.") : device()?.capped ? t("This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name.") : t("This device can only read. To type, allow it in Kelpie → Settings → Mobile, or use the Kelpie app or Tailscale/HTTPS.")}
+                  <Icon name={!s().alive ? "stopped" : "lock"} size={18} />
+                  <span>{!s().alive ? t("This session has stopped.") : device()?.capped ? t("This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name.") : t("This device can only read. To type, allow it in Kelpie → Settings → Mobile, or use the Kelpie app or Tailscale/HTTPS.")}</span>
                 </div>
               }
             >

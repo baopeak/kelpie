@@ -123,6 +123,9 @@ function deliverScreenMedia(bytes: Uint8Array) {
 /** This browser can connect peer to peer, to a computer that offers it. */
 export const canP2p = () => daemonApi() >= SCREEN_P2P_API && typeof RTCPeerConnection === "function";
 export const connected = () => canAct(conn());
+/** The banner under the header says what is wrong with the connection, and as of when the screen is: not while it is live, nor while a first
+ *  connection is made with nothing painted from before. */
+export const stateBannerShown = () => !["live", "connecting"].includes(conn().kind) || (conn().kind === "connecting" && paintedFrom() !== null);
 
 // ---------- the link ----------
 

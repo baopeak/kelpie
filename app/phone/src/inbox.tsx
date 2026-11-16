@@ -5,7 +5,9 @@ import { endedAgo } from "./conn-text";
 import { intlLocale, msg, t } from "./i18n";
 import { groupByWorkspace, groupOf, groupSessions, labelOf, shownRows, whereOf, type GroupKey } from "./inbox-order";
 import type { SessionRow } from "./link";
-import { canSeeScreen, connected, discardNotSent, notSent, now, openScreenPicker, openSession, paintedFrom, projects, sessions } from "./phone-state";
+import { canSeeScreen, canStartSessions, connected, discardNotSent, notSent, now, openScreenPicker, openSession, paintedFrom, projects, sessions } from "./phone-state";
+import { Icon, type IconName } from "./icons";
+import kip from "../../src/assets/brand/kip-peek.svg";
 import { INBOX_VIEWS, inboxView, order, showStopped, type InboxView } from "./prefs";
 import { waitedFor } from "../../src/lib/attention";
 
@@ -24,7 +26,7 @@ function NotSent() {
   return (
     <Show when={notSent().length}>
       <section class="not-sent" data-group="not-sent">
-        <div class="group">{t("Not sent")} · {notSent().reduce((n, c) => n + c.items.length, 0)}</div>
+        <div class="group">{t("Not sent")} <span class="count">{notSent().reduce((n, c) => n + c.items.length, 0)}</span></div>
         <p class="muted not-sent-hint">{t("From chats that are no longer running here (closed, or resumed as a new chat). Copy the text to send it again.")}</p>
         <For each={notSent()}>
           {(c) => (
@@ -50,7 +52,8 @@ function NotSent() {
   );
 }
 
-const TITLES: Record<GroupKey, string> = {
+/** A state in a word: the inbox's headings, and what a row or an open session says it is in. */
+export const STATE_WORDS: Record<GroupKey, string> = {
   needs: msg("Needs you"),
   working: msg("Working"),
   done: msg("Done"),
@@ -58,7 +61,23 @@ const TITLES: Record<GroupKey, string> = {
   stopped: msg("Stopped"),
 };
 
-const Empty = () => <div class="card"><p class="muted">{t("No sessions are running.")}</p></div>;
+/** Nothing runs: Kip, and where a session comes from. */
+const Empty = () => (
+  <div class="empty" data-inbox-empty>
+    <img src={kip} alt="" />
+    <h2>{t("No sessions are running.")}</h2>
+    <p class="muted">{canStartSessions() ? t("Tap New session to start an agent in one of your projects.") : t("Sessions you start in Kelpie on your computer show up here.")}</p>
+  </div>
+);
+
+/** Each state's glyph and the class its tile is drawn with (`exited`, `waiting`, `working`, `idle` as the daemon names them; done is idle and unread). */
+const STATE_LOOK: Record<GroupKey, { icon: IconName; cls: string }> = {
+  needs: { icon: "needs", cls: "waiting" },
+  working: { icon: "working", cls: "working" },
+  done: { icon: "done", cls: "idle done" },
+  idle: { icon: "idle", cls: "idle" },
+  stopped: { icon: "stopped", cls: "exited" },
+};
 
 /** The name of an inbox view, here and in Settings. */
 export const inboxViewName = (v: InboxView) => (v === "status" ? t("By status") : t("By workspace"));
@@ -69,7 +88,7 @@ function SessionItem(props: { s: SessionRow; byWorkspace: boolean }) {
   const sub = () => {
     const s = props.s;
     return [
-      props.byWorkspace ? t(TITLES[group()]) : "",
+      props.byWorkspace ? t(STATE_WORDS[group()]) : "",
       // A stopped session says when it ended (its last activity), not only that it did.
       !s.alive && s.last_activity > 0 ? endedAgo(s.last_activity, now()) : "",
       s.kind,
@@ -79,13 +98,16 @@ function SessionItem(props: { s: SessionRow; byWorkspace: boolean }) {
   };
   return (
     <div class="row" data-id={props.s.id} role="button" tabIndex={0} onClick={() => openSession(props.s.id)} onKeyDown={(e) => e.key === "Enter" && openSession(props.s.id)}>
-      <span class={`dot ${props.s.alive ? props.s.status : "exited"}`} />
+      <span class={`dot ${STATE_LOOK[group()].cls}`} title={t(STATE_WORDS[group()])}><Icon name={STATE_LOOK[group()].icon} size={20} /></span>
       <div class="main">
         <div class="name">{labelOf(props.s)}</div>
         <div class="sub">{sub()}</div>
       </div>
-      <Show when={group() === "needs" && props.s.waiting_since}><span class="waited">{waitedFor(props.s.waiting_since!, now())}</span></Show>
-      <Show when={props.s.unread && group() !== "needs"}><span class="badge">{t("new")}</span></Show>
+      <span class="trail">
+        <Show when={group() === "needs" && props.s.waiting_since}><span class="waited">{waitedFor(props.s.waiting_since!, now())}</span></Show>
+        <Show when={props.s.unread && group() !== "needs"}><span class="badge new">{t("new")}</span></Show>
+        <Icon name="forward" size={18} class="chev" />
+      </span>
     </div>
   );
 }
@@ -95,10 +117,14 @@ export function Inbox() {
   const groups = () => groupSessions(shown().rows, order.get(), intlLocale());
   const workspaces = () => groupByWorkspace(shown().rows, projects(), order.get(), intlLocale());
   return (
-    <div classList={{ painted: paintedFrom() !== null }}>
+    <div class="inbox" classList={{ painted: paintedFrom() !== null }}>
       {/* The computer's screen is reached from here too, not only from a session (a dialog may have nothing to do with one). */}
       <Show when={canSeeScreen()}>
-        <div class="takeover-entry"><button class="btn" data-see-screen disabled={!connected()} onClick={openScreenPicker}>{t("See the computer's screen")}</button></div>
+        <button class="entry" data-see-screen disabled={!connected()} onClick={openScreenPicker}>
+          <span class="entry-icon"><Icon name="monitor" size={20} /></span>
+          <span class="grow">{t("See the computer's screen")}</span>
+          <Icon name="forward" size={18} class="chev" />
+        </button>
       </Show>
       <div class="view-switch" role="group" aria-label={t("Inbox view")} data-inbox-view={inboxView.get()}>
         <For each={INBOX_VIEWS}>
@@ -111,8 +137,8 @@ export function Inbox() {
           <For each={groups()} fallback={<Empty />}>
             {(g) => (
               <section data-group={g.key}>
-                <div class="group">{t(TITLES[g.key])} · {g.rows.length}</div>
-                <For each={g.rows}>{(s) => <SessionItem s={s} byWorkspace={false} />}</For>
+                <div class="group">{t(STATE_WORDS[g.key])} <span class="count">{g.rows.length}</span></div>
+                <div class="rows"><For each={g.rows}>{(s) => <SessionItem s={s} byWorkspace={false} />}</For></div>
               </section>
             )}
           </For>
@@ -121,8 +147,8 @@ export function Inbox() {
         <For each={workspaces()} fallback={<Empty />}>
           {(w) => (
             <section class="workspace" data-workspace={w.key}>
-              <div class="group">{w.name ?? t("Other folders")} · {w.rows.length}</div>
-              <For each={w.rows}>{(s) => <SessionItem s={s} byWorkspace />}</For>
+              <div class="group">{w.name ?? t("Other folders")} <span class="count">{w.rows.length}</span></div>
+              <div class="rows"><For each={w.rows}>{(s) => <SessionItem s={s} byWorkspace />}</For></div>
             </section>
           )}
         </For>

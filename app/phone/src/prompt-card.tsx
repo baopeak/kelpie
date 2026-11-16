@@ -1,12 +1,13 @@
 // The question a session waits on, as buttons: one tap answers it. The keys come from the daemon's own
 // prompt detection; what a key sends is the desktop's mapping (`keyAnswer`). Answers go out only while
 // connected; one that may not have arrived is retried once by the link, and after that the person decides.
-import { createSignal, For, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { answeredBeforeText } from "../../src/chat/chat-model";
 import { CommandBlock } from "./command-block";
 import type { WaitInfo } from "./command-text";
 import { lastingText, noticeFor, refusalText } from "./notice";
-import { answerPrompt, connected, showNotice } from "./phone-state";
+import { answerPrompt, connected, screen, showNotice } from "./phone-state";
+import { promptLabels } from "./prompt-labels";
 import type { Prompt } from "./screen-sync";
 import { t } from "./i18n";
 
@@ -21,6 +22,8 @@ export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: nu
   // The next screen frame can remove this card before the reply to a late tap arrives. Then, and only then, the
   // outcome is told at the level of the session (while the card is here it says it itself).
   let gone = false;
+  // What each key does, when the menu on screen says it plainly. Shown beside the key, which stays the button's text.
+  const labels = createMemo(() => promptLabels(screen().rows, props.prompt.keys));
   onCleanup(() => (gone = true));
   const pick = async (key: string) => {
     if (!props.canType || phase() === "sending") return;
@@ -49,11 +52,14 @@ export function PromptCard(props: { id: string; prompt: Prompt; waitingSince: nu
     <div class="prompt" data-prompt>
       <CommandBlock command={props.wait?.command} risk={props.wait?.risk} onSeen={setSeen} />
       <Show when={props.prompt.question}><div class="q">{props.prompt.question}</div></Show>
-      <div class="actions">
+      <div class="answers">
         <For each={props.prompt.keys.filter((k) => !props.prompt.lasting?.includes(k))}>
           {(k) => (
-            <button class="btn primary key-answer" disabled={!props.canType || !connected() || !seen() || phase() === "sending" || phase() === "sent"} onClick={() => pick(k)}>
-              {k}
+            <button
+              class="btn key-answer" data-label={labels()[k]} aria-label={labels()[k] ? `${k}: ${labels()[k]}` : undefined}
+              disabled={!props.canType || !connected() || !seen() || phase() === "sending" || phase() === "sent"} onClick={() => pick(k)}
+            >
+              <span class="k">{k}</span>
             </button>
           )}
         </For>

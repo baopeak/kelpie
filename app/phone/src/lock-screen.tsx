@@ -2,6 +2,7 @@
 import { Show } from "solid-js";
 import { CommandBlock } from "./command-block";
 import { t } from "./i18n";
+import { Icon } from "./icons";
 import { connected, lockGo, lockShown, recheckAsked } from "./phone-state";
 
 function words(face: string): { title: string; text: string } {
@@ -28,8 +29,13 @@ export function LockScreen() {
   const can = () => s().face === "unlock" || s().face === "enrol";
   return (
     <div class="lock-screen" data-lock-screen={s().face}>
-      <h2>{words(s().face).title}</h2>
-      <p class="muted">{words(s().face).text}</p>
+      {/* Waiting on the computer: the load bar says it is running, not frozen (brand.md). */}
+      <Show when={s().face === "unknown"}><div class="load-bar" /></Show>
+      <div class="lock-top">
+        <span class="lock-icon"><Icon name="lock" size={36} /></span>
+        <h2>{words(s().face).title}</h2>
+        <p class="muted">{words(s().face).text}</p>
+      </div>
       <Show when={can()}>
         <button class="btn primary" data-lock-go disabled={s().asking || !connected()} onClick={() => void lockGo()}>
           {s().asking ? t("Asking…") : s().face === "enrol" ? t("Set up") : t("Unlock")}

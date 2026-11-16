@@ -368,5 +368,8 @@
   "Connect through": "Kết nối qua",
   "Available": "Dùng được",
   "Starting through the relay asks for Face ID once for the screen you pick.": "Khi bắt đầu qua relay, ứng dụng hỏi Face ID một lần cho màn hình bạn chọn.",
-  "Not verified, so the screen was not started. Try again when you are ready.": "Bạn chưa xác minh nên màn hình chưa được bắt đầu. Hãy thử lại khi bạn sẵn sàng."
+  "Not verified, so the screen was not started. Try again when you are ready.": "Bạn chưa xác minh nên màn hình chưa được bắt đầu. Hãy thử lại khi bạn sẵn sàng.",
+  "New session": "Phiên mới",
+  "Tap New session to start an agent in one of your projects.": "Bạn có thể chạm vào Phiên mới để khởi động một agent trong một dự án của mình.",
+  "Sessions you start in Kelpie on your computer show up here.": "Các phiên bạn khởi động trong Kelpie trên máy tính sẽ hiện ở đây."
 }
