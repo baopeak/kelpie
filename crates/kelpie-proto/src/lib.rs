@@ -103,7 +103,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// relay's `POST /v1/turn` and `/v1/turn/revoke`. An older daemon lists no `relay_turn` way, so the phone asks for servers only at 43.
 /// 44: `sftp.create {dest, path}`: a new empty file on a host, refused when the name is taken. The Files tab offers *New file* on a
 /// host only at 44.
-pub const API_LEVEL: u32 = 44;
+/// 45: `sftp.stat_many {dest, paths}` (at most 512 absolute paths): `[Meta | null]` in order, null for a path that cannot be
+/// read, an error when the connection is lost. A remote project's live updates poll it only at 45.
+pub const API_LEVEL: u32 = 45;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

@@ -267,6 +267,9 @@ export const sftpRename = (dest: string, from: string, to: string) => daemon<boo
 /** From this daemon API level a host's pane can make a new empty file (`sftp.create`, refused when the name is taken). */
 export const CREATE_API = 44;
 export const sftpCreate = (dest: string, path: string) => daemon<boolean>("sftp.create", { dest, path });
+/** From this daemon API level a remote project gets live updates: `sftp.stat_many` (null for a path that cannot be read). */
+export const LIVE_API = 45;
+export const sftpStatMany = (dest: string, paths: string[]) => daemon<(RemoteMeta | null)[]>("sftp.stat_many", { dest, paths });
 /** Not recursive: a recursive change is a transfer job (`xferStart` with kind `chmod`). */
 export const sftpChmod = (dest: string, paths: string[], mode: number) => daemon<boolean>("sftp.chmod", { dest, paths, mode });
 /** `""` lists the drives on Windows. */

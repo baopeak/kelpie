@@ -9,6 +9,7 @@ import { onEvent, readFile, writeFile } from "../lib/ipc";
 import { asksFor, refreshAsk, refreshFiles, reread } from "../lib/file-refresh";
 import { cksumOf } from "../lib/spec-index";
 import { isRemote } from "../lib/remote";
+import { liveOk, watchFile } from "../lib/remote-live";
 import { Icon } from "./icons";
 import { baseExtensions, languageFor } from "../lib/codemirror";
 import { isMac } from "../lib/platform";
@@ -52,6 +53,8 @@ export function FileViewer(props: { project: Project; path: string; line?: numbe
   const [mode, setMode] = createSignal<"rendered" | "source">(RENDERED[kindOf(props.path)] && !props.line ? "rendered" : "source");
   const rendered = () => kind() === "image" || kind() === "pdf" || (!!RENDERED[kind()] && mode() === "rendered");
   const [version, setVersion] = createSignal(0);
+  // On a host with live updates, a change there re-reads this file (through file-refresh).
+  createEffect(() => onCleanup(watchFile(props.project, props.path)));
   createEffect(on(refreshAsk, (a) => asksFor(a, props.project.path, props.path) && rendered() && setVersion((v) => v + 1), { defer: true }));
   return (
     <div class="viewer">
@@ -275,7 +278,7 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
   // A host has no watcher: showing this file again, or coming back to the window, re-checks it (at most every few seconds).
   let checked = Date.now();
   const recheck = () => {
-    if (!remote() || !props.focused || Date.now() - checked < RECHECK_MS || (file()?.size ?? 0) > RECHECK_MAX) return;
+    if (!remote() || liveOk(props.project) || !props.focused || Date.now() - checked < RECHECK_MS || (file()?.size ?? 0) > RECHECK_MAX) return;
     checked = Date.now();
     void load(false);
   };

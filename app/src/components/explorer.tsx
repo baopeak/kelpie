@@ -11,6 +11,7 @@ import type { Project } from "../lib/types";
 import { t } from "../lib/i18n";
 import { LoadBar } from "./load-bar";
 import { refreshFiles } from "../lib/file-refresh";
+import { resumeLive } from "../lib/remote-live";
 
 export function Explorer(props: { project: Project }) {
   const mode = () => (store.workspace(props.project.id).rightPanel === "search" ? "contents" : "names");
@@ -39,7 +40,7 @@ export function Explorer(props: { project: Project }) {
       <div class="explorer-head">
         <span class="explorer-title" title={props.project.path}>{props.project.name}</span>
         <button class="icon-btn" title={t("Collapse all")} onClick={() => api?.collapseAll()}><Icon name="minus" size={14} /></button>
-        <button class="icon-btn" title={t("Refresh")} onClick={() => { api?.refresh(); refreshFiles(props.project.path); void gitState.refresh(); }}><Icon name="refresh" size={14} /></button>
+        <button class="icon-btn" title={t("Refresh")} onClick={() => { resumeLive(props.project.path); api?.refresh(); refreshFiles(props.project.path); void gitState.refresh(); }}><Icon name="refresh" size={14} /></button>
       </div>
       <div class="explorer-tools">
         <Show when={mode() === "names"}>
