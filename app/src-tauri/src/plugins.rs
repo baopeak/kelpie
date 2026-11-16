@@ -37,13 +37,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The approved manifests. A file that cannot be used approves nothing: it keeps no previous version, which could
+/// bring back an approval the person withdrew; the plugins are approved again.
 fn approvals() -> BTreeMap<String, String> {
     std::fs::read(plugins_dir().join("approvals.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 fn save_approvals(map: &BTreeMap<String, String>) -> CmdResult<()> {
     std::fs::create_dir_all(plugins_dir()).map_err(err)?;
-    std::fs::write(plugins_dir().join("approvals.json"), serde_json::to_vec_pretty(map).map_err(err)?).map_err(err)
+    kelpie_proto::durable::write(&plugins_dir().join("approvals.json"), &serde_json::to_vec_pretty(map).map_err(err)?).map_err(err)
 }
 
 /// What a manifest may contain; anything else is reported, not silently used.
@@ -203,7 +205,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
         if ty.is_dir() {
             copy_dir(&e.path(), &to.join(&name))?;
         } else if ty.is_file() {
-            std::fs::copy(e.path(), to.join(&name))?;
+            kelpie_proto::durable::copy(&e.path(), &to.join(&name))?;
         }
     }
     Ok(())
@@ -371,7 +373,7 @@ pub async fn plugin_create(id: String, name: String) -> CmdResult<String> {
                 "statusItems": [{ "id": "branch", "label": "Branch", "command": "git rev-parse --abbrev-ref HEAD", "intervalSeconds": 30 }]
             }
         });
-        std::fs::write(tmp.join(MANIFEST), serde_json::to_vec_pretty(&manifest).map_err(err)?).map_err(err)?;
+        kelpie_proto::durable::write(&tmp.join(MANIFEST), &serde_json::to_vec_pretty(&manifest).map_err(err)?).map_err(err)?;
         std::fs::rename(&tmp, &dir).map_err(err)?;
         Ok(dir.to_string_lossy().into_owned())
     })

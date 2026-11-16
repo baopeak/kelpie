@@ -594,11 +594,8 @@ pub(crate) fn save_cache() {
     *LAST_SAVE.lock() = Some(Instant::now());
     let snapshot = Cache { version: CACHE_VERSION, files: FILES.lock().clone() };
     let Ok(json) = serde_json::to_vec(&snapshot) else { return };
-    let path = cache_file();
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    // A cache: it is rebuilt when lost, so it keeps no previous version, but it is never left zeroed.
+    let _ = kelpie_proto::durable::write(&cache_file(), &json);
 }
 
 /// Saves unless a save happened lately (a live session grows its transcript all the time).

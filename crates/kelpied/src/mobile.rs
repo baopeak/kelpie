@@ -60,7 +60,6 @@ use crate::load::{Level, Load};
 use crate::notify::destinations::{self, AlertPrefs, Destinations, Target};
 use crate::notify::web_push;
 use crate::notify::SecretStore;
-use crate::persist::write_atomic;
 use crate::session::{bounded_client_channel, next_client_id, now_millis, Answer, AnswerError, By, ClientTx, Outgoing, Resolution};
 pub use lanes::CursorSlot;
 use lanes::{Beat, Liveness, SLOW_AFTER};
@@ -966,7 +965,7 @@ impl Mobile {
             return Ok(());
         }
         let bytes = serde_json::to_vec_pretty(&*self.config.lock());
-        let written = bytes.map_err(anyhow::Error::from).and_then(|bytes| write_atomic(&store::path(&self.dir), &bytes));
+        let written = bytes.map_err(anyhow::Error::from).and_then(|bytes| crate::persist::save_state(&store::path(&self.dir), &bytes));
         self.save_failed.store(written.is_err(), Ordering::SeqCst);
         if written.is_ok() {
             self.unsaved_text.lock().take();

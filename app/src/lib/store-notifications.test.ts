@@ -12,7 +12,7 @@ async function boot(saved: unknown) {
   vi.resetModules();
   (globalThis as any).window = globalThis;
   const ipc = vi.mocked(await import("./ipc"));
-  ipc.loadState.mockResolvedValue(saved as any);
+  ipc.loadState.mockResolvedValue({ state: saved, restored: false, damaged_copy: null });
   ipc.saveState.mockResolvedValue(undefined);
   ipc.listSessions.mockResolvedValue([]);
   ipc.platformInfo.mockResolvedValue({ api: 13, version: "0.1.5", security: 1, os: "windows", home: "", data_dir: "", e2e: false } as any);

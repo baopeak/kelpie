@@ -28,16 +28,18 @@ Kelpie (Tauri app)                        kelpied (session daemon, one per user)
 | `kelpie-screen` | while a phone sees the screen (exits 30 s after the last viewer) | capture, the H.264 encoder, the phone's input into `SendInput`, the sharing border |
 | agent CLIs | per session | — |
 
-`app-state.json` carries a format `version` (currently 3: n-ary pane splits). A file with an older version, an
-unknown format or one that cannot be read is first copied to
+`app-state.json` carries a format `version` (currently 3: n-ary pane splits). A file damaged by a sudden
+shutdown is restored from its previous save (see "Crash-safe files"), and the window says so. A file with an
+older version, an unknown format, or one that cannot be read with no usable previous save is first copied to
 `app-state.<label>-<time>.bak.json`; if that copy fails, or the file comes from a newer Kelpie,
 the app runs without saving rather than overwrite it.
 
 `chat-bookmarks.json` holds saved replies with their full text, so they outlast their session. Every
 change is applied by a native command to the file as it is at that moment and written atomically, so
 another running Kelpie's changes, a restored copy and entries this build does not understand all stay.
-A file that cannot be read is an error: it stays byte-identical, the feature is read-only until the next
-start, and the user is told once.
+A damaged file comes back from its previous version. One that cannot be read with no usable previous
+version is an error: it stays byte-identical, the feature is read-only until the next start, and the user
+is told once.
 
 Closing Kelpie stops `kelpied` too unless *When Kelpie closes* keeps it running. The close is held natively
 (`quit.rs`: the main window's close request, or an exit without a code such as Cmd+Q, while the main window
@@ -61,6 +63,49 @@ Data: `%LOCALAPPDATA%\Kelpie` (Windows), `~/Library/Application Support/Kelpie` 
 `$XDG_DATA_HOME/Kelpie`, else `~/.local/share/Kelpie` (Linux; an empty or relative `XDG_DATA_HOME`
 is ignored, as the XDG spec says). `KELPIE_DATA_DIR` and `KELPIE_ENDPOINT` override both (used by
 the dev scripts and tests).
+
+### Crash-safe files
+
+A power cut can keep a rename but not the data written before it: on 2026-11-16 three files came back at
+their full size with every byte zero. Every file Kelpie owns is therefore written through
+`kelpie_proto::durable` (app and daemon alike): a uniquely named temporary file beside the target, `sync_all`,
+then one atomic replace (on Windows a POSIX-semantics rename on the open handle, so readers of the old file
+keep reading it, flushed again afterwards, with `MoveFileEx` write-through on file systems without POSIX
+renames; on Unix `rename` and an fsync of the folder, the temporary file created with the target's
+permissions). A refused replace (a scanner holding the file) is retried for up to about a second; a failed
+one removes its temporary file and leaves the target as it was. The daemon's ticker hands its periodic saves
+(`sessions.json`, snapshots) to a blocking task and never waits on them; saves run one at a time, and the
+shutdown's last save waits for one under way. The window's app-state saves are queued the same way.
+
+State files also keep their last good version as `<name>.prev` (`write_with_prev`). The current file is
+copied there (itself atomically) only when it is whole and valid JSON, and only then is the target
+replaced, so at every instant at least one of the two is complete, and a damaged file never replaces a good
+previous one. `durable::load` reads the file and falls back to `.prev` when it is missing, empty, all zero
+bytes or does not parse. It keeps a copy of the damaged file as `<name>.damaged-<ms>` (the newest three,
+not repeated for the same bytes), sweeps temporary files older than a day, and reports which one it used. A
+read that fails for another reason (a scanner holding the file) is tried again for about 300 ms; a file that
+still cannot be read is an error, never a fallback, handled as before: the window copies the file aside
+before it starts fresh, or saves nothing; saved replies turn read-only; the mobile store, automations and the
+transfer journal write nothing over it; the daemon's other stores start empty. Only when both are unusable does each caller do what it did before (the window's
+backup-and-fresh-start, the mobile store's `unreadable` copy with phone access off, the automations file set
+aside, the transfer journal's damaged copy, an empty store for the rest).
+
+The previous version is one save behind, so a restore undoes the last change. Where that change can be a
+revocation or a started action, a removed file stays removed (`load_unless_removed`: removing it is a reset)
+and a restore fails closed: `mobile.v2.json` comes back with phone access off and every phone to be paired
+again, `notify.json` without a Telegram approval binding (back to alert links), `automations.json` with
+automatic runs paused, and a run in `runs.json` starts none of its unstarted tasks without approval.
+`policy.json` also stays removed when removed; a damaged one comes back as it was. Plugin approvals keep no previous version:
+a damaged file approves nothing.
+
+| Kept with `.prev` | Durable only, and why |
+|---|---|
+| App: `app-state.json`, `chat-bookmarks.json`, `ssh/hosts.json` (also read with its previous version by `askpass` and the host-id lookup). Daemon: `sessions.json`, `policy.json`, `custom-agents.json`, `automations.json`, `workspace-meta.json`, `review-notes.json`, `runs.json`, `scheduled.json` (both removed when empty), the sub-session outcome record, `checkpoints/config.json`, `notify.json`, `mobile.v2.json`, `transfers.json` | Rebuilt or rewritten anyway: `usage-cache.json` and `history-cache.json` (caches), `snapshots/<id>.ansi` (the last screen, rewritten on every save), checkpoint logs (rebuilt from their git refs), `automations.json.v2` (a copy itself), generated agent settings and MCP config, the generated SSH config, the daemon slot's files, the auth token (new at each daemon start; written private). Transient: the notify outbox (an older version would send delivered alerts again). Security: `plugins/approvals.json` (above). Copies kept once: `automations.json.bak`, `known_hosts.old`, installed plugin files. The user's or an agent's files: the editor's saves, agent configuration and its backups, `known_hosts`, imported SSH keys, exports and settings backups, account homes, moved transcripts, the data-folder migration |
+
+Not changed: append-only logs (daemon log, phone audit log, browser-agent log), pid files and the empty
+data-folder migration markers, browser screenshots and pasted attachments (each a new file), and file
+transfers, which have their own partial file, rename and fsync option. A restored `scheduled.json` can report
+a timer that was cancelled in the lost save as lost; such timers are only reported, never fired.
 
 ### Platforms
 
@@ -1965,8 +2010,8 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
   in its project); `is_descendant` follows `parent` links, so closing a session in the middle of a
   chain cuts the ancestors off from what is below it. The sidebar nests a child only under a parent
   with the same `project_id`.
-- **Policy** (`policy.json`, written atomically, unknown keys kept, an unreadable file copied to
-  `policy.json.unreadable`): `sub_sessions` `off|ask|allow` (default `ask`) and `sub_max` (0 = auto, at
+- **Policy** (`policy.json`, written atomically with its previous version, unknown keys kept, a damaged file
+  restored from that version, one with no usable previous version copied to `policy.json.unreadable`): `sub_sessions` `off|ask|allow` (default `ask`) and `sub_max` (0 = auto, at
   most 64). `off` also stops launch-time injection (below) for sessions started afterwards; running
   sessions keep their tools and every call is refused.
 - **Caps** (`subs::check_caps`; one `Slot` is held from the check until the child exists so concurrent

@@ -966,59 +966,20 @@ impl Drop for ClaudeLock {
     }
 }
 
-fn clear_readonly(path: &Path) {
-    if let Ok(meta) = std::fs::metadata(path) {
-        let mut p = meta.permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        p.set_readonly(false);
-        let _ = std::fs::set_permissions(path, p);
-    }
-}
-
 /// Writes `text` next to `path` under a new name (private to the user, flushed to disk) and swaps
-/// it in. When the swap fails because another program holds the file, it is tried again a few times
-/// and then refused: the file is never rewritten in place, where a crash would leave half of it.
+/// it in (see [`kelpie_proto::durable`]); a link stays a link. When the swap fails because another
+/// program holds the file, it is tried again a few times and then refused: the file is never
+/// rewritten in place, where a crash would leave half of it.
 fn write_atomic(path: &Path, text: &str) -> Res<()> {
-    use std::io::Write as _;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
     #[cfg(test)]
     assert!(path.starts_with(std::env::temp_dir()), "a test tried to write outside the temp folder: {}", path.display());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    // Through a link: a dotfiles repository's symlink stays a link.
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = target.with_file_name(format!(".{name}.{}-{}.kelpie-tmp", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let written = opts.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all()));
-    if let Err(e) = written {
-        clear_readonly(&tmp);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("{}: {e}", path.display()));
-    }
-    #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(&target) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    let mut last = String::new();
-    for attempt in 0..8u64 {
-        match std::fs::rename(&tmp, &target) {
-            Ok(()) => return Ok(()),
-            Err(e) => last = e.to_string(),
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25 * (attempt + 1)));
-    }
-    clear_readonly(&tmp);
-    let _ = std::fs::remove_file(&tmp);
-    Err(format!("{} is in use by another program: nothing was written ({last})", path.display()))
+    kelpie_proto::durable::write_private(path, text.as_bytes()).map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => format!("{} is in use by another program: nothing was written ({e})", path.display()),
+        _ => format!("{}: {e}", path.display()),
+    })
 }
 
 fn put_back(path: &Path, old: &Option<String>) -> Res<()> {

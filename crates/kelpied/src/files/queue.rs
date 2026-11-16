@@ -2114,6 +2114,13 @@ mod tests {
         let again = Queue::new(r.dir.clone(), Arc::new(Pool::new(PathBuf::from("kelpied"))), Arc::new(|_: &str, _: Value| {}));
         assert_eq!(again.get(&id).unwrap().state, State::Interrupted);
         std::fs::write(r.dir.join("transfers.json"), b"{broken").unwrap();
+        // Its previous version is whole (a power cut damages only the file being replaced): the jobs come back.
+        let restored = Queue::new(r.dir.clone(), Arc::new(Pool::new(PathBuf::from("kelpied"))), Arc::new(|_: &str, _: Value| {}));
+        assert!(restored.get(&id).is_some());
+        assert!(restored.notice.lock().is_none());
+        drop(restored);
+        std::fs::write(r.dir.join("transfers.json"), b"{broken").unwrap();
+        std::fs::write(r.dir.join("transfers.json.prev"), b"{broken too").unwrap();
         let fresh = Queue::new(r.dir.clone(), Arc::new(Pool::new(PathBuf::from("kelpied"))), Arc::new(|_: &str, _: Value| {}));
         assert!(fresh.jobs.lock().is_empty());
         assert!(fresh.notice.lock().is_some());

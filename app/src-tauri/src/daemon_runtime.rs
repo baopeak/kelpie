@@ -159,7 +159,8 @@ fn fill_slot(dir: &Path, src: &Path, exe_name: &std::ffi::OsStr, build: &str) ->
     for name in names {
         let from = src.join(name);
         if from.is_file() {
-            std::fs::copy(&from, dir.join(name))?;
+            // Flushed before the build file names the slot as ready: a power cut never leaves a zeroed program behind a valid name.
+            kelpie_proto::durable::copy(&from, &dir.join(name))?;
             copied |= name == Path::new(exe_name);
         }
     }
@@ -167,7 +168,7 @@ fn fill_slot(dir: &Path, src: &Path, exe_name: &std::ffi::OsStr, build: &str) ->
         return Err(std::io::Error::other("daemon binary missing"));
     }
     name_source(dir, src);
-    std::fs::write(dir.join(BUILD_FILE), build)?;
+    kelpie_proto::durable::write(&dir.join(BUILD_FILE), build.as_bytes())?;
     Ok(exe)
 }
 
@@ -200,7 +201,7 @@ fn name_source(dir: &Path, src: &Path) {
     let file = dir.join("source.txt");
     let text = src.to_string_lossy();
     if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_ref()) {
-        if let Err(e) = std::fs::write(&file, text.as_bytes()) {
+        if let Err(e) = kelpie_proto::durable::write(&file, text.as_bytes()) {
             tracing::warn!("daemon slot: cannot name the app's folder ({e}); phone pairing will not be available");
         }
     }

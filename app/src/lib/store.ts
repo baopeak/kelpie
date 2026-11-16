@@ -104,10 +104,13 @@ function createAppStore() {
   let saveTimer = 0;
   /** Set when saving could destroy data we could not back up or do not understand. */
   let persistBlocked = false;
+  /** Saves run one at a time, in order: each is flushed to the disk, and on a slow disk an older one must not land after a newer one. */
+  let saving: Promise<unknown> = Promise.resolve();
+  const queueSave = (snapshot: unknown) => (saving = saving.catch(() => {}).then(() => ipc.saveState(snapshot)));
   const persist = () => {
     if (!loaded() || persistBlocked) return;
     clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => void ipc.saveState(JSON.parse(JSON.stringify(state))).catch(() => {}), 400);
+    saveTimer = window.setTimeout(() => void queueSave(JSON.parse(JSON.stringify(state))).catch(() => {}), 400);
   };
   const update = (fn: (s: AppState) => void) => {
     setState(produce(fn));
@@ -117,7 +120,7 @@ function createAppStore() {
   async function saveNow() {
     if (!loaded() || persistBlocked) throw new Error(t("App state cannot be saved in this session."));
     clearTimeout(saveTimer);
-    await ipc.saveState(JSON.parse(JSON.stringify(state)));
+    await queueSave(JSON.parse(JSON.stringify(state)));
   }
   const canPersist = () => loaded() && !persistBlocked;
 
@@ -1816,8 +1819,11 @@ function createAppStore() {
     let saved: any = null;
     let problem: "unreadable" | "unknown" | null = null;
     let problemDetail = "";
+    let restored: { copy: string | null } | null = null;
     try {
-      saved = await ipc.loadState();
+      const loaded = await ipc.loadState();
+      saved = loaded.state;
+      if (loaded.restored) restored = { copy: loaded.damaged_copy };
     } catch (e) {
       problem = "unreadable";
       problemDetail = String(e);
@@ -1825,6 +1831,10 @@ function createAppStore() {
     const version = saved && typeof saved === "object" ? saved.version : undefined;
     if (saved !== null && !problem && !(Number.isInteger(version) && version >= 1)) problem = "unknown";
     let migrate = false;
+    if (restored && !problem) {
+      // The previous save was used instead of a file a sudden shutdown damaged: nothing was lost but the last changes.
+      notify(restored.copy ? t("Kelpie restored the app state from the previous save because the saved file was damaged. A copy of the damaged file was kept at {path}.", { path: restored.copy }) : t("Kelpie restored the app state from the previous save because the saved file was missing or damaged."), undefined, 12000);
+    }
     if (problem) {
       const copy = await ipc.stateBackup("unreadable").catch(() => null);
       if (copy) notify(problem === "unreadable" ? t("Saved app state could not be read ({error}); a copy was kept at {path}. Starting fresh.", { error: problemDetail, path: copy }) : t("Saved app state has an unknown format; a copy was kept at {path}. Starting fresh.", { path: copy }), undefined, 12000);

@@ -95,6 +95,33 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> CmdResult<T> + Send
     tauri::async_runtime::spawn_blocking(f).await.map_err(err)?
 }
 
+/// Saves one of Kelpie's JSON state files, keeping its last good version as `<name>.prev` (see
+/// [`kelpie_proto::durable`]): a power cut never leaves both damaged.
+pub fn save_state(path: &Path, data: &[u8]) -> CmdResult<()> {
+    kelpie_proto::durable::write_with_prev(path, data, kelpie_proto::durable::is_json).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Reads a state file written by [`save_state`], from its previous version when the file is missing
+/// or damaged (logged). `Ok(None)`: no file yet. `Err`: a file is there and neither it nor its
+/// previous version can be used, or it cannot be read at all: the caller must not write over it.
+pub fn load_state<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, kelpie_proto::durable::LoadError> {
+    load_state_from(path, |b| serde_json::from_slice::<T>(b)).map(|o| o.map(|l| l.value))
+}
+
+/// [`load_state`] with the parser given and the source reported.
+pub fn load_state_from<T, E: std::fmt::Display>(path: &Path, parse: impl Fn(&[u8]) -> Result<T, E>) -> Result<Option<kelpie_proto::durable::Loaded<T>>, kelpie_proto::durable::LoadError> {
+    let loaded = kelpie_proto::durable::load(path, parse);
+    match &loaded {
+        Ok(Some(l)) if l.source == kelpie_proto::durable::Source::Previous => match &l.damaged {
+            Some(d) => tracing::warn!("{} is damaged ({}); restored its previous version{}", path.display(), d.reason, d.kept_at.as_ref().map(|k| format!(", a copy was kept at {}", k.display())).unwrap_or_default()),
+            None => tracing::warn!("{} is missing; restored its previous version", path.display()),
+        },
+        Err(e) => tracing::warn!("{}: {e}", path.display()),
+        _ => {}
+    }
+    loaded
+}
+
 /// Whether `path` is an existing folder (no listing, so a large folder costs nothing).
 #[tauri::command]
 pub async fn fs_is_dir(path: String) -> CmdResult<bool> {
@@ -267,17 +294,10 @@ fn fs_write_file_blocking(root: String, path: String, content: String, expected_
             }
         }
     }
-    // Write through symlinks to their target, and keep the file's permissions (exec bit…).
+    // Write through symlinks to their target, keep the file's permissions (exec bit…), and flush it to
+    // the disk before it replaces the old one: a power cut never leaves the user's file zeroed.
     let full = std::fs::canonicalize(&full).unwrap_or(full);
-    let tmp = full.with_extension(format!("{}.kelpie-tmp", full.extension().and_then(|e| e.to_str()).unwrap_or("")));
-    std::fs::write(&tmp, content.as_bytes()).map_err(err)?;
-    if let Ok(meta) = std::fs::metadata(&full) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    std::fs::rename(&tmp, &full).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        err(e)
-    })?;
+    kelpie_proto::durable::write(&full, content.as_bytes()).map_err(err)?;
     let mtime = std::fs::metadata(&full).map(|m| mtime_of(&m)).unwrap_or(0);
     Ok(WriteResult { ok: true, conflict: false, mtime })
 }

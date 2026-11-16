@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use super::destinations::Host;
 use super::outbox::Entry;
 use super::{random_topic, telegram_base, telegram_call, telegram_text, Config, Failure, Kind, Payload, SecretStore, TelegramMode, K_TELEGRAM_TOKEN};
-use crate::persist::write_atomic;
+use crate::persist::save_state;
 
 /// How long a message's buttons work, and how long a binding code does.
 pub const OFFER_FOR: Duration = Duration::from_secs(300);
@@ -342,7 +342,7 @@ impl Approvals {
                 c.telegram.user_id.clear();
                 c.telegram.user_name.clear();
                 // Held in memory whatever the disk says: a kill switch that a failed write undoes is none.
-                if let Err(e) = serde_json::to_vec_pretty(&c).map_err(anyhow::Error::from).and_then(|bytes| write_atomic(&self.path, &bytes)) {
+                if let Err(e) = serde_json::to_vec_pretty(&c).map_err(anyhow::Error::from).and_then(|bytes| save_state(&self.path, &bytes)) {
                     tracing::warn!("telegram approvals off, not saved: {e:#}");
                 }
                 *self.config.lock() = c;
@@ -550,7 +550,7 @@ impl Approvals {
                 c.telegram.user_name = name.clone();
                 c.telegram.chat_id = chat.to_string();
                 c.telegram.mode = TelegramMode::ApproveLow;
-                match serde_json::to_vec_pretty(&c).map_err(anyhow::Error::from).and_then(|bytes| write_atomic(&self.path, &bytes)) {
+                match serde_json::to_vec_pretty(&c).map_err(anyhow::Error::from).and_then(|bytes| save_state(&self.path, &bytes)) {
                     Ok(()) => {
                         *self.config.lock() = c;
                         Saved::Bound

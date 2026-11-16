@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, Mac};
+use kelpie_proto::durable::{LoadError, Source};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -453,24 +454,48 @@ pub struct Loaded {
     pub fresh: bool,
 }
 
+/// A file damaged by a power cut comes back from its previous version (`<file>.prev`) when that one is whole, with phone access
+/// off and every phone to be paired again: that version is one save behind, and the save it misses may have revoked a phone (a
+/// record without its MAC never verifies). A file that was removed stays removed.
 pub fn load(dir: &Path) -> Loaded {
     let path = dir.join(FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<Store>(&bytes) {
-            Ok(store) if store.version == VERSION => Loaded { store, broken: None, fresh: false },
-            Ok(store) => broken(&path, &bytes, format!("{FILE} has format {} (this Kelpie reads {VERSION}): it was written by another version", store.version)),
-            Err(e) => broken(&path, &bytes, format!("{FILE} could not be read: {e}")),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded { store: from_legacy(dir), broken: None, fresh: true },
-        Err(e) => Loaded { store: Store { version: VERSION, ..Default::default() }, broken: Some(format!("{FILE} could not be read: {e}")), fresh: false },
+    match crate::persist::load_state_from(&path, |b| serde_json::from_slice::<Store>(b), true) {
+        Ok(Some(l)) if l.value.version == VERSION => {
+            let mut store = l.value;
+            if l.source == Source::Previous {
+                tracing::warn!("{FILE} was restored from its previous version: phone access is off and every phone must be paired again");
+                store.enabled = false;
+                for d in &mut store.devices {
+                    d.mac.clear();
+                }
+            }
+            Loaded { store, broken: None, fresh: false }
+        }
+        Ok(Some(l)) => {
+            let read_from = if l.source == Source::Previous { kelpie_proto::durable::prev_path(&path) } else { path.clone() };
+            let bytes = std::fs::read(&read_from).unwrap_or_default();
+            broken(&path, &bytes, format!("{FILE} has format {} (this Kelpie reads {VERSION}): it was written by another version", l.value.version), None)
+        }
+        Ok(None) => Loaded { store: from_legacy(dir), broken: None, fresh: true },
+        Err(LoadError::Damaged(d)) => {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            broken(&path, &bytes, format!("{FILE} could not be read: {}", d.reason), d.kept_at)
+        }
+        Err(LoadError::Io(e)) => Loaded { store: Store { version: VERSION, ..Default::default() }, broken: Some(format!("{FILE} could not be read: {e}")), fresh: false },
     }
 }
 
-/// Copies the file it cannot use next to it and says why; phone access stays off.
-fn broken(path: &Path, bytes: &[u8], why: String) -> Loaded {
-    let backup = path.with_file_name(format!("mobile.v2.unreadable-{}.json", crate::session::now_millis()));
-    match std::fs::write(&backup, bytes) {
-        Ok(()) => tracing::warn!("{why}; a copy is at {}; phone access stays off until it is reset", backup.display()),
+/// Keeps a copy of the file it cannot use next to it (unless `kept` already is one) and says why; phone access stays off.
+fn broken(path: &Path, bytes: &[u8], why: String, kept: Option<PathBuf>) -> Loaded {
+    let kept = match kept {
+        Some(at) => Ok(at),
+        None => {
+            let backup = path.with_file_name(format!("mobile.v2.unreadable-{}.json", crate::session::now_millis()));
+            kelpie_proto::durable::write(&backup, bytes).map(|()| backup)
+        }
+    };
+    match kept {
+        Ok(at) => tracing::warn!("{why}; a copy is at {}; phone access stays off until it is reset", at.display()),
         Err(e) => tracing::warn!("{why}; copying it aside failed ({e}); phone access stays off until it is reset"),
     }
     // Nothing of it is used but this: a serve entry outlives the file, and a reset can only remove it knowing it for ours.
@@ -1088,10 +1113,43 @@ mod tests {
             assert!(l.broken.is_some(), "{tag}");
             assert!(!l.store.enabled, "{tag}: phone access stays off");
             assert_eq!(std::fs::read(d.join(FILE)).unwrap(), body, "{tag}: left as it was");
-            let copies: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("mobile.v2.unreadable-")).collect();
+            let copies: Vec<_> = std::fs::read_dir(&d)
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.starts_with("mobile.v2.unreadable-") || n.starts_with("mobile.v2.json.damaged-")
+                })
+                .collect();
             assert_eq!(copies.len(), 1, "{tag}");
             assert_eq!(std::fs::read(copies[0].path()).unwrap(), body);
             let _ = std::fs::remove_dir_all(&d);
         }
+    }
+
+    #[test]
+    fn a_file_zeroed_by_a_power_cut_comes_back_from_its_previous_version() {
+        let d = dir("zeroed");
+        let phone = Device { id: "d1".into(), name: "Phone".into(), pk: "AAAA".into(), permission: Permission::Read, kind: Kind::Pwa, created_at: 7, last_seen: 0, mac: "signed".into(), secure_origin: false, secure_mac: String::new(), page: None, page_kind: None, page_mac: String::new(), push: None, lock: None, alerts: None, verified: false };
+        let mut store = Store { version: VERSION, enabled: true, port: Some(4321), devices: vec![phone], ..Default::default() };
+        crate::persist::save_state(&d.join(FILE), &serde_json::to_vec(&store).unwrap()).unwrap();
+        store.port = Some(4322);
+        crate::persist::save_state(&d.join(FILE), &serde_json::to_vec(&store).unwrap()).unwrap();
+        let size = std::fs::metadata(d.join(FILE)).unwrap().len() as usize;
+        std::fs::write(d.join(FILE), vec![0u8; size]).unwrap();
+        let l = load(&d);
+        assert!(l.broken.is_none(), "{:?}", l.broken);
+        assert!(!l.store.enabled, "phone access is off: the lost save may have revoked a phone");
+        assert!(l.store.devices.iter().all(|d| d.mac.is_empty()), "and every phone pairs again");
+        assert_eq!(l.store.port, Some(4321));
+        // Removed rather than damaged: a reset, so its previous version does not come back.
+        std::fs::remove_file(d.join(FILE)).unwrap();
+        assert!(load(&d).fresh);
+        std::fs::write(d.join(FILE), vec![0u8; size]).unwrap();
+        // With no usable previous version, it is reported as before and phone access stays off.
+        std::fs::write(d.join(format!("{FILE}.prev")), b"{trunc").unwrap();
+        let l = load(&d);
+        assert!(l.broken.is_some() && !l.store.enabled);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

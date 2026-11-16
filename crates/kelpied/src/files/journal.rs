@@ -1,9 +1,11 @@
 //! The transfer journal (`<data>/transfers.json`): the jobs, so the queue survives a daemon restart. Written
-//! atomically. A file that cannot be understood is copied aside and never replaced by an empty journal;
+//! atomically with its previous version. A file that cannot be understood (nor its previous version) is
+//! copied aside and never replaced by an empty journal;
 //! one that cannot be read at all turns saving off until the daemon restarts.
 
 use std::path::{Path, PathBuf};
 
+use kelpie_proto::durable::LoadError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -42,27 +44,21 @@ pub fn path(data_dir: &Path) -> PathBuf {
     data_dir.join("transfers.json")
 }
 
+/// A damaged journal (a power cut) comes back from its previous version when that one is whole.
 pub fn load<J: DeserializeOwned>(file: &Path) -> Loaded<J> {
-    let bytes = match std::fs::read(file) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded::Fresh,
-        Err(e) => return Loaded::Unreadable { error: e.to_string() },
-    };
-    match serde_json::from_slice::<Journal<J>>(&bytes) {
-        Ok(j) => Loaded::Read(j),
-        Err(e) => {
-            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let kept_at = file.with_extension(format!("json.damaged-{stamp}"));
-            match std::fs::copy(file, &kept_at) {
-                Ok(_) => Loaded::Damaged { kept_at, error: e.to_string() },
-                Err(copy) => Loaded::Unreadable { error: format!("{e}; and it could not be kept aside: {copy}") },
-            }
-        }
+    match crate::persist::load_state::<Journal<J>>(file) {
+        Ok(Some(j)) => Loaded::Read(j),
+        Ok(None) => Loaded::Fresh,
+        Err(LoadError::Io(e)) => Loaded::Unreadable { error: e.to_string() },
+        Err(LoadError::Damaged(d)) => match d.kept_at {
+            Some(kept_at) => Loaded::Damaged { kept_at, error: d.reason },
+            None => Loaded::Unreadable { error: format!("{}; and it could not be kept aside", d.reason) },
+        },
     }
 }
 
 pub fn save<J: Serialize>(file: &Path, journal: &Journal<J>) -> anyhow::Result<()> {
-    crate::persist::write_atomic(file, &serde_json::to_vec_pretty(journal)?)
+    crate::persist::save_state(file, &serde_json::to_vec_pretty(journal)?)
 }
 
 /// Drops finished jobs older than [`KEEP_SECS`], then the oldest finished ones beyond [`KEEP_FINISHED`].

@@ -214,8 +214,9 @@ struct Shared {
 /// A destination's thread as seen from here.
 struct Worker {
     tx: mpsc::SyncSender<Entry>,
-    /// Its destination was taken away. It touches the file no more: a new thread may be using it.
-    retired: Arc<AtomicBool>,
+    /// Its destination was taken away. It touches the file no more: a new thread may be using it. A write under
+    /// way when this is set finishes first (see `Outbox::open_retirable`).
+    retired: Arc<Mutex<bool>>,
 }
 
 pub struct Destinations {
@@ -344,8 +345,10 @@ impl Destinations {
     }
 
     fn remove(&self, dest: &Dest) {
-        if let Some(worker) = self.workers.lock().remove(dest) {
-            worker.retired.store(true, Ordering::SeqCst);
+        // The workers' lock is let go first: a save under way may hold `retired`, and nothing else waits on the disk.
+        let worker = self.workers.lock().remove(dest);
+        if let Some(worker) = worker {
+            *worker.retired.lock() = true;
         }
         let _ = std::fs::remove_file(path_of(&self.shared.dir, dest));
     }
@@ -657,7 +660,7 @@ fn together_payload(ids: &[String], need_you: usize, updates: usize, urgent: boo
 fn spawn(dest: Dest, shared: Arc<Shared>) -> Option<Worker> {
     let (tx, rx) = mpsc::sync_channel::<Entry>(QUEUE);
     let _ = std::fs::create_dir_all(&shared.dir);
-    let retired = Arc::new(AtomicBool::new(false));
+    let retired = Arc::new(Mutex::new(false));
     let its = retired.clone();
     match std::thread::Builder::new().name("kelpie-notify".into()).spawn(move || run(dest, rx, shared, its)) {
         Ok(_) => Some(Worker { tx, retired }),
@@ -676,10 +679,10 @@ fn dice(n: u64) -> u64 {
 }
 
 /// A destination's thread: it waits for the next entry or the next attempt, whichever is first, and ends when the destination goes.
-fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>, retired: Arc<AtomicBool>) {
-    let mut outbox = Outbox::open(&path_of(&shared.dir, &dest));
+fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>, retired: Arc<Mutex<bool>>) {
+    let mut outbox = Outbox::open_retirable(&path_of(&shared.dir, &dest), retired.clone());
     loop {
-        if retired.load(Ordering::SeqCst) {
+        if *retired.lock() {
             return;
         }
         // Every entry that came in, before looking at what to do.
@@ -716,7 +719,7 @@ fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>, retired: Arc<
         let out = shared.attempt(&dest, &attempt);
         shared.finished(&dest, &out);
         // Taken away during the request: what came of it changes no file.
-        if retired.load(Ordering::SeqCst) {
+        if *retired.lock() {
             return;
         }
         match out {
@@ -740,7 +743,7 @@ fn run(dest: Dest, rx: mpsc::Receiver<Entry>, shared: Arc<Shared>, retired: Arc<
         }
     }
     // The sender was let go: the destination went, or this daemon is ending and what is on disk is for the next.
-    if !retired.load(Ordering::SeqCst) && !shared.exists(&dest) {
+    if !*retired.lock() && !shared.exists(&dest) {
         outbox.discard();
     }
 }

@@ -67,7 +67,10 @@ export const detachTerminal = (handle: number) => invoke<void>("term_detach", { 
 export const sendInput = (handle: number, data: string, binary = false) =>
   invoke<void>("term_input", { handle, data, binary });
 
-export const loadState = () => invoke<unknown>("state_load");
+/** The saved app state (`null`: none yet). `restored`: the file was missing or damaged (a power cut) and its previous save was used;
+ *  `damaged_copy`: where a copy of the damaged file was kept. */
+export type LoadedState = { state: unknown; restored: boolean; damaged_copy: string | null };
+export const loadState = () => invoke<LoadedState>("state_load");
 export const saveState = (state: unknown) => invoke<void>("state_save", { state });
 export const stateBackup = (label: string) => invoke<string | null>("state_backup", { label });
 export const loadBookmarks = () => invoke<unknown>("bookmarks_load");

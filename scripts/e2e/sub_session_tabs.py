@@ -205,7 +205,7 @@ def scenario(run, d):
     w.js(f"{S}.addTab(arguments[0], {{id: 'old-child-pane', kind: 'terminal', sessionId: arguments[1]}})", pid, one["id"])
     # Saved as an older version left it: without the marker that the fold was done.
     w.js_async(f"""const done = arguments[arguments.length-1]; const k = window.__kelpie;
-      k.store.saveNow().then(() => k.ipc.loadState()).then(st => {{ delete st.subTabsFolded; return k.ipc.saveState(st); }}).then(() => done(true), e => done(String(e)))""")
+      k.store.saveNow().then(() => k.ipc.loadState()).then(({{ state: st }}) => {{ delete st.subTabsFolded; return k.ipc.saveState(st); }}).then(() => done(true), e => done(String(e)))""")
     check("set-up: an old tab of its own for a child", len(tabs()) == 2, len(tabs()))
     w.js("location.reload()")
     time.sleep(1)

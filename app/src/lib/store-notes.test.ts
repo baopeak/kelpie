@@ -22,7 +22,7 @@ async function boot(backup: string | null = "C:/data/app-state.notes-1.bak.json"
   (globalThis as any).window = globalThis;
   const ipc = await import("./ipc");
   const m = vi.mocked(ipc);
-  m.loadState.mockResolvedValue(saved);
+  m.loadState.mockResolvedValue({ state: saved, restored: false, damaged_copy: null });
   m.saveState.mockResolvedValue(undefined);
   m.stateBackup.mockResolvedValue(backup);
   m.listSessions.mockResolvedValue([]);

@@ -404,25 +404,6 @@ fn a_broken_omp_chain_falls_back_to_file_order() {
 }
 
 #[test]
-fn a_write_that_fails_after_its_temporary_file_exists_removes_it() {
-    let dir = scratch("late-failure");
-    let target = dir.join("out.md");
-    std::fs::write(&target, "kept").unwrap();
-    let seen = std::sync::Mutex::new(None);
-    let failing = |from: &Path, _: &Path| {
-        *seen.lock().unwrap() = Some((from.to_path_buf(), from.exists()));
-        Err(std::io::Error::other("rename refused"))
-    };
-    assert!(crate::config_transfer::write_atomic_with(&target, b"new text", failing).is_err());
-    let (tmp, existed) = seen.lock().unwrap().clone().unwrap();
-    assert!(existed && !tmp.exists(), "the temporary file existed and is gone");
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept", "the target is untouched");
-    let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().ends_with(".tmp")).collect();
-    assert!(left.is_empty(), "{left:?}");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
 fn an_omp_root_may_point_at_the_session_header() {
     let lines = json_lines_of(&[
         json!({"type": "session", "id": "s1", "cwd": "/w"}),

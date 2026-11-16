@@ -86,7 +86,7 @@ pub struct SubStats {
 impl SubStats {
     /// Reads `path`; a missing or unreadable file is an empty record (it is only a hint).
     pub fn load(path: PathBuf) -> SubStats {
-        let outcomes = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Vec<Outcome>>(&b).ok()).unwrap_or_default();
+        let outcomes: Vec<Outcome> = crate::persist::load_state_or_default(&path);
         SubStats { path: Some(path), outcomes: Mutex::new(outcomes) }
     }
 
@@ -106,7 +106,7 @@ impl SubStats {
         };
         // Written outside the lock.
         if let Some(path) = &self.path {
-            if let Err(e) = snapshot.map_err(anyhow::Error::from).and_then(|b| crate::persist::write_atomic(path, &b)) {
+            if let Err(e) = snapshot.map_err(anyhow::Error::from).and_then(|b| crate::persist::save_state(path, &b)) {
                 tracing::warn!("sub-stats: {e:#}");
             }
         }

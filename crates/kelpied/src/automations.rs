@@ -16,7 +16,7 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Timelike,
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::persist::write_atomic;
+use crate::persist::{save_state, write_atomic};
 
 /// Version of `automations.json` this daemon writes.
 pub const FILE_VERSION: u32 = 2;
@@ -1037,6 +1037,7 @@ impl Automations {
         let mut me = Automations { path, list: vec![], paused: false, broken: None, unannounced: None, restore: None };
         let bytes = match read_retrying(&me.path) {
             Ok(b) => b,
+            // A file that was removed stays removed: its previous version is not brought back.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // A file set aside earlier and never acknowledged: not an empty list to start writing over.
                 if let Some(kept) = me.unseen_damaged().first() {
@@ -1066,6 +1067,8 @@ impl Automations {
             },
             Ok(false) => {}
             Err(Damaged::Newer(v)) => me.refuse(format!("The automations file was written by a newer Kelpie (format {v}); automations are off and changes are not saved.")),
+            // A power cut can leave the file zeroed or cut short: its previous version is whole.
+            Err(Damaged::Unreadable(why)) if me.restore_previous(&bytes, &format!("is damaged ({why})")) => {}
             Err(Damaged::Unreadable(why)) => {
                 let aside = me.path.with_file_name(format!("automations.json.corrupt-{}", stamp()));
                 match std::fs::rename(&me.path, &aside) {
@@ -1074,13 +1077,38 @@ impl Automations {
                 }
             }
         }
+        me.scheduled()
+    }
+
+    fn scheduled(mut self) -> Automations {
         let now = Local::now();
-        for a in &mut me.list {
+        for a in &mut self.list {
             if a.next_run == 0 {
                 a.schedule_next(now);
             }
         }
-        me
+        self
+    }
+
+    /// Uses the previous version of the file (`automations.json.prev`) when it is whole and in the
+    /// current format, keeping a copy of the damaged file, and tells the user once. That version is one
+    /// save behind and may hold an automation the person removed or turned off since: every automatic
+    /// run is paused until the person resumes them.
+    fn restore_previous(&mut self, damaged: &[u8], what: &str) -> bool {
+        let prev = kelpie_proto::durable::prev_path(&self.path);
+        let Ok(bytes) = std::fs::read(&prev) else { return false };
+        if !matches!(self.parse(&bytes), Ok(false)) {
+            self.list.clear();
+            self.paused = false;
+            return false;
+        }
+        self.paused = true;
+        let kept = kelpie_proto::durable::keep_damaged(&self.path, damaged);
+        let copy = kept.map(|k| format!(" A copy of the damaged file was kept as {}.", k.display())).unwrap_or_default();
+        let text = format!("The automations file {what}; its previous version was restored ({} automations) and automatic runs are paused: check the list, then resume them.{copy}", self.list.len());
+        tracing::warn!("{text}");
+        self.unannounced = Some(text);
+        true
     }
 
     fn refuse(&mut self, why: String) {
@@ -1195,7 +1223,7 @@ impl Automations {
     fn migrate(&mut self) -> Result<()> {
         let bak = self.path.with_file_name("automations.json.bak");
         if !bak.exists() {
-            std::fs::copy(&self.path, &bak)?;
+            kelpie_proto::durable::copy(&self.path, &bak)?;
         }
         self.write()
     }
@@ -1204,7 +1232,7 @@ impl Automations {
     /// a list in its own format, and this copy (a name it never reads) is what a restore brings back.
     fn write(&self) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(&FileOut { version: FILE_VERSION, paused: self.paused, automations: &self.list })?;
-        write_atomic(&self.path, &bytes)?;
+        save_state(&self.path, &bytes)?;
         if let Err(e) = write_atomic(&self.newer_copy_path(), &bytes) {
             tracing::warn!("automations copy: {e:#}");
         }
@@ -1309,6 +1337,11 @@ impl Automations {
         let a = a.clone();
         self.save()?;
         Ok(a)
+    }
+
+    /// Whether [`Automations::due`] has anything to do (run or reschedule), without saving anything.
+    pub fn any_due(&self, now_ms: u64) -> bool {
+        self.list.iter().any(|a| a.trigger.is_none() && a.next_run != 0 && a.next_run <= now_ms)
     }
 
     /// Ids of enabled clock automations whose time has come; skipped (stale) ones are rescheduled. While

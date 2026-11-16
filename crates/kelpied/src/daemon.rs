@@ -22,7 +22,8 @@ use crate::notify::destinations::{Destinations, Host};
 use crate::notify::telegram_poll::{Answered, Approval, Target};
 use crate::notify::{self, Notifier, Raised};
 use crate::status::Status;
-use crate::persist::{write_atomic, SavedSession, Store};
+use crate::persist::{SavedSession, Store};
+use kelpie_proto::durable::LoadError;
 use crate::runs::{self, Action, NewRun, Runs, SessionView, TaskStatus};
 use crate::scheduled_input::{ScheduledInputs, CONTINUE_TEXT};
 use crate::session::{json_out, now_millis, Answer, AnswerError, By, ClientTx, Session, SessionInfo, SessionSpec};
@@ -198,6 +199,9 @@ pub struct Daemon {
     /// Path of this executable; agents call it back as `kelpied hook …`.
     pub exe: PathBuf,
     meta_dirty: AtomicBool,
+    /// Held while sessions and snapshots are written: one save at a time, so an older one never lands after a newer
+    /// one (the shutdown's last save waits for the ticker's), and the ticker skips a round while one is under way.
+    persisting: Mutex<()>,
     pub shutdown: tokio::sync::Notify,
     workspace_meta: Mutex<MetaStore>,
     /// Review notes on worktrees' diffs (see `notes.rs`).
@@ -396,6 +400,7 @@ impl Daemon {
                 data_dir,
                 exe,
                 meta_dirty: AtomicBool::new(false),
+                persisting: Mutex::new(()),
                 shutdown: tokio::sync::Notify::new(),
             }
         })
@@ -1220,7 +1225,7 @@ impl Daemon {
     /// process; the app starts a chat front-end resuming the conversation in the same pane.
     pub fn restore(&self) {
         // Plugin agents first: restored sessions may be theirs.
-        if let Some(defs) = std::fs::read(self.data_dir.join("custom-agents.json")).ok().and_then(|b| serde_json::from_slice::<Vec<agents::AgentDef>>(&b).ok()) {
+        if let Ok(Some(defs)) = crate::persist::load_state::<Vec<agents::AgentDef>>(&self.data_dir.join("custom-agents.json")) {
             if let Err(e) = agents::set_custom(&defs) {
                 tracing::warn!("plugin agents: {e:#}");
             }
@@ -1726,6 +1731,7 @@ impl Daemon {
 
     /// Persists metadata (when dirty) and screen snapshots (when changed or `force`).
     pub fn persist(&self, force: bool) {
+        let _one_at_a_time = self.persisting.lock();
         if force || self.meta_dirty.swap(false, Ordering::Relaxed) {
             if let Err(e) = self.store.save_sessions(&self.saved_sessions()) {
                 tracing::warn!("save sessions: {e:#}");
@@ -1872,20 +1878,24 @@ impl Daemon {
                     }
                 }
             }
-            if now.duration_since(last_persist) > Duration::from_secs(30) || self.meta_dirty.load(Ordering::Relaxed) {
+            // Not awaited: every file is flushed to the disk, which a busy disk makes slow, and the ticker never waits on it.
+            // A round that finds a save under way is left to the next tick.
+            if (now.duration_since(last_persist) > Duration::from_secs(30) || self.meta_dirty.load(Ordering::Relaxed)) && !self.persisting.is_locked() {
                 let me = self.clone();
                 let full = now.duration_since(last_persist) > Duration::from_secs(30);
                 if full {
                     last_persist = now;
                 }
-                let _ = tokio::task::spawn_blocking(move || {
+                tokio::task::spawn_blocking(move || {
                     if full {
                         me.persist(false)
-                    } else if me.meta_dirty.swap(false, Ordering::Relaxed) {
-                        let _ = me.store.save_sessions(&me.saved_sessions());
+                    } else if me.meta_dirty.load(Ordering::Relaxed) {
+                        let _one_at_a_time = me.persisting.lock();
+                        if me.meta_dirty.swap(false, Ordering::Relaxed) {
+                            let _ = me.store.save_sessions(&me.saved_sessions());
+                        }
                     }
-                })
-                .await;
+                });
             }
         }
     }
@@ -2063,7 +2073,7 @@ impl Daemon {
                 let defs: Vec<agents::AgentDef> = serde_json::from_value(params.get("agents").cloned().unwrap_or_else(|| json!([]))).context("agents")?;
                 agents::set_custom(&defs)?;
                 // Kept for the next start: restored sessions of plugin agents must still resume.
-                write_atomic(&self.data_dir.join("custom-agents.json"), &serde_json::to_vec_pretty(&defs)?)?;
+                crate::persist::save_state(&self.data_dir.join("custom-agents.json"), &serde_json::to_vec_pretty(&defs)?)?;
                 json!(true)
             }
 
@@ -2586,8 +2596,17 @@ struct Policy {
     browser: crate::browser_agent::Policy,
 }
 
+/// `policy.json` as a JSON object; anything else is damaged (its previous version is used instead).
+fn policy_object(bytes: &[u8]) -> Result<Value, String> {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(v) if v.is_object() => Ok(v),
+        Ok(_) => Err("not a JSON object".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn load_policy(data_dir: &std::path::Path) -> Policy {
-    let file = std::fs::read(data_dir.join(POLICY_FILE)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let file = crate::persist::load_state_from(&data_dir.join(POLICY_FILE), policy_object, true).ok().flatten().map(|l| l.value);
     let get = |key: &str| file.as_ref().and_then(|v| v.get(key));
     Policy {
         agents_control_others: get("agents_control_others").and_then(Value::as_bool).unwrap_or(true),
@@ -2602,20 +2621,24 @@ fn load_policy(data_dir: &std::path::Path) -> Policy {
 /// Writes our keys into the file and leaves any other it holds alone (a newer Kelpie's, for one).
 fn save_policy(data_dir: &std::path::Path, policy: &Policy) {
     let path = data_dir.join(POLICY_FILE);
-    let existing = std::fs::read(&path).ok();
-    let parsed = existing.as_deref().and_then(|b| serde_json::from_slice::<Value>(b).ok()).filter(Value::is_object);
-    // A file that is there but cannot be read as settings is kept beside the new one, not written over.
-    if let (Some(bytes), None) = (&existing, &parsed) {
-        if let Err(e) = std::fs::write(data_dir.join(format!("{POLICY_FILE}.unreadable")), bytes) {
-            tracing::warn!("keep the unreadable {POLICY_FILE}: {e}");
+    // A damaged file comes back from its previous version. One that cannot be read as settings, with
+    // no usable previous version, is kept beside the new one, not written over.
+    let parsed = match crate::persist::load_state_from(&path, policy_object, true) {
+        Ok(found) => found.map(|l| l.value),
+        Err(LoadError::Damaged(_)) => {
+            if let Err(e) = std::fs::read(&path).and_then(|bytes| kelpie_proto::durable::write(&data_dir.join(format!("{POLICY_FILE}.unreadable")), &bytes)) {
+                tracing::warn!("keep the unreadable {POLICY_FILE}: {e}");
+            }
+            None
         }
-    }
+        Err(LoadError::Io(_)) => None,
+    };
     let mut file = parsed.unwrap_or_else(|| json!({}));
     file["agents_control_others"] = json!(policy.agents_control_others);
     file["sub_sessions"] = json!(policy.sub.mode.as_str());
     file["sub_max"] = json!(policy.sub.max);
     policy.browser.write_into(&mut file);
-    if let Err(e) = write_atomic(&path, file.to_string().as_bytes()) {
+    if let Err(e) = crate::persist::save_state(&path, file.to_string().as_bytes()) {
         tracing::warn!("save {POLICY_FILE}: {e:#}");
     }
 }
