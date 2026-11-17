@@ -168,6 +168,7 @@ function snapshot(wt: Project, index: number) {
 /** Takes the rows away as Remove from Kelpie does (layouts, fold state, history) at once, and their review
  *  notes once Undo can no longer bring them back. */
 function forget(list: Project[]) {
+  if (!list.length) return;
   const order = store.state.projects.map((p) => p.id);
   const saved = list.map((wt) => snapshot(wt, order.indexOf(wt.id)));
   for (const wt of list) store.removeProject(wt.id);
@@ -205,8 +206,11 @@ export async function removeFromSidebar(wt: Project) {
 
 const running = new Map<string, Promise<void>>();
 
+/** Rows a check has found gone and will remove when it ends: a check that runs meanwhile leaves them alone. */
+const claimed = new Set<string>();
+
 async function syncRepo(repo: Project, probe: SyncProbe): Promise<Project[]> {
-  const kids = store.childrenOf(repo.id).filter((wt) => !busy.has(wt.id));
+  const kids = store.childrenOf(repo.id).filter((wt) => !busy.has(wt.id) && !claimed.has(wt.id));
   if (!kids.length) return [];
   const result = await checkRepo(repo, kids, worktreeHasSessions, probe);
   if (!result) return [];
@@ -215,7 +219,10 @@ async function syncRepo(repo: Project, probe: SyncProbe): Promise<Project[]> {
   for (const wt of result.remove) {
     if (!store.state.projects.some((p) => p.id === wt.id) || busy.has(wt.id)) continue;
     if (keptPaths.has(normPath(wt.path)) || worktreeHasSessions(wt)) result.marks[wt.id] = "missing";
-    else remove.push(wt);
+    else {
+      claimed.add(wt.id);
+      remove.push(wt);
+    }
   }
   setHealth(produce((h) => {
     for (const wt of kids) {
@@ -233,19 +240,23 @@ async function syncRepo(repo: Project, probe: SyncProbe): Promise<Project[]> {
 export async function syncWorktrees(repoId?: string, probe: SyncProbe = liveProbe) {
   if (!ready()) return;
   const repos = store.state.projects.filter((p) => !p.parentId && !p.remote && (!repoId || p.id === repoId) && store.childrenOf(p.id).length);
-  for (const repo of repos) {
-    // One check per repository at a time; one asked for meanwhile runs after it (it may know more).
-    const job: Promise<void> = (running.get(repo.id) ?? Promise.resolve())
-      .then(() => (ready() ? syncRepo(repo, probe) : []))
-      .then((r) => {
-        // Removed at once, so a check that follows sees them gone.
-        if (r.length) forget(r);
-      }, () => {})
-      .finally(() => {
-        if (running.get(repo.id) === job) running.delete(repo.id);
-      });
-    running.set(repo.id, job);
-    await job;
+  const gone: Project[] = [];
+  try {
+    for (const repo of repos) {
+      // One check per repository at a time; one asked for meanwhile runs after it (it may know more).
+      const job: Promise<void> = (running.get(repo.id) ?? Promise.resolve())
+        .then(() => (ready() ? syncRepo(repo, probe) : []))
+        .then((r) => void gone.push(...r), () => {})
+        .finally(() => {
+          if (running.get(repo.id) === job) running.delete(repo.id);
+        });
+      running.set(repo.id, job);
+      await job;
+    }
+    // Every repository's gone rows together: one toast, one Undo.
+    if (gone.length) forget(gone.filter((wt) => store.state.projects.some((p) => p.id === wt.id)));
+  } finally {
+    for (const wt of gone) claimed.delete(wt.id);
   }
 }
 

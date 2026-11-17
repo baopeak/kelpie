@@ -182,6 +182,17 @@ describe("syncWorktrees", () => {
     expect(fake.toasts.map((x) => x.text)).toEqual(["Removed 2 worktrees that no longer exist"]);
   });
 
+  it("one toast for the gone worktrees of every repository", async () => {
+    const repo2: Project = { id: "r2", name: "other", path: "D:\\Works\\Other", color: "#000" };
+    fake.state.projects = [repo, wt("m"), repo2, { ...wt("z"), parentId: "r2", path: "D:\\Works\\Other-worktrees\\z" }];
+    const p = probe({ dirs: [...ROOTS, "D:\\Works\\Other"] });
+    await syncWorktrees(undefined, p);
+    expect(fake.state.projects.map((x) => x.id)).toEqual(["r", "r2"]);
+    expect(fake.toasts.map((x) => x.text)).toEqual(["Removed 2 worktrees that no longer exist"]);
+    fake.toasts[0].action!.run();
+    expect(fake.state.projects.map((x) => x.id)).toEqual(["r", "m", "r2", "z"]);
+  });
+
   it("removes the gone worktrees with one toast, keeps one with a pane, and Undo brings them back", async () => {
     fake.workspaces.b = { tabs: [{ id: "t", focus: "p", root: { type: "leaf", id: "l", pane: { id: "p", kind: "terminal", sessionId: "s1" } } }], activeTab: "t", rightPanel: null };
     await syncWorktrees(undefined, computer());
