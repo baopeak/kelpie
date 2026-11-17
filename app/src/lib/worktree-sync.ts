@@ -184,7 +184,7 @@ function forget(list: Project[]) {
         undone = true;
         for (const s of saved) keptPaths.add(normPath(s.project.path));
         store.restoreProjects(saved);
-        void syncWorktrees();
+        void syncInBackground();
       },
     },
     UNDO_MS,
@@ -260,9 +260,12 @@ export async function syncWorktrees(repoId?: string, probe: SyncProbe = liveProb
   }
 }
 
+/** A check nobody waits for: a failure only means nothing changes this time. */
+const syncInBackground = (repoId?: string) => syncWorktrees(repoId).catch(() => {});
+
 /** Checks a repository again a moment after Kelpie created, added or removed one of its worktrees. */
 export function syncRepoSoon(repoId: string | undefined) {
-  if (repoId) setTimeout(() => void syncWorktrees(repoId), 500);
+  if (repoId) setTimeout(() => void syncInBackground(repoId), 500);
 }
 
 const FOCUS_EVERY_MS = 15_000;
@@ -276,7 +279,7 @@ export function initWorktreeSync() {
   const run = () => {
     if (!ready() || Date.now() - last < FOCUS_EVERY_MS) return;
     last = Date.now();
-    void syncWorktrees();
+    void syncInBackground();
   };
   createRoot(() => {
     let first = true;
@@ -284,7 +287,7 @@ export function initWorktreeSync() {
       if (!ready() || !first) return;
       first = false;
       last = Date.now();
-      void syncWorktrees();
+      void syncInBackground();
     });
   });
   window.addEventListener("focus", run);
