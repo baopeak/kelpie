@@ -1000,6 +1000,13 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 /* The name keeps room to be recognised whatever the status beside it holds. */
 .wt-row .project-text { min-width: 4em; }
 .wt-dirty { color: var(--text-dim); font-weight: 700; }
+/* A worktree whose folder is gone (kept for its sessions) or that git no longer lists: muted, with a word saying why. */
+.project.wt-row.wt-missing .project-name, .project.wt-row.wt-missing .wt-glyph { opacity: .55; }
+.project.wt-row.wt-missing .project-name { text-decoration: line-through; text-decoration-color: var(--text-faint); }
+.project.wt-row.wt-unlisted .wt-glyph { opacity: .55; }
+/* The mark is a short word (the tooltip says more); in a narrow sidebar it ends in an ellipsis. */
+.wt-status.wt-health-box { flex: none; max-width: 55%; }
+.wt-status > .primary-tag.wt-health { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-transform: none; letter-spacing: 0; }
 /* "N more worktrees": the quiet worktrees folded into one row, its chevron under the glyphs above. */
 .wt-more { display: flex; align-items: center; gap: 7px; width: 100%; padding: 3px 8px 3px 11px; border: 0; border-radius: 6px; background: transparent; color: var(--text-faint); font: inherit; font-size: 11.5px; text-align: left; cursor: pointer; }
 .wt-more:hover { background: var(--bg-hover); color: var(--text-dim); }
