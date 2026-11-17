@@ -268,7 +268,8 @@ function projectMenu(p: Project): MenuItem[] {
           },
         }]
       : []),
-    {
+    // A marked worktree has Remove from sidebar above instead.
+    ...(health ? [] : [{
       label: t("Remove from Kelpie"), danger: true,
       run: async () => {
         const kids = store.childrenOf(p.id).length;
@@ -279,7 +280,7 @@ function projectMenu(p: Project): MenuItem[] {
             : t("Remove {name} and its {n} worktrees from the sidebar? Files and running sessions are not touched.", { name: p.name, n: kids });
         if (await confirmDialog(text)) store.removeProject(p.id);
       },
-    },
+    }]),
   ];
 }
 
@@ -463,7 +464,7 @@ function ProjectRow(props: { project: Project }) {
             </Show>
           </span>
           <Show when={health()}>
-            <span class="wt-status">
+            <span class="wt-status wt-health-box">
               <span class="primary-tag wt-health" title={healthText()}>{health() === "missing" ? t("folder missing") : t("not a worktree any more")}</span>
             </span>
           </Show>
