@@ -1111,11 +1111,13 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   `Mobile::grant`: input checks it every time and the hold's task ends within 250 ms (`revoked`). A dropped link keeps it 45 s for the same device's next
   connection (`sc_rebind`; a pane's takeover keeps 15 s), after which the helper sends a keyframe first; a newer connection of the device lets go of the
   older one's holds at once (`connection_opened`), so its rebind never waits for the older socket to close. 10 minutes with no input ends it. New screens are admitted by what a stream needs (`screen::admit`): refused at
-  load L3, except an L3 for memory alone (`Status::l3_only_memory`: reasons exactly `["memory"]`) with at least `MIN_FREE_MB` measured free,
-  which starts low as L2 does (memory under 8 % free is L3, which on a large computer leaves gigabytes; the helper is told L3, so the stream
+  load L3, except an L3 memory causes (`Status::short_of_memory`) with nothing else asking for L3 in the last second
+  (`Sample::asks_l3_without_memory`: today lag p95 over 200 ms; reasons asking for less, as the CPU, heat, battery saver or some lag, do not
+  count) and at least `MIN_FREE_MB` measured free, which starts low as L2 does (memory under 8 % free is L3, which on a large computer leaves gigabytes; the helper is told L3, so the stream
   keeps L3's cap and its five-minute pause), and with under `MIN_FREE_MB` (600 MiB) of memory free, whatever the level (`host_busy`, with `reason` — `memory`, `cpu`, `lag`, `thermal` or `load` —
   and `busy {level, reasons, reason, memory_free, memory_free_mb, min_free_mb, cpu, lag_ms}` in the reply, from API 46; `reason` is `memory` when
-  memory is what refuses, else the first of the level's other reasons among `lag`, `cpu`, `thermal`, then `memory` again, then `load`; the phone says why and tries again
+  memory is what refuses, else `lag` when it asks for L3, else the first of the level's other reasons among `lag`, `cpu`, `thermal`
+  (with the floor free; also `memory` without it), else `load`; the phone says why and tries again
   on its own on a bounded backoff, never with Face ID, which only a tap asks for: the load is looked at before the passkey); started at L2 (and that memory-only L3) with the
   helper at its lowest rung (`Controller::start_low`), climbing as the encoder's load allows within the level's cap. The `KELPIE_LOAD_FORCE` test hook stands
   for everything measured, in a debug build or an e2e run only, never in a release daemon (so a pinned `L3:memory`, with nothing measured free, still refuses). Refused too without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper

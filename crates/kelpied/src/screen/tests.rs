@@ -1119,10 +1119,8 @@ fn a_screen_is_gated_by_the_memory_it_needs_not_by_a_share_of_all_memory() {
     // floor, is named.
     let Admit::Busy(r) = admit(&status(Level::L3, &["cpu", "memory"]), Some(&measured(6.0, 500, 99.0, 20.0))) else { panic!("L3 refuses") };
     assert_eq!(r.reason, Some("memory"));
-    // With the floor free, memory alone would let it start: the pegged CPU that asks too is what refuses it, and is named.
-    let Admit::Busy(r) = admit(&status(Level::L3, &["cpu", "memory"]), Some(&measured(6.0, 1200, 99.0, 20.0))) else { panic!("L3 with the CPU refuses") };
-    assert_eq!(r.reason, Some("cpu"));
-    assert!(r.message.contains("(99 %)"), "{}", r.message);
+    // With the floor free, a pegged CPU asks for L2 only: memory is what causes L3, and the screen starts low.
+    assert_eq!(admit(&status(Level::L3, &["cpu", "memory"]), Some(&measured(6.0, 1200, 99.0, 20.0))), Admit::Low);
     // The owner's computer held at L2 for memory (11 % free, above the floor), overloaded by a build's lag: refused for the lag.
     let Admit::Busy(r) = admit(&status(Level::L3, &["lag", "memory"]), Some(&measured(11.0, 900, 60.0, 250.0))) else { panic!("L3 refuses") };
     assert_eq!(r.reason, Some("lag"));
@@ -1141,15 +1139,22 @@ fn a_screen_is_gated_by_the_memory_it_needs_not_by_a_share_of_all_memory() {
     let unknown = crate::load::Sample { lag_p95_ms: 5.0, reading: crate::load::Reading { cpu: Some(30.0), memory_free: Some(6.0), memory_free_mb: None, ..Default::default() } };
     let Admit::Busy(r) = admit(&status(Level::L3, &["memory"]), Some(&unknown)) else { panic!("unknown MB refuses") };
     assert_eq!(r.reason, Some("memory"));
-    // L3 from lag still refuses with memory to spare, and names the lag, not memory.
+    // Reasons that ask for less than L3 do not stop it: some lag (40 ms is L1), heat (L2).
+    assert_eq!(admit(&status(Level::L3, &["lag", "memory"]), Some(&measured(6.0, 1300, 30.0, 40.0))), Admit::Low);
+    assert_eq!(admit(&status(Level::L3, &["memory", "thermal"]), Some(&measured(6.0, 1300, 30.0, 5.0))), Admit::Low);
+    // Lag that asks for L3 on its own still refuses with memory to spare, and is named, not memory.
     let Admit::Busy(r) = admit(&status(Level::L3, &["lag", "memory"]), Some(&measured(6.0, 1300, 30.0, 250.0))) else { panic!("lag refuses") };
     assert_eq!(r.reason, Some("lag"));
-    let Admit::Busy(r) = admit(&status(Level::L3, &["memory", "thermal"]), Some(&measured(6.0, 1300, 30.0, 5.0))) else { panic!("heat refuses") };
-    assert_eq!(r.reason, Some("thermal"));
-    // Battery saver asks for L1 only and is not a reason the phone names: with nothing else to name, memory is, with the numbers.
-    let Admit::Busy(r) = admit(&status(Level::L3, &["memory", "battery_saver"]), Some(&measured(7.0, 1150, 30.0, 5.0))) else { panic!("refused") };
-    assert_eq!(r.reason, Some("memory"));
-    assert!(r.message.contains("Only 7 %") && r.message.contains("(1150 MB)"), "{}", r.message);
+    // Even in the second before the level takes the lag in.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["memory"]), Some(&measured(6.0, 1300, 30.0, 250.0))) else { panic!("lag refuses") };
+    assert_eq!(r.reason, Some("lag"));
+    // An L3 the lag caused, held a moment after it fell, is not memory's: refused, for the lag.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["lag"]), Some(&measured(6.0, 1300, 30.0, 40.0))) else { panic!("held L3 refuses") };
+    assert_eq!(r.reason, Some("lag"));
+    // Battery saver asks for L1 only: memory is what causes L3, and the screen starts low.
+    let mut saver = measured(7.0, 1150, 30.0, 5.0);
+    saver.reading.battery_saver = true;
+    assert_eq!(admit(&status(Level::L3, &["memory", "battery_saver"]), Some(&saver)), Admit::Low);
     // The test hook pins the level and stands for everything measured: no floor, no numbers, the hook's reason.
     assert_eq!(admit(&status(Level::L2, &["memory"]), None), Admit::Low);
     let Admit::Busy(r) = admit(&status(Level::L3, &["memory"]), None) else { panic!("L3 refuses") };

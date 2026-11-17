@@ -154,12 +154,6 @@ impl Status {
         self.level == Level::L3 && self.reasons.iter().any(|r| r == "memory")
     }
 
-    /// L3 for memory and nothing else (`reasons == ["memory"]`): no lag, CPU, heat or battery saver asks for any level. A new screen may
-    /// still start then, low, when enough memory is free for it (`screen::admit`): on a large computer under 8 % free can be gigabytes.
-    pub fn l3_only_memory(&self) -> bool {
-        self.level == Level::L3 && self.reasons == ["memory"]
-    }
-
     pub fn json(&self) -> Value {
         json!({"level": self.level.number(), "reason": self.reasons, "since": self.since})
     }
@@ -194,6 +188,17 @@ pub struct Sample {
 }
 
 impl Sample {
+    /// Whether something other than memory asks for L3 on its own in this second: today only the event loop's lag over 200 ms, as the CPU
+    /// and heat ask for L2 at most and battery saver for L1. A screen may start low at an L3 that memory alone causes (`screen::admit`):
+    /// on a large computer under 8 % free can be gigabytes. The reasons list says which reasons ask, not for which level.
+    pub fn asks_l3_without_memory(&self) -> bool {
+        let mut rest = self.clone();
+        rest.reading.low_memory = false;
+        rest.reading.memory_free = None;
+        // A pegged CPU asks for L2 at most, so its three-sample count does not matter here.
+        rest.wants(true).0 == Level::L3
+    }
+
     /// The level these measurements ask for, and the reasons, with whether the CPU has been above 95 %
     /// for three samples.
     fn wants(&self, cpu_hot: bool) -> (Level, Vec<String>) {
@@ -675,14 +680,15 @@ mod tests {
         assert!(!status(Level::L3, &["cpu"]).short_of_memory(), "CPU");
         assert!(!status(Level::L2, &["memory"]).short_of_memory(), "memory under 15 % is L2: nothing is dropped yet");
         assert!(!Status::default().short_of_memory());
-        assert!(status(Level::L3, &["memory"]).l3_only_memory());
-        assert!(!status(Level::L3, &["cpu", "memory"]).l3_only_memory(), "the CPU asks too");
-        assert!(!status(Level::L3, &["lag", "memory"]).l3_only_memory(), "lag");
-        assert!(!status(Level::L3, &["lag"]).l3_only_memory(), "lag");
-        assert!(!status(Level::L3, &["thermal"]).l3_only_memory(), "heat");
-        assert!(!status(Level::L3, &["forced"]).l3_only_memory(), "a pinned level without a reason the load gives");
-        assert!(!status(Level::L2, &["memory"]).l3_only_memory(), "L2 starts low anyway");
-        assert!(!status(Level::L3, &["memory", "battery_saver"]).l3_only_memory(), "battery saver asks too");
+        let busy = |lag: f64, cpu: f64, free: f64| sample(lag, cpu, free).asks_l3_without_memory();
+        assert!(!busy(5.0, 30.0, 5.0), "memory alone");
+        assert!(!busy(40.0, 30.0, 5.0), "lag of 40 ms asks for L1");
+        assert!(!busy(150.0, 99.0, 5.0), "lag of 150 ms and a pegged CPU ask for L2");
+        assert!(busy(250.0, 30.0, 5.0), "lag over 200 ms asks for L3 on its own");
+        assert!(busy(250.0, 30.0, 50.0), "with memory to spare too");
+        let mut warm = sample(5.0, 30.0, 5.0);
+        (warm.reading.thermal, warm.reading.battery_saver, warm.reading.low_memory) = (true, true, true);
+        assert!(!warm.asks_l3_without_memory(), "heat, battery saver and the low-memory signal");
         // The sample that asks for it: free memory under 8 % or the low-memory event, and nothing else.
         let mut m = Machine::default();
         let low = sample(5.0, 10.0, 6.0);

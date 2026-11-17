@@ -99,22 +99,26 @@ pub enum Admit {
 /// Whether a new screen may start under `status`, with what the last second `measured` (none while the test hook pins the load: the level
 /// then stands for everything). L3 refuses, and so does free memory under `MIN_FREE_MB`; L2 starts low. A refusal says why, with the numbers.
 /// L3 includes memory under 8 % free (`load::Sample::wants`), which on a computer of about 7.5 GB or more is reached before the floor, with
-/// gigabytes still free on a large one: an L3 that comes only from memory (`Status::l3_only_memory`) with at least the floor measured free
-/// starts low as L2 does. The helper is told L3, so the stream keeps L3's cap and its pause after five minutes, as one that reaches L3 does.
+/// gigabytes still free on a large one: an L3 that memory causes (`Status::short_of_memory`) with nothing else asking for L3 in the last
+/// second (`Sample::asks_l3_without_memory`: lag over 200 ms) and at least the floor measured free starts low as L2 does; reasons that ask for
+/// less (some lag, the CPU, heat, battery saver) do not stop it. The helper is told L3, so the stream keeps L3's cap and its pause after five
+/// minutes, as one that reaches L3 does.
 pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample>) -> Admit {
     let free_mb = measured.and_then(|m| m.reading.memory_free_mb);
     let short = free_mb.is_some_and(|mb| mb < MIN_FREE_MB);
     let enough = free_mb.is_some_and(|mb| mb >= MIN_FREE_MB);
-    if (status.level < Level::L3 || (status.l3_only_memory() && enough)) && !short {
+    let other_l3 = measured.is_some_and(|m| m.asks_l3_without_memory());
+    if (status.level < Level::L3 || (status.short_of_memory() && !other_l3 && enough)) && !short {
         return if status.level >= Level::L2 { Admit::Low } else { Admit::Start };
     }
     // The reason the phone names, from what was measured: memory when it is under the floor, or short enough to overload the machine with
     // how much is free unknown; else the first of the level's other reasons in `BUSY_REASONS` (a computer held at L2 for memory and overloaded
-    // by lag is refused for the lag; at L3 for memory with the floor free, what else asks for a level is what refuses it, and memory again
-    // when that is none of these, such as battery saver: closing programs is still what lifts L3).
+    // by lag is refused for the lag). With the floor free, memory is not what refuses: the lag that asks for L3 on its own is named, even
+    // before the level has taken it in, else the level's other reasons.
     let memory = short || (status.level >= Level::L3 && !enough && measured.is_some_and(|m| m.reading.short_of_memory()));
     let first = |skip_memory: bool| BUSY_REASONS.iter().copied().filter(|k| !skip_memory || *k != "memory").find(|k| status.reasons.iter().any(|r| r == k));
-    let reason = if memory { "memory" } else { first(enough).or_else(|| first(false)).unwrap_or("load") };
+    let lag = (enough && other_l3).then_some("lag");
+    let reason = if memory { "memory" } else { lag.or_else(|| first(enough)).unwrap_or("load") };
     let reading = measured.map(|m| &m.reading);
     let whole = |v: Option<f64>| v.filter(|v| v.is_finite()).map(|v| v.round() as u64);
     let pct = whole(reading.and_then(|r| r.memory_free));
