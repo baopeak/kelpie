@@ -285,7 +285,7 @@ pub struct Worktree {
     pub(crate) branch: Option<String>,
     pub(crate) bare: bool,
     detached: bool,
-    /// Registered but its folder is gone (`git worktree prune` would drop it).
+    /// Registered but its `.git` file is gone: the folder was deleted, or is out of reach (`git worktree prune` would drop it).
     pub(crate) prunable: bool,
 }
 
@@ -300,6 +300,12 @@ impl Worktree {
 pub async fn git_worktrees(root: String) -> CmdResult<Vec<Worktree>> {
     let dir = guard(&root, "")?;
     let out = worktree_ok(&dir, &["worktree", "list", "--porcelain"]).await?;
+    Ok(parse_worktrees(&out))
+}
+
+/// Parses `git worktree list --porcelain`: blocks separated by a blank line. `prunable` comes bare or
+/// followed by git's reason (`prunable gitdir file points to non-existent location`).
+fn parse_worktrees(out: &str) -> Vec<Worktree> {
     let mut list = Vec::new();
     for block in out.split("\n\n") {
         let mut wt = Worktree { path: String::new(), head: None, branch: None, bare: false, detached: false, prunable: false };
@@ -322,7 +328,7 @@ pub async fn git_worktrees(root: String) -> CmdResult<Vec<Worktree>> {
             list.push(wt);
         }
     }
-    Ok(list)
+    list
 }
 
 /// Creates `branch` from `base` in a new worktree at `path` (absolute). With `existing`, checks out
@@ -509,6 +515,41 @@ pub async fn git_worktree_remove(client: tauri::State<'_, std::sync::Arc<crate::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_worktree_list_with_the_prunable_mark() {
+        let out = "worktree D:/Works/Kelpie
+HEAD abc
+branch refs/heads/master
+
+worktree D:/Works/Kelpie-worktrees/gone
+HEAD def
+branch refs/heads/gone
+prunable gitdir file points to non-existent location
+
+worktree D:/Works/Kelpie-worktrees/bare-mark
+HEAD 123
+detached
+prunable
+
+worktree D:/Works/Kelpie-worktrees/locked
+HEAD 456
+branch refs/heads/locked
+locked on a drive
+";
+        let list = parse_worktrees(out);
+        let got: Vec<(&str, Option<&str>, bool)> = list.iter().map(|w| (w.path.as_str(), w.branch.as_deref(), w.prunable)).collect();
+        assert_eq!(
+            got,
+            [
+                ("D:/Works/Kelpie", Some("master"), false),
+                ("D:/Works/Kelpie-worktrees/gone", Some("gone"), true),
+                ("D:/Works/Kelpie-worktrees/bare-mark", None, true),
+                ("D:/Works/Kelpie-worktrees/locked", Some("locked"), false),
+            ]
+        );
+        assert!(list[2].detached);
+    }
 
     #[test]
     fn parses_porcelain_v2() {

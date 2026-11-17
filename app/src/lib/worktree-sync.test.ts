@@ -43,7 +43,7 @@ const wt = (id: string, extra: Partial<Project> = {}): Project => ({ id, name: i
 const entry = (path: string, extra: Partial<Worktree> = {}): Worktree => ({ path, head: "abc", branch: null, bare: false, detached: false, prunable: false, ...extra });
 
 /** A computer where `dirs` exist and git lists `listed` (or fails with `gitError`). */
-function probe(opts: { dirs: string[]; listed?: string[]; gitError?: string }): SyncProbe & { calls: string[] } {
+function probe(opts: { dirs: string[]; listed?: string[]; prunable?: string[]; gitError?: string }): SyncProbe & { calls: string[] } {
   const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
   const dirs = new Set(opts.dirs.map(norm));
   const calls: string[] = [];
@@ -52,7 +52,7 @@ function probe(opts: { dirs: string[]; listed?: string[]; gitError?: string }): 
     listWorktrees: async (p) => {
       calls.push(`list ${p}`);
       if (opts.gitError) throw new Error(opts.gitError);
-      return [entry("D:/Works/Kelpie"), ...(opts.listed ?? []).map((x) => entry(x))];
+      return [entry("D:/Works/Kelpie"), ...(opts.listed ?? []).map((x) => entry(x)), ...(opts.prunable ?? []).map((x) => entry(x, { prunable: true }))];
     },
     isDir: async (p) => dirs.has(norm(p)),
     canonical: async (p) => p,
@@ -85,9 +85,45 @@ describe("checkRepo", () => {
     expect(r).toEqual({ remove: [], marks: { a: "missing" } });
   });
 
-  it("keeps a missing worktree git still records (prunable) and marks it missing", async () => {
+  it("keeps a missing worktree git still records without the prunable mark (locked) and marks it missing", async () => {
     const r = await checkRepo(repo, [wt("a")], noSessions, probe({ dirs: ROOTS, listed: ["D:/Works/Kelpie-worktrees/a"] }));
     expect(r).toEqual({ remove: [], marks: { a: "missing" } });
+  });
+
+  it("removes a missing worktree git lists only as prunable when it has no session", async () => {
+    const r = await checkRepo(repo, [wt("a")], noSessions, probe({ dirs: ROOTS, prunable: ["D:/Works/Kelpie-worktrees/a"] }));
+    expect(r).toEqual({ remove: [wt("a")], marks: {} });
+  });
+
+  it("keeps a missing prunable worktree that still has a session and marks it missing", async () => {
+    const r = await checkRepo(repo, [wt("a")], (w) => w.id === "a", probe({ dirs: ROOTS, prunable: ["D:/Works/Kelpie-worktrees/a"] }));
+    expect(r).toEqual({ remove: [], marks: { a: "missing" } });
+  });
+
+  it("leaves a prunable worktree alone when nothing above its folder can be reached", async () => {
+    const other = wt("e", { path: "E:\\wt\\e" });
+    const r = await checkRepo(repo, [other], noSessions, probe({ dirs: ROOTS, prunable: ["E:/wt/e"] }));
+    expect(r).toEqual({ remove: [], marks: {} });
+  });
+
+  it("leaves a prunable worktree on an unplugged drive whose mount point's folder above it exists", async () => {
+    const vol = wt("v", { path: "/Volumes/Ext/wt/v" });
+    const r = await checkRepo(repo, [vol], noSessions, probe({ dirs: [...ROOTS, "/Volumes"], prunable: ["/Volumes/Ext/wt/v"] }));
+    expect(r).toEqual({ remove: [], marks: { v: "missing" } });
+  });
+
+  it("keeps a prunable worktree marked missing when the folder right above it is gone too", async () => {
+    const r = await checkRepo(repo, [wt("a")], noSessions, probe({ dirs: ["D:\\", "D:\\Works", "D:\\Works\\Kelpie"], prunable: ["D:/Works/Kelpie-worktrees/a"] }));
+    expect(r).toEqual({ remove: [], marks: { a: "missing" } });
+  });
+
+  it("marks a prunable entry whose folder still exists (its .git file is gone) as not a worktree", async () => {
+    const r = await checkRepo(repo, [wt("a")], noSessions, probe({ dirs: [...ROOTS, "D:\\Works\\Kelpie-worktrees\\a"], prunable: ["D:/Works/Kelpie-worktrees/a"] }));
+    expect(r).toEqual({ remove: [], marks: { a: "unlisted" } });
+  });
+
+  it("says nothing about a prunable worktree when git fails", async () => {
+    expect(await checkRepo(repo, [wt("a")], noSessions, probe({ dirs: ROOTS, prunable: ["D:/Works/Kelpie-worktrees/a"], gitError: "timed out" }))).toBeNull();
   });
 
   it("keeps a folder that exists but git no longer lists, marked as not a worktree any more", async () => {
@@ -208,6 +244,17 @@ describe("syncWorktrees", () => {
     await syncWorktrees(undefined, computer());
     expect(fake.state.projects.map((p) => p.id)).toEqual(["r", "a", "b", "c"]);
     expect(worktreeHealth("a")).toBe("missing");
+  });
+
+  it("removes a folder deleted by hand (git lists it as prunable) with the same toast and Undo", async () => {
+    // Its own row: one brought back with Undo is only marked for the rest of the run.
+    fake.state.projects = [repo, wt("p")];
+    await syncWorktrees(undefined, probe({ dirs: ROOTS, prunable: ["D:/Works/Kelpie-worktrees/p"] }));
+    expect(fake.state.projects.map((p) => p.id)).toEqual(["r"]);
+    expect(fake.toasts.map((x) => x.text)).toEqual(["Removed 1 worktree that no longer exists"]);
+    fake.toasts[0].action!.run();
+    expect(fake.state.projects.map((p) => p.id)).toEqual(["r", "p"]);
+    await new Promise((r) => setTimeout(r, 0));
   });
 
   it("keeps a worktree whose session runs inside its folder", async () => {
