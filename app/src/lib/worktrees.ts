@@ -7,6 +7,7 @@ import { t } from "./i18n";
 import { basename, normPath } from "./platform";
 import { disposeView } from "./terminal-host";
 import { markWorktreeRemoved } from "./runs";
+import { markWorktreeBusy, syncRepoSoon } from "./worktree-sync";
 import type { Project, SessionKind } from "./types";
 
 /** `.kelpie.yaml` in a repository root. */
@@ -136,6 +137,7 @@ export async function createWorktree(repo: Project, opts: { branch: string; base
   if (opts.config) {
     void applyKelpieConfig(project, opts.config).catch((e) => store.notify(t(".kelpie.yaml: {error}", { error: String(e) })));
   }
+  syncRepoSoon(repo.id);
   return project;
 }
 
@@ -194,6 +196,7 @@ export async function addExistingWorktrees(repo: Project): Promise<number> {
     store.addProject(w.path, { parentId: repo.id, branch: w.branch ?? undefined, name: w.branch ?? basename(w.path), open: false });
     added++;
   }
+  syncRepoSoon(repo.id);
   return added;
 }
 
@@ -245,6 +248,17 @@ export async function stopSessions(wt: Project, timeoutMs = 10_000) {
 export async function removeWorktree(wt: Project, opts: { force: boolean }): Promise<{ leftover: boolean }> {
   const repo = store.state.projects.find((p) => p.id === wt.parentId);
   if (!repo) throw new Error(t("This worktree's repository is not in the sidebar"));
+  // The sidebar check leaves this worktree to us while it goes, then looks at the repository again.
+  markWorktreeBusy(wt.id, true);
+  try {
+    return await removeWorktreeNow(repo, wt, opts);
+  } finally {
+    markWorktreeBusy(wt.id, false);
+    syncRepoSoon(repo.id);
+  }
+}
+
+async function removeWorktreeNow(repo: Project, wt: Project, opts: { force: boolean }): Promise<{ leftover: boolean }> {
   if (store.state.activeProject === wt.id) store.switchProject(repo.id);
   if (!(await stopSessions(wt))) throw new Error(t("Some processes in this worktree did not stop; close them and try again"));
   // Where its notes are filed, asked while the folder exists; they are cleared under that exact key once it is gone.

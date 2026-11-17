@@ -664,6 +664,26 @@ function createAppStore() {
     setProjectInfo(produce((m) => ids.forEach((x) => delete m[x])));
   }
 
+  /** Puts back projects `removeProject` took out, with their workspaces, where they were (Undo). A
+   *  project whose folder was added again meanwhile, or whose repository is gone, is skipped. */
+  function restoreProjects(entries: { project: Project; workspace?: Workspace; index: number }[]) {
+    const back: Project[] = [];
+    update((s) => {
+      for (const e of [...entries].sort((a, b) => a.index - b.index)) {
+        if (s.projects.some((p) => p.id === e.project.id || samePath(p.path, e.project.path))) continue;
+        if (e.project.parentId && !s.projects.some((p) => p.id === e.project.parentId)) continue;
+        s.projects.splice(Math.max(0, Math.min(e.index, s.projects.length)), 0, e.project);
+        if (e.workspace) s.workspaces[e.project.id] = e.workspace;
+        back.push(e.project);
+      }
+    });
+    for (const p of back) {
+      ensureWorkspace(p.id);
+      resolveCanonKey(p);
+      refreshProjectInfo(p.id, 0);
+    }
+  }
+
   /** Projects shown at the top level of the sidebar (worktrees sit under their repository). */
   function topProjects(): Project[] {
     return state.projects.filter((p) => !p.parentId || !state.projects.some((x) => x.id === p.parentId));
@@ -1903,7 +1923,7 @@ function createAppStore() {
 
   return {
     state, sessions, connected, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
-    init, activeProject, workspace, activeTab, addProject, removeProject, renameProject, moveProject, switchProject,
+    init, activeProject, workspace, activeTab, addProject, removeProject, restoreProjects, renameProject, moveProject, switchProject,
     addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, openFile, closePane,
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,

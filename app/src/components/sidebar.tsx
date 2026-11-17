@@ -19,6 +19,7 @@ import { hostLabel } from "../lib/remote";
 import { canGoBack, canGoForward, navBack, navForward } from "../lib/nav-history";
 import { addExistingWorktrees, checkRemoval, removeWorktree } from "../lib/worktrees";
 import { WORKTREE_FOLD_LIMIT, foldWorktrees, isNotableWorktree } from "../lib/worktree-fold";
+import { removeFromSidebar, worktreeHealth } from "../lib/worktree-sync";
 import { openWorktreeDialog } from "./worktree-dialog";
 import { openFinish, overlapsOf } from "../lib/review-queue";
 import { openContextMenu, type MenuItem } from "./context-menu";
@@ -230,6 +231,7 @@ function projectMenu(p: Project): MenuItem[] {
   const folded = !!store.state.collapsed?.[p.id];
   const repo = !p.parentId && store.projectInfo[p.id]?.is_repo;
   const worktree = !!p.parentId;
+  const health = worktree ? worktreeHealth(p.id) : undefined;
   return [
     ...(repo
       ? [
@@ -252,8 +254,20 @@ function projectMenu(p: Project): MenuItem[] {
     { label: t("Move up"), run: () => store.moveProject(p.id, -1) },
     { label: t("Move down"), run: () => store.moveProject(p.id, 1) },
     null,
-    ...(worktree && !p.remote ? [{ label: t("Finish…"), run: () => openFinish(p.id) }] : []),
-    ...(worktree ? [{ label: t("Remove worktree…"), danger: true, run: () => void confirmRemoveWorktree(p) }] : []),
+    ...(worktree && !p.remote && !health ? [{ label: t("Finish…"), run: () => openFinish(p.id) }] : []),
+    ...(worktree && !health ? [{ label: t("Remove worktree…"), danger: true, run: () => void confirmRemoveWorktree(p) }] : []),
+    // Git no longer has it as a worktree: only the row can go (nothing on disk is touched).
+    ...(worktree && health
+      ? [{
+          label: t("Remove from sidebar"),
+          run: async () => {
+            const text = health === "missing"
+              ? t("Remove {name} from the sidebar? Its folder no longer exists. Its sessions are not stopped.", { name: p.name })
+              : t("Remove {name} from the sidebar? Its folder and files are not touched.", { name: p.name });
+            if (await confirmDialog(text)) await removeFromSidebar(p);
+          },
+        }]
+      : []),
     {
       label: t("Remove from Kelpie"), danger: true,
       run: async () => {
@@ -386,12 +400,18 @@ function ProjectRow(props: { project: Project }) {
     const c = commands.find((x) => x.id === `project.${index() + 1}`);
     return c && chordOf(c) ? chordLabel(chordOf(c)!) : "";
   };
+  const health = () => (worktree() ? worktreeHealth(props.project.id) : undefined);
+  const healthText = () =>
+    health() === "missing"
+      ? t("This worktree's folder no longer exists. It stays while it has sessions; remove it from the sidebar when you are done with them.")
+      : t("Git no longer lists this folder as a worktree of its repository. Nothing was deleted.");
   /** A worktree row is one line, so its branch (when it differs from the name) and host move to the tooltip. */
   const rowTitle = () => {
     const lines = [props.project.path];
     const i = info();
     if (worktree() && i?.is_repo && i.branch && i.branch !== props.project.name) lines.push(t("Branch: {branch}", { branch: i.branch }));
     if (worktree() && props.project.remote) lines.push(props.project.remote.tmux ? t("On {host} over SSH · sessions kept in tmux", { host: hostLabel(props.project) }) : t("On {host} over SSH", { host: hostLabel(props.project) }));
+    if (health()) lines.push(healthText());
     return lines.join("\n") + (index() >= 0 && index() < 9 ? `  (${switchChord()})` : "");
   };
   const overlaps = () => overlapsOf(props.project.id);
@@ -400,7 +420,7 @@ function ProjectRow(props: { project: Project }) {
   return (
     <div class={`project-block${active() ? " active" : ""}`}>
       <div
-        class={`project${worktree() ? " wt-row" : ""}${active() ? " active" : ""}`}
+        class={`project${worktree() ? " wt-row" : ""}${health() ? ` wt-${health()}` : ""}${active() ? " active" : ""}`}
         style={{ "--kc": props.project.color }}
         onClick={() => store.switchProject(props.project.id)}
         onContextMenu={(e) => openContextMenu(e, projectMenu(props.project))}
@@ -442,6 +462,11 @@ function ProjectRow(props: { project: Project }) {
               <span class="project-comment" title={store.metaFor(props.project)!.comment!}>{store.metaFor(props.project)!.comment}</span>
             </Show>
           </span>
+          <Show when={health()}>
+            <span class="wt-status">
+              <span class="primary-tag wt-health" title={healthText()}>{health() === "missing" ? t("folder missing") : t("not a worktree any more")}</span>
+            </span>
+          </Show>
           {/* A worktree's git state, only what means something: a detached HEAD, uncommitted changes, commits ahead/behind. */}
           <Show when={worktree() && info()?.is_repo}>
             <span class="wt-status">

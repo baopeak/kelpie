@@ -39,6 +39,7 @@ import { loadSshConfigPath, remoteConfigure } from "../lib/remote";
 import { initRuns } from "../lib/runs";
 import { initSessionUsage } from "../lib/session-usage";
 import { initReviewWatch } from "../lib/review-queue";
+import { initWorktreeSync } from "../lib/worktree-sync";
 import { setCovering } from "../lib/overlays";
 import { allViews, setFileLinkOpener, setLinkOpener } from "../lib/terminal-host";
 import { openChatFile } from "./chat-open-file";
@@ -180,6 +181,7 @@ export function App() {
     initScreen();
     initSessionUsage();
     initReviewWatch();
+    initWorktreeSync();
     void loadSshConfigPath().catch(() => {});
     void initSshHosts();
     void loadPlugins();
