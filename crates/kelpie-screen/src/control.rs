@@ -767,7 +767,7 @@ impl Controller {
         }
     }
 
-    /// A stream that starts while the machine is loaded (L2: the daemon lets it start instead of refusing it) starts at the lowest rung, the
+    /// A stream that starts while the machine is loaded (L2, or an L3 that memory causes: the daemon lets it start instead of refusing it) starts at the lowest rung, the
     /// cheapest picture to capture and encode, and climbs a rung at a time as the encoder's own load allows (`Overuse`: ten seconds of light
     /// use and 60 frames a rung), within what the level allows (`load_cap`).
     pub fn start_low(&mut self) {
