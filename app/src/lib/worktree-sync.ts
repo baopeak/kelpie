@@ -136,6 +136,7 @@ async function forget(list: Project[]) {
     {
       label: t("Undo"),
       run: () => {
+        if (undone) return;
         undone = true;
         for (const s of saved) keptPaths.add(normPath(s.project.path));
         store.restoreProjects(saved);

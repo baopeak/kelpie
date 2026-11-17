@@ -206,7 +206,7 @@
   "This worktree's folder no longer exists. It stays while it has sessions; remove it from the sidebar when you are done with them.": "Thư mục của worktree này không còn nữa. Nó vẫn ở lại thanh bên khi còn phiên, nên hãy gỡ nó khỏi thanh bên khi bạn đã xong việc với các phiên đó.",
   "Git no longer lists this folder as a worktree of its repository. Nothing was deleted.": "Git không còn liệt kê thư mục này là một worktree của kho mã, nhưng không có gì bị xoá.",
   "folder missing": "mất thư mục",
-  "not a worktree any more": "không còn là worktree",
+  "not a worktree": "không còn là worktree",
   "Removed {n} worktree that no longer exists": "Đã gỡ {n} worktree không còn tồn tại",
   "Removed {n} worktrees that no longer exist": "Đã gỡ {n} worktree không còn tồn tại",
   "Remove {name} from the sidebar? Files and running sessions are not touched.": "Gỡ {name} khỏi thanh bên? Tệp và các phiên đang chạy không bị ảnh hưởng.",

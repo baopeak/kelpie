@@ -465,7 +465,7 @@ function ProjectRow(props: { project: Project }) {
           </span>
           <Show when={health()}>
             <span class="wt-status wt-health-box">
-              <span class="primary-tag wt-health" title={healthText()}>{health() === "missing" ? t("folder missing") : t("not a worktree any more")}</span>
+              <span class="primary-tag wt-health" title={healthText()}>{health() === "missing" ? t("folder missing") : t("not a worktree")}</span>
             </span>
           </Show>
           {/* A worktree's git state, only what means something: a detached HEAD, uncommitted changes, commits ahead/behind. */}

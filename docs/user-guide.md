@@ -89,7 +89,7 @@ their name and shortcut when you hover them.
    that can undo it. A row goes only when its folder is gone, git no longer lists it and it has no session;
    files and branches are never touched, and nothing goes when git fails or the drive cannot be reached
    (remote repositories are not checked). A gone worktree that still has sessions stays, muted and marked
-   *folder missing*; a folder git no longer lists stays, marked *not a worktree any more*; both have
+   *folder missing*; a folder git no longer lists stays, marked *not a worktree*; both have
    *Remove from sidebar* in their menu. Worktrees created outside Kelpie later are not added by
    themselves: use the repository's *Add existing worktrees*. Right-click a session to rename it inline, mark it unread, restart or resume it,
    continue it in chat view or stop it; right-click a project for worktrees, rename, reorder.

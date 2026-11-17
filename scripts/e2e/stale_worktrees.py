@@ -13,7 +13,7 @@ talks to a daemon, so the user's own Kelpie is never reached. No network: the re
 2. A shell is opened for wt1 (from a folder outside it, so its folder can be deleted while it runs).
 3. Outside the app: `git worktree remove` wt1..wt4; wt5 is removed and its folder made again (exists, not listed).
 4. The window gains focus: wt2..wt4 go with one toast; wt1 stays marked missing (it has a session); wt5 stays
-   marked "not a worktree any more"; wt6 is untouched. Nothing on disk changed (branches all kept).
+   marked "not a worktree"; wt6 is untouched. Nothing on disk changed (branches all kept).
 5. Undo brings wt2..wt4 back (marked missing); "Remove from sidebar" on wt1 takes its row away and its shell
    keeps running.
 """
@@ -176,7 +176,7 @@ def scenario(run):
     run.check("wt5 (folder exists, git no longer lists it) stays, marked", "wt-unlisted" in r.get("wt5", ""), r)
     run.check("wt6 is untouched", r.get("wt6") is not None and "wt-missing" not in r["wt6"] and "wt-unlisted" not in r["wt6"], r)
     tags = d.js("return [...document.querySelectorAll('.wt-health')].map(e => e.textContent)")
-    run.check("the marks say why", sorted(tags) == ["folder missing", "not a worktree any more"], tags)
+    run.check("the marks say why", sorted(tags) == ["folder missing", "not a worktree"], tags)
     run.check("the shell still runs", d.js(f"return !!{S}.sessions[arguments[0]]?.alive", sid))
     branches = git(REPO, "branch", "--format=%(refname:short)").split()
     run.check("every branch is kept", all(f"wt{i}" in branches for i in range(1, 7)), branches)
