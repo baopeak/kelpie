@@ -374,7 +374,8 @@ function ProjectRow(props: { project: Project }) {
     if (kids.length <= WORKTREE_FOLD_LIMIT) return { shown: kids, hidden: [] as Project[] };
     const watched = new Set<string>();
     for (const s of Object.values(store.sessions)) if (s.project_id && (s.alive || asksForUser(s))) watched.add(s.project_id);
-    return foldWorktrees(kids, (c) => isNotableWorktree({ active: store.state.activeProject === c.id, sessions: watched.has(c.id), info: store.projectInfo[c.id] }));
+    // A marked worktree (folder missing, not a worktree) stays in view: the mark is there to be seen.
+    return foldWorktrees(kids, (c) => !!worktreeHealth(c.id) || isNotableWorktree({ active: store.state.activeProject === c.id, sessions: watched.has(c.id), info: store.projectInfo[c.id] }));
   });
   const wtShown = createMemo<Project[]>((prev) => sameList(prev, wtFold().shown));
   const wtHidden = createMemo<Project[]>((prev) => sameList(prev, wtFold().hidden));

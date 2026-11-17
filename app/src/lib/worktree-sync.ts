@@ -4,7 +4,7 @@
 // when the repository is added, or from "Add existing worktrees") and never touches files or branches.
 import { createStore, produce } from "solid-js/store";
 import { createEffect, createRoot } from "solid-js";
-import { store } from "./store";
+import { metaKey, store } from "./store";
 import * as ipc from "./ipc";
 import { t } from "./i18n";
 import { normPath } from "./platform";
@@ -30,13 +30,15 @@ export interface RepoCheck {
   marks: Record<string, WorktreeHealth>;
 }
 
-/** The folders above `path`, nearest first, down to a drive root (`D:\`) but not `/`. */
+/** The folders above `path`, nearest first, down to a drive root (`D:\`) or a share (`\\server\share`), but not `/`. */
 export function ancestors(path: string): string[] {
   const out: string[] = [];
   let p = path.replace(/[\\/]+$/, "");
+  // A network path's first folder is its share: `\\server` and `\` above it are not folders of that share.
+  const share = p.match(/^[\\/]{2}[^\\/]+[\\/][^\\/]+/)?.[0];
   for (let i = 0; i < 64; i++) {
     const m = p.match(/^(.*?)[\\/][^\\/]+$/);
-    if (!m || !m[1]) break;
+    if (!m || !m[1] || (share && m[1].length < share.length)) break;
     let parent = m[1];
     if (/^[A-Za-z]:$/.test(parent)) parent += p.charAt(2);
     out.push(parent);
@@ -68,25 +70,29 @@ export async function checkRepo(repo: Project, worktrees: Project[], hasSessions
   const marks: Record<string, WorktreeHealth> = {};
   for (const wt of worktrees) {
     if (wt.remote) continue;
-    const isListed = (await keys(wt.path)).some((k) => listed.has(k));
+    const own = await keys(wt.path);
     if (await probe.isDir(wt.path).catch(() => true)) {
-      if (!isListed) marks[wt.id] = "unlisted";
+      if (!own.some((k) => listed.has(k))) marks[wt.id] = "unlisted";
       continue;
     }
     // Gone, or only out of reach (an unplugged drive, a network share that is down): with nothing above
     // it reachable, nothing is said about it.
-    let reachable = false;
-    for (const a of ancestors(wt.path)) {
-      if (await probe.isDir(a).catch(() => false)) {
-        reachable = true;
-        break;
-      }
-    }
-    if (!reachable) continue;
-    if (isListed || hasSessions(wt)) marks[wt.id] = "missing";
+    const above = await nearestFolder(wt.path, probe);
+    if (above === null) continue;
+    // A missing folder has no canonical form of its own: spell it from the canonical form of the folder
+    // above (long names, resolved links), as git may have recorded it.
+    const canonAbove = await probe.canonical(above).catch(() => above);
+    own.push(normPath(canonAbove.replace(/[\\/]+$/, "") + "/" + wt.path.slice(above.length).replace(/^[\\/]+/, "")));
+    if (own.some((k) => listed.has(k)) || hasSessions(wt)) marks[wt.id] = "missing";
     else remove.push(wt);
   }
   return { remove, marks };
+}
+
+/** The nearest folder above `path` that exists, or null when none can be reached. */
+async function nearestFolder(path: string, probe: SyncProbe): Promise<string | null> {
+  for (const a of ancestors(path)) if (await probe.isDir(a).catch(() => false)) return a;
+  return null;
 }
 
 // ---------- live state ----------
@@ -114,19 +120,56 @@ export function worktreeHasSessions(wt: Project): boolean {
   return store.workspace(wt.id).tabs.some((tab) => allPanes(tab.root).some((p) => !!p.sessionId));
 }
 
+/** Sessions are known only once read from the connected daemon: before that a worktree with sessions looks empty. */
+const ready = () => store.connected() && store.sessionsKnown();
+
+const GIT_TIMEOUT_MS = 20_000;
+/** A git call that never answers (a hung network drive) counts as an error, so later checks still run. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out")), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 const liveProbe: SyncProbe = {
-  listWorktrees: (repoPath) => ipc.gitWorktrees(repoPath),
+  listWorktrees: (repoPath) => withTimeout(ipc.gitWorktrees(repoPath), GIT_TIMEOUT_MS),
   isDir: (path) => ipc.isDir(path),
   canonical: (path) => ipc.canonicalPath(path),
 };
 
 const UNDO_MS = 10_000;
 
-/** Takes the rows away as Remove from Kelpie does (layouts, fold state, history), and their review notes once Undo can no longer bring them back. */
-async function forget(list: Project[]) {
-  const keys = await Promise.all(list.map((wt) => store.noteKeyFor(wt).catch(() => "")));
+/** Clears the review notes filed under the worktree's own folder. Never those of a folder above it: the
+ *  daemon files notes of a folder without `.git` under the repository holding it. */
+async function clearOwnNotes(wt: Project) {
+  const key = await store.noteKeyFor(wt).catch(() => "");
+  const own = [metaKey(wt.path), metaKey(await ipc.canonicalPath(wt.path).catch(() => wt.path))];
+  if (key && own.includes(key)) await store.clearNotesAt(wt.id, key);
+}
+
+const clone = <T>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
+
+/** What `removeProject` drops of a row, kept so Undo can put it back. */
+function snapshot(wt: Project, index: number) {
+  return {
+    project: clone(wt),
+    workspace: clone(store.workspace(wt.id)),
+    index,
+    collapsed: !!store.state.collapsed?.[wt.id],
+    worktreesExpanded: !!store.state.worktreesExpanded?.[wt.id],
+    promptHistory: clone(store.state.promptHistory?.[wt.id]),
+  };
+}
+
+/** Takes the rows away as Remove from Kelpie does (layouts, fold state, history) at once, and their review
+ *  notes once Undo can no longer bring them back. */
+function forget(list: Project[]) {
   const order = store.state.projects.map((p) => p.id);
-  const saved = list.map((wt) => ({ project: JSON.parse(JSON.stringify(wt)) as Project, workspace: JSON.parse(JSON.stringify(store.workspace(wt.id))), index: order.indexOf(wt.id) }));
+  const saved = list.map((wt) => snapshot(wt, order.indexOf(wt.id)));
   for (const wt of list) store.removeProject(wt.id);
   setHealth(produce((h) => list.forEach((wt) => delete h[wt.id])));
   let undone = false;
@@ -147,18 +190,17 @@ async function forget(list: Project[]) {
   );
   setTimeout(() => {
     if (undone) return;
-    list.forEach((wt, i) => {
-      if (keys[i] && !store.state.projects.some((p) => p.id === wt.id)) void store.clearNotesAt(wt.id, keys[i]);
-    });
+    for (const wt of list) if (!store.state.projects.some((p) => p.id === wt.id)) void clearOwnNotes(wt);
   }, UNDO_MS + 1000);
 }
 
-/** Removes a missing worktree's row on the user's request (its sessions keep running; nothing on disk changes). */
+/** Removes a marked worktree's row on the user's request (its sessions keep running; nothing on disk changes).
+ *  A folder that still exists keeps its notes: it may be added again. */
 export async function removeFromSidebar(wt: Project) {
-  const key = await store.noteKeyFor(wt).catch(() => "");
+  const gone = !(await ipc.isDir(wt.path).catch(() => true));
   store.removeProject(wt.id);
   setHealth(produce((h) => void delete h[wt.id]));
-  if (key) await store.clearNotesAt(wt.id, key);
+  if (gone) await clearOwnNotes(wt);
 }
 
 const running = new Map<string, Promise<void>>();
@@ -189,20 +231,22 @@ async function syncRepo(repo: Project, probe: SyncProbe): Promise<Project[]> {
  * connected: before that the sessions are not known, and a worktree with sessions must never go.
  */
 export async function syncWorktrees(repoId?: string, probe: SyncProbe = liveProbe) {
-  if (!store.connected()) return;
+  if (!ready()) return;
   const repos = store.state.projects.filter((p) => !p.parentId && !p.remote && (!repoId || p.id === repoId) && store.childrenOf(p.id).length);
-  const gone: Project[] = [];
   for (const repo of repos) {
-    const prev = running.get(repo.id);
-    if (prev) {
-      await prev;
-      continue;
-    }
-    const job = syncRepo(repo, probe).then((r) => void gone.push(...r), () => {}).finally(() => running.delete(repo.id));
+    // One check per repository at a time; one asked for meanwhile runs after it (it may know more).
+    const job: Promise<void> = (running.get(repo.id) ?? Promise.resolve())
+      .then(() => (ready() ? syncRepo(repo, probe) : []))
+      .then((r) => {
+        // Removed at once, so a check that follows sees them gone.
+        if (r.length) forget(r);
+      }, () => {})
+      .finally(() => {
+        if (running.get(repo.id) === job) running.delete(repo.id);
+      });
     running.set(repo.id, job);
     await job;
   }
-  if (gone.length) await forget(gone);
 }
 
 /** Checks a repository again a moment after Kelpie created, added or removed one of its worktrees. */
@@ -219,14 +263,14 @@ export function initWorktreeSync() {
   started = true;
   let last = 0;
   const run = () => {
-    if (Date.now() - last < FOCUS_EVERY_MS) return;
+    if (!ready() || Date.now() - last < FOCUS_EVERY_MS) return;
     last = Date.now();
     void syncWorktrees();
   };
   createRoot(() => {
     let first = true;
     createEffect(() => {
-      if (!store.connected() || !first) return;
+      if (!ready() || !first) return;
       first = false;
       last = Date.now();
       void syncWorktrees();

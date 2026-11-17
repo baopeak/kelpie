@@ -8,27 +8,35 @@ const fake = vi.hoisted(() => {
   const workspaces: Record<string, any> = {};
   const toasts: { text: string; action?: { label: string; run: () => void } }[] = [];
   let connected = true;
+  let sessionsKnown = true;
+  const noteKeys: Record<string, string> = {};
   const store = {
     state,
     sessions,
     connected: () => connected,
+    sessionsKnown: () => sessionsKnown,
     workspace: (id: string) => workspaces[id] ?? { tabs: [], activeTab: null, rightPanel: null },
     childrenOf: (id: string) => state.projects.filter((p) => p.parentId === id),
     removeProject: (id: string) => void (state.projects = state.projects.filter((p) => p.id !== id)),
     restoreProjects: (entries: { project: any; index: number }[]) => {
       for (const e of entries) state.projects.splice(e.index, 0, e.project);
     },
-    noteKeyFor: async (p: any) => p.path,
+    noteKeyFor: async (p: any) => noteKeys[p.id] ?? p.path.replace(/\\/g, "/").toLowerCase(),
     clearNotesAt: vi.fn(async () => {}),
     notify: (text: string, action?: { label: string; run: () => void }) => void toasts.push({ text, action }),
   };
-  return { store, state, sessions, workspaces, toasts, setConnected: (v: boolean) => (connected = v) };
+  return {
+    store, state, sessions, workspaces, toasts, noteKeys,
+    setConnected: (v: boolean) => (connected = v),
+    setSessionsKnown: (v: boolean) => (sessionsKnown = v),
+  };
 });
-vi.mock("./store", () => ({ store: fake.store }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+const invoke = vi.hoisted(() => vi.fn());
+vi.mock("./store", () => ({ store: fake.store, metaKey: (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
-import { ancestors, checkRepo, syncWorktrees, worktreeHealth, type SyncProbe } from "./worktree-sync";
+import { ancestors, checkRepo, removeFromSidebar, syncWorktrees, worktreeHealth, type SyncProbe } from "./worktree-sync";
 
 const repo: Project = { id: "r", name: "kelpie", path: "D:\\Works\\Kelpie", color: "#000" };
 const wt = (id: string, extra: Partial<Project> = {}): Project => ({ id, name: id, path: `D:\\Works\\Kelpie-worktrees\\${id}`, color: "#000", parentId: "r", ...extra });
@@ -58,6 +66,11 @@ describe("ancestors", () => {
     expect(ancestors("D:\\Works\\Kelpie-worktrees\\a")).toEqual(["D:\\Works\\Kelpie-worktrees", "D:\\Works", "D:\\"]);
     expect(ancestors("D:/Works/x/")).toEqual(["D:/Works", "D:/"]);
     expect(ancestors("/home/me/wt")).toEqual(["/home/me", "/home"]);
+  });
+
+  it("stops at a network share: the server and the current drive's root are not above it", () => {
+    expect(ancestors("\\\\server\\share\\wts\\a")).toEqual(["\\\\server\\share\\wts", "\\\\server\\share"]);
+    expect(ancestors("\\\\server\\share\\a")).toEqual(["\\\\server\\share"]);
   });
 });
 
@@ -116,6 +129,20 @@ describe("checkRepo", () => {
     expect(p.calls).toEqual([]);
   });
 
+  it("leaves a worktree on a network share that is down", async () => {
+    const r = await checkRepo(repo, [wt("n", { path: "\\\\server\\share\\wt\\n" })], noSessions, probe({ dirs: ROOTS }));
+    expect(r).toEqual({ remove: [], marks: {} });
+  });
+
+  it("matches git's spelling of a missing folder through the canonical form of the folder above it", async () => {
+    // The row was stored with an 8.3 short name; git recorded the long one. The folder is gone, so only
+    // the folder above it can be resolved.
+    const p = probe({ dirs: [...ROOTS, "D:\\Works\\KELPIE~1"], listed: ["D:/Works/Kelpie-worktrees/a"] });
+    p.canonical = async (x) => (x.toLowerCase() === "d:\\works\\kelpie~1" ? "D:\\Works\\Kelpie-worktrees" : x);
+    const r = await checkRepo(repo, [wt("a", { path: "D:\\Works\\KELPIE~1\\a" })], noSessions, p);
+    expect(r).toEqual({ remove: [], marks: { a: "missing" } });
+  });
+
   it("matches git's spelling of a path regardless of slashes and case", async () => {
     const r = await checkRepo(repo, [wt("a")], noSessions, probe({ dirs: [...ROOTS, "D:\\Works\\Kelpie-worktrees\\a"], listed: ["d:/works/kelpie-worktrees/A"] }));
     expect(r).toEqual({ remove: [], marks: {} });
@@ -129,6 +156,10 @@ describe("syncWorktrees", () => {
     for (const k of Object.keys(fake.workspaces)) delete fake.workspaces[k];
     fake.toasts.length = 0;
     fake.setConnected(true);
+    fake.setSessionsKnown(true);
+    for (const k of Object.keys(fake.noteKeys)) delete fake.noteKeys[k];
+    fake.store.clearNotesAt.mockClear();
+    invoke.mockReset();
   });
 
   const computer = () => probe({ dirs: [...ROOTS, "D:\\Works\\Kelpie-worktrees\\c"], listed: ["D:/Works/Kelpie-worktrees/c"] });
@@ -137,6 +168,18 @@ describe("syncWorktrees", () => {
     fake.setConnected(false);
     await syncWorktrees(undefined, computer());
     expect(fake.state.projects.map((p) => p.id)).toEqual(["r", "a", "b", "c"]);
+  });
+
+  it("does nothing while the session list could not be read", async () => {
+    fake.setSessionsKnown(false);
+    await syncWorktrees(undefined, computer());
+    expect(fake.state.projects.map((p) => p.id)).toEqual(["r", "a", "b", "c"]);
+  });
+
+  it("two checks at once remove each row once, with one toast", async () => {
+    await Promise.all([syncWorktrees(undefined, computer()), syncWorktrees("r", computer())]);
+    expect(fake.state.projects.map((p) => p.id)).toEqual(["r", "c"]);
+    expect(fake.toasts.map((x) => x.text)).toEqual(["Removed 2 worktrees that no longer exist"]);
   });
 
   it("removes the gone worktrees with one toast, keeps one with a pane, and Undo brings them back", async () => {
@@ -162,5 +205,29 @@ describe("syncWorktrees", () => {
     await syncWorktrees(undefined, computer());
     expect(fake.state.projects.map((p) => p.id)).toEqual(["r", "a", "b", "c"]);
     expect(fake.toasts).toEqual([]);
+  });
+});
+
+describe("notes of a removed row", () => {
+  beforeEach(() => {
+    fake.state.projects = [repo, wt("a"), wt("b")];
+    for (const k of Object.keys(fake.noteKeys)) delete fake.noteKeys[k];
+    fake.store.clearNotesAt.mockClear();
+    invoke.mockReset();
+  });
+
+  it("Remove from sidebar keeps the notes of a folder that still exists", async () => {
+    invoke.mockImplementation(async (cmd: string, a: any) => (cmd === "fs_is_dir" ? true : a?.path));
+    await removeFromSidebar(wt("a"));
+    expect(fake.state.projects.map((p) => p.id)).toEqual(["r", "b"]);
+    expect(fake.store.clearNotesAt).not.toHaveBeenCalled();
+  });
+
+  it("clears a gone folder's notes under its own key only, never the repository's above it", async () => {
+    invoke.mockImplementation(async (cmd: string, a: any) => (cmd === "fs_is_dir" ? false : a?.path));
+    fake.noteKeys.b = "d:/works/kelpie";
+    await removeFromSidebar(wt("a"));
+    await removeFromSidebar(wt("b"));
+    expect(fake.store.clearNotesAt.mock.calls).toEqual([["a", "d:/works/kelpie-worktrees/a"]]);
   });
 });
