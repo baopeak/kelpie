@@ -1115,10 +1115,10 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   which starts low as L2 does (memory under 8 % free is L3, which on a large computer leaves gigabytes; the helper is told L3, so the stream
   keeps L3's cap and its five-minute pause), and with under `MIN_FREE_MB` (600 MiB) of memory free, whatever the level (`host_busy`, with `reason` — `memory`, `cpu`, `lag`, `thermal` or `load` —
   and `busy {level, reasons, reason, memory_free, memory_free_mb, min_free_mb, cpu, lag_ms}` in the reply, from API 46; `reason` is `memory` when
-  memory is what refuses, else the first of the level's other reasons; the phone says why and tries again
-  on its own on a bounded backoff, never with Face ID, which only a tap asks for: the load is looked at before the passkey); started at L2 with the
+  memory is what refuses, else the first of the level's other reasons among `lag`, `cpu`, `thermal`, then `memory` again, then `load`; the phone says why and tries again
+  on its own on a bounded backoff, never with Face ID, which only a tap asks for: the load is looked at before the passkey); started at L2 (and that memory-only L3) with the
   helper at its lowest rung (`Controller::start_low`), climbing as the encoder's load allows within the level's cap. The `KELPIE_LOAD_FORCE` test hook stands
-  for everything measured, in a debug build or an e2e run only, never in a release daemon. Refused too without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
+  for everything measured, in a debug build or an e2e run only, never in a release daemon (so a pinned `L3:memory`, with nothing measured free, still refuses). Refused too without the app (`no_app`, "Open Kelpie on the computer…"), and for another device while one sees it (`sc_taken`). Targets from the helper
   are checked again (known ids and kinds, short titles). A start reserves the screen for its whole length: a second start meanwhile, by any device, is
   refused as in use (`sc_taken`), and the first holder keeps it; a failed or timed-out start tells the app to stop; a link that closes during a start leaves a
   hold that waits for the device's next connection. A hold also rests on the record as it is now (`control_held`, looked at again by its task), takes at most

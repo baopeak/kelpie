@@ -1603,10 +1603,11 @@ with no grace), removing the phone or lowering what it may do (within a second),
 address, or through the relay once you allow it (*Seeing the screen without Tailscale* above), and one phone at a time. Before it starts the
 phone asks which way to connect (*Automatic*, *Tailscale*, *Direct (peer to peer)*, the relay and, from a relay with TURN, *Kelpie's relay (TURN)*;
 see *Direct (peer to peer)* above), says which are available now and why not, and remembers your choice. If the computer is busy a new screen starts at a low quality and sharpens as the computer allows. Memory under 8 % free alone
-starts it low too while at least 600 MB is free (on a large computer that is still a lot). If it is overloaded otherwise (a slow
-response, a processor or heat on top of that), or has less than 600 MB of memory free, the phone says why with the computer's numbers (such as *Only 11 % of the computer's memory is free
+starts it low too while at least 600 MB is free (on a large computer that is still a lot), but at the lowest quality and without
+*Sharpen* while memory stays that short. If it is overloaded otherwise (anything else slowing it at the same time: a slow response,
+a busy processor, heat, battery saver), or has less than 600 MB of memory free, the phone says why with the computer's numbers (such as *Only 11 % of the computer's memory is free
 (800 MB)*) and what helps, then tries again on its own for about four minutes, which *Stop trying* ends. A try on its own never asks for Face ID: through
-the relay the phone says when the computer has room, and you tap to start. After five overloaded minutes the picture pauses until you tap it. The phone says when the computer is locked, when a Windows security prompt (UAC) is up, when an app running as administrator is in
+the relay the phone says when the computer has room, and you tap to start. After five minutes overloaded (memory under 8 % free included) the picture pauses until you tap it. The phone says when the computer is locked, when a Windows security prompt (UAC) is up, when an app running as administrator is in
 front, and when the window is minimized: those cannot be seen or answered from the phone. What is typed or clicked is not recorded anywhere: *What phones
 did* says which program was shared (such as `Code.exe`, never the window's title) or that it was a whole screen, when, and why it ended.
 

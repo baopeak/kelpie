@@ -1146,6 +1146,10 @@ fn a_screen_is_gated_by_the_memory_it_needs_not_by_a_share_of_all_memory() {
     assert_eq!(r.reason, Some("lag"));
     let Admit::Busy(r) = admit(&status(Level::L3, &["memory", "thermal"]), Some(&measured(6.0, 1300, 30.0, 5.0))) else { panic!("heat refuses") };
     assert_eq!(r.reason, Some("thermal"));
+    // Battery saver asks for L1 only and is not a reason the phone names: with nothing else to name, memory is, with the numbers.
+    let Admit::Busy(r) = admit(&status(Level::L3, &["memory", "battery_saver"]), Some(&measured(7.0, 1150, 30.0, 5.0))) else { panic!("refused") };
+    assert_eq!(r.reason, Some("memory"));
+    assert!(r.message.contains("Only 7 %") && r.message.contains("(1150 MB)"), "{}", r.message);
     // The test hook pins the level and stands for everything measured: no floor, no numbers, the hook's reason.
     assert_eq!(admit(&status(Level::L2, &["memory"]), None), Admit::Low);
     let Admit::Busy(r) = admit(&status(Level::L3, &["memory"]), None) else { panic!("L3 refuses") };

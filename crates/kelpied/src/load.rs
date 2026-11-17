@@ -682,6 +682,7 @@ mod tests {
         assert!(!status(Level::L3, &["thermal"]).l3_only_memory(), "heat");
         assert!(!status(Level::L3, &["forced"]).l3_only_memory(), "a pinned level without a reason the load gives");
         assert!(!status(Level::L2, &["memory"]).l3_only_memory(), "L2 starts low anyway");
+        assert!(!status(Level::L3, &["memory", "battery_saver"]).l3_only_memory(), "battery saver asks too");
         // The sample that asks for it: free memory under 8 % or the low-memory event, and nothing else.
         let mut m = Machine::default();
         let low = sample(5.0, 10.0, 6.0);
