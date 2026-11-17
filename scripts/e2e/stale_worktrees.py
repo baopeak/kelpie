@@ -16,8 +16,13 @@ talks to a daemon, so the user's own Kelpie is never reached. No network: the re
    marked "not a worktree"; wt6 is untouched. Nothing on disk changed (branches all kept).
 5. Undo brings wt2..wt4 back (marked missing); "Remove from sidebar" on wt1 takes its row away and its shell
    keeps running.
+6. The app restarts on the same daemon and data folder: wt1 stays away, wt2..wt4 (back only through Undo) leave
+   again with one toast, wt5 is marked again and wt1's shell still runs.
+7. The saved app state holds only wt5 and wt6 under the repository (the automatic removal was kept), and a second
+   restart lists only those two.
 """
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -202,6 +207,58 @@ def scenario(run):
     run.check("…after asking", len(d.js("return window.__confirms")) == 1, d.js("return window.__confirms"))
     run.check("…and its shell keeps running", d.js(f"return !!{S}.sessions[arguments[0]]?.alive", sid))
     run.shot("04-after-remove-from-sidebar")
+
+    # 6. the app restarts (same daemon and data folder): what was removed stays removed
+    d = restart(run)
+    run.check("after a restart the repository is still there", d.js(f"return {S}.state.projects.some(p => p.id === arguments[0])", pid))
+    first = kids(d, pid)
+    run.check("…wt1, removed from the sidebar, does not come back", "wt1" not in first and {"wt5", "wt6"} <= set(first), first)
+    # wt2..wt4 came back with Undo (marked for that run only): gone, without a session, they leave again on connect.
+    again = until(lambda: kids(d, pid) == ["wt5", "wt6"], 30)
+    run.check("…wt2..wt4, brought back by Undo, leave again", again, kids(d, pid))
+    toast = d.wait("return document.querySelector('.toast')?.textContent || null", 10)
+    run.check("…with one toast", toast and "Removed 3 worktrees that no longer exist" in toast, toast)
+    d.js(f"{S}.setWorktreesExpanded(arguments[0], true)", pid)
+    r = until(lambda: (lambda x: x if "wt-unlisted" in x.get("wt5", "") else None)(rows(d)), 10) or rows(d)
+    run.check("…wt5 is marked not a worktree again", "wt-unlisted" in r.get("wt5", ""), r)
+    run.check("…wt1's shell still runs", d.js(f"return !!{S}.sessions[arguments[0]]?.alive", sid))
+    run.shot("05-after-restart")
+
+    # 7. the automatic removal is what was saved (read from the file, not from what the sidebar shows), and a second restart lists
+    # only wt5 and wt6. A lost save would bring wt2..wt4 back for the check on connect to remove again, which the file shows at once.
+    save(run.d)
+    saved = saved_children(pid)
+    run.check("the saved app state keeps only wt5 and wt6 under the repository", saved == ["wt5", "wt6"], saved)
+    d = restart(run)
+    run.check("after a second restart only wt5 and wt6 are listed", kids(d, pid) == ["wt5", "wt6"], kids(d, pid))
+    run.shot("06-after-second-restart")
+
+
+def save(d):
+    """Writes the app state now instead of after its debounce."""
+    err = d.js_async(f"const done = arguments[arguments.length - 1]; {S}.saveNow().then(() => done(null), e => done(String(e)));")
+    if err:
+        raise RuntimeError(f"saveNow: {err}")
+
+
+def saved_children(pid):
+    """The worktree rows under `pid` in the app state file the app wrote to this run's data folder."""
+    with open(os.path.join(DATA, "app-state.json"), encoding="utf-8") as f:
+        projects = json.load(f).get("projects", [])
+    return sorted(p["name"] for p in projects if p.get("parentId") == pid)
+
+
+def restart(run):
+    """Closes the app (its state saved first) and opens it again on the same daemon and data folder; returns the new driver."""
+    save(run.d)
+    run.d.quit()
+    time.sleep(3)
+    run.d = Run(run.shots, app=app).d
+    run.boot()
+    run.d.set_window_size(1280, 860)
+    run.d._req("POST", run.d.s("/timeouts"), {"script": 120000})
+    run.d.js("window.__confirms = []; window.confirm = (m) => { window.__confirms.push(m); return true; };")
+    return run.d
 
 
 def port_open():

@@ -214,7 +214,9 @@ try:
     wait(lambda: exists("[data-host-editor]"), 5)
     d.js("const o = [...document.querySelectorAll('[data-host-editor] details.drawer-opt')].find((x) => x.querySelector('[data-terminal-preview]')); o.open = true; o.scrollIntoView();")
     d.js("const s = document.querySelector('[data-host-editor] [data-field=terminal-theme]'); s.value = 'kanagawa'; s.dispatchEvent(new Event('change', {bubbles: true}));")
+    # The size field takes its value on change (typed, then leaving the field), not on each keystroke.
     fill("[data-host-editor] [data-field=font-size]", "16")
+    d.js("document.querySelector('[data-host-editor] [data-field=font-size]').dispatchEvent(new Event('change', {bubbles: true}))")
     d.click("[data-host-editor] [data-field=cursor-style] button[data-value=block]")
     d.click("[data-host-editor] [data-field=cursor-blink] button[data-value=false]")
     preview = d.js("""const p = document.querySelector('[data-host-editor] [data-terminal-preview]'); const cs = getComputedStyle(p);
