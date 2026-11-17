@@ -12,7 +12,7 @@ import { allPanes } from "./layout";
 import type { Project, Worktree } from "./types";
 
 /** Why a worktree row is shown differently:
- *  - `missing`: its folder is gone, but it keeps sessions (or git still records it), so it stays;
+ *  - `missing`: its folder is gone, but it keeps sessions (or git still records it, e.g. locked), so it stays;
  *  - `unlisted`: its folder exists, but git no longer lists it as a worktree of the repository. */
 export type WorktreeHealth = "missing" | "unlisted";
 
@@ -24,7 +24,7 @@ export interface SyncProbe {
 }
 
 export interface RepoCheck {
-  /** Worktree rows that can go: folder gone, git no longer lists it, no sessions. */
+  /** Worktree rows that can go: folder gone, git no longer lists it (or marks it prunable), no sessions. */
   remove: Project[];
   /** The rows that stay but are shown as `missing` or `unlisted`. */
   marks: Record<string, WorktreeHealth>;
@@ -52,7 +52,8 @@ export function ancestors(path: string): string[] {
  * Decides, for one repository, which of its worktree rows go and which are marked. Returns null when
  * nothing can be said safely: a remote repository, a repository folder that cannot be reached, or a git
  * error. A row is removed only on a clear result: its folder does not exist while the place it was in can
- * be reached (so not an unplugged drive), git does not list it, and it has no session.
+ * be reached (so not an unplugged drive), git does not list it (or lists it only as `prunable`), and it
+ * has no session.
  */
 export async function checkRepo(repo: Project, worktrees: Project[], hasSessions: (wt: Project) => boolean, probe: SyncProbe): Promise<RepoCheck | null> {
   if (repo.remote) return null;
@@ -65,7 +66,12 @@ export async function checkRepo(repo: Project, worktrees: Project[], hasSessions
   }
   if (!Array.isArray(list) || !list.length) return null;
   const keys = async (p: string) => [normPath(p), normPath(await probe.canonical(p).catch(() => p))];
-  const listed = new Set((await Promise.all(list.map((w) => keys(w.path)))).flat());
+  const keysOf = async (entries: Worktree[]) => new Set((await Promise.all(entries.map((w) => keys(w.path)))).flat());
+  // An entry git marks `prunable` (its `.git` file is gone: the folder was deleted without `git worktree
+  // remove`, or is on a drive that is not there) counts as not listed (git keeps it only until the next
+  // `git worktree prune`), but its row goes only when the folder right above it exists (below).
+  const listed = await keysOf(list.filter((w) => !w.prunable));
+  const prunable = await keysOf(list.filter((w) => w.prunable));
   const remove: Project[] = [];
   const marks: Record<string, WorktreeHealth> = {};
   for (const wt of worktrees) {
@@ -83,7 +89,11 @@ export async function checkRepo(repo: Project, worktrees: Project[], hasSessions
     // above (long names, resolved links), as git may have recorded it.
     const canonAbove = await probe.canonical(above).catch(() => above);
     own.push(normPath(canonAbove.replace(/[\\/]+$/, "") + "/" + wt.path.slice(above.length).replace(/^[\\/]+/, "")));
-    if (own.some((k) => listed.has(k)) || hasSessions(wt)) marks[wt.id] = "missing";
+    // Git marks a worktree on an unplugged drive prunable too, and a mount point's folder above it
+    // (`/Volumes`, `/media/me`) is always there: for git's prunable mark, only an existing folder right
+    // above it says the folder itself was deleted.
+    const doubtful = above !== ancestors(wt.path)[0] && own.some((k) => prunable.has(k));
+    if (doubtful || own.some((k) => listed.has(k)) || hasSessions(wt)) marks[wt.id] = "missing";
     else remove.push(wt);
   }
   return { remove, marks };

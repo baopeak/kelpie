@@ -84,11 +84,13 @@ their name and shortcut when you hover them.
    unpushed work; the quiet rest fold into *N more worktrees*, which expands (remembered per
    repository; a single quiet worktree is never folded). A folded worktree comes back into the list
    when it is opened, starts a session or Kelpie next reads uncommitted or unpushed work in it. Worktrees
-   follow git: when one was removed outside Kelpie (with `git worktree remove`, by an agent), its row goes
-   when Kelpie starts, when the window gains focus or after a worktree action in Kelpie, with one toast
-   that can undo it. A row goes only when its folder is gone, git no longer lists it and it has no session;
-   files and branches are never touched, and nothing goes when git fails or the drive cannot be reached
-   (remote repositories are not checked). A gone worktree that still has sessions stays, muted and marked
+   follow git: when one was removed outside Kelpie (with `git worktree remove`, by an agent, or by deleting
+   its folder), its row goes when Kelpie starts, when the window gains focus or after a worktree action
+   in Kelpie, with one toast that can undo it. A row goes only when its folder is gone, git no longer
+   lists it (or lists it only as *prunable*, as it does for a folder deleted by hand while the folder
+   above it is still there) and it has no session; files and branches are never touched, and nothing
+   goes when git fails or the drive cannot be reached (remote repositories are not checked). A gone
+   worktree that still has sessions, or that is locked (`git worktree lock`), stays, muted and marked
    *folder missing*; a folder git no longer lists stays, marked *not a worktree*; both have
    *Remove from sidebar* in their menu. Worktrees created outside Kelpie later are not added by
    themselves: use the repository's *Add existing worktrees*. Right-click a session to rename it inline, mark it unread, restart or resume it,
