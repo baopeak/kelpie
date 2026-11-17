@@ -154,6 +154,12 @@ impl Status {
         self.level == Level::L3 && self.reasons.iter().any(|r| r == "memory")
     }
 
+    /// L3 for memory and nothing else (`reasons == ["memory"]`): no lag, CPU, heat or battery saver asks for any level. A new screen may
+    /// still start then, low, when enough memory is free for it (`screen::admit`): on a large computer under 8 % free can be gigabytes.
+    pub fn l3_only_memory(&self) -> bool {
+        self.level == Level::L3 && self.reasons == ["memory"]
+    }
+
     pub fn json(&self) -> Value {
         json!({"level": self.level.number(), "reason": self.reasons, "since": self.since})
     }
@@ -669,6 +675,13 @@ mod tests {
         assert!(!status(Level::L3, &["cpu"]).short_of_memory(), "CPU");
         assert!(!status(Level::L2, &["memory"]).short_of_memory(), "memory under 15 % is L2: nothing is dropped yet");
         assert!(!Status::default().short_of_memory());
+        assert!(status(Level::L3, &["memory"]).l3_only_memory());
+        assert!(!status(Level::L3, &["cpu", "memory"]).l3_only_memory(), "the CPU asks too");
+        assert!(!status(Level::L3, &["lag", "memory"]).l3_only_memory(), "lag");
+        assert!(!status(Level::L3, &["lag"]).l3_only_memory(), "lag");
+        assert!(!status(Level::L3, &["thermal"]).l3_only_memory(), "heat");
+        assert!(!status(Level::L3, &["forced"]).l3_only_memory(), "a pinned level without a reason the load gives");
+        assert!(!status(Level::L2, &["memory"]).l3_only_memory(), "L2 starts low anyway");
         // The sample that asks for it: free memory under 8 % or the low-memory event, and nothing else.
         let mut m = Machine::default();
         let low = sample(5.0, 10.0, 6.0);
