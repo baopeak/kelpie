@@ -26,7 +26,7 @@ import { osc52Text } from "./osc52";
 import { deviceQueryGate } from "./device-query-gate";
 import type { Settings } from "./types";
 import type { FileRef } from "../chat/chat-links";
-import { fileLinkProvider } from "./terminal-file-links";
+import { fileLinkProvider, linkOpenHint } from "./terminal-file-links";
 import { fitChunk } from "./stream-continuity";
 
 /** A session's own appearance over the app's (its host's overrides, a theme picked for its pane); set by lib/ssh-hosts.ts. */
@@ -94,6 +94,14 @@ export class TermView {
   /** The address or the file whose link the pointer is over (for the right-click menu), or null. */
   hoveredUrl: string | null = null;
   hoveredFile: FileRef | null = null;
+
+  /** Keeps the link under the pointer and, while there is one, tells how to open it (links open only on Ctrl/Cmd+click). */
+  private hoverLink(next: { url?: string | null; file?: FileRef | null }) {
+    if (next.url !== undefined) this.hoveredUrl = next.url;
+    if (next.file !== undefined) this.hoveredFile = next.file;
+    if (this.hoveredUrl || this.hoveredFile) this.el.title = linkOpenHint();
+    else this.el.removeAttribute("title");
+  }
   /** Lines where the user pressed Enter (prompts sent to a shell or an agent), oldest first. */
   private marks: IMarker[] = [];
   /** Scrolled away from the bottom, and how many lines arrived since (for "jump to bottom"). */
@@ -129,8 +137,8 @@ export class TermView {
       // instead of xterm's default, a browser confirm() on any click. xterm keeps them to http(s).
       linkHandler: {
         activate: (e, uri) => void (modified(e) && openLink(uri)),
-        hover: (_e, uri) => (this.hoveredUrl = uri),
-        leave: () => (this.hoveredUrl = null),
+        hover: (_e, uri) => this.hoverLink({ url: uri }),
+        leave: () => this.hoverLink({ url: null }),
       },
     });
     this.term.loadAddon(this.fit);
@@ -138,12 +146,12 @@ export class TermView {
     this.term.loadAddon(new Unicode11Addon());
     this.term.unicode.activeVersion = "11";
     this.term.loadAddon(new WebLinksAddon((e, uri) => modified(e) && openLink(uri), {
-      hover: (_e, uri) => (this.hoveredUrl = uri),
-      leave: () => (this.hoveredUrl = null),
+      hover: (_e, uri) => this.hoverLink({ url: uri }),
+      leave: () => this.hoverLink({ url: null }),
     }));
     this.term.registerLinkProvider(fileLinkProvider(this.term, {
       activate: (e, ref) => modified(e) && openFileLink(this.sessionId, ref),
-      hover: (ref) => (this.hoveredFile = ref),
+      hover: (ref) => this.hoverLink({ file: ref }),
     }));
     this.term.onData((d) => this.input(d));
     this.term.onBinary((d) => this.input(d, true));

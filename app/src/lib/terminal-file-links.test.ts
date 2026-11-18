@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { type Cell, fileLinksAt, rowsText } from "./terminal-file-links";
+import { type Cell, fileLinksAt, linkOpenHint, rowsText } from "./terminal-file-links";
+
+describe("linkOpenHint", () => {
+  it("names the key that opens a link on each platform", () => {
+    expect(linkOpenHint(false)).toBe("Ctrl+click to open");
+    expect(linkOpenHint(true)).toBe("⌘+click to open");
+  });
+});
 
 const row = (text: string, cols = text.length): Cell[] => [...text.padEnd(cols)].map((chars) => ({ chars, width: 1 }));
 

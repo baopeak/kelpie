@@ -2,6 +2,13 @@
 // next rows is still one link. What a link does is the caller's (the terminal opens it only on Ctrl/Cmd+click).
 import type { IBufferLine, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 import { findFileRefs, type FileRef } from "../chat/chat-links";
+import { t } from "./i18n";
+import { isMac } from "./platform";
+
+/** What the pointer shows over a terminal link: links open only with the modifier held, which nothing else tells a person. */
+export function linkOpenHint(mac = isMac): string {
+  return mac ? t("⌘+click to open") : t("Ctrl+click to open");
+}
 
 export interface Cell { chars: string; width: number }
 

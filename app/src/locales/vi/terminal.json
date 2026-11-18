@@ -6,5 +6,7 @@
   "Back to bottom": "Về cuối",
   "Terminal: Previous Prompt": "Terminal: Prompt trước",
   "Terminal: Next Prompt": "Terminal: Prompt sau",
-  "Terminal: Scroll to Bottom": "Terminal: Cuộn xuống cuối"
+  "Terminal: Scroll to Bottom": "Terminal: Cuộn xuống cuối",
+  "Ctrl+click to open": "Ctrl+nhấp để mở",
+  "⌘+click to open": "⌘+nhấp để mở"
 }
