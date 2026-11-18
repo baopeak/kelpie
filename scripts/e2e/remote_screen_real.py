@@ -23,8 +23,15 @@ What is this run's own, and how it is cleaned up:
 - the shared window: remote_screen_target.py, topmost at (60, 60); only it is picked on the phone. The phone's input moves this computer's real
   pointer and keys while a check runs: do not use the computer meanwhile.
 
-Checks run in order (`--only` keeps some): pair, live, path, sharp, click, move, targets, gestures, typing, zoom, mode, rotate, background,
-freeze, network, restart. Each prints PASS or FAIL; numbers go to `--json`.
+The page: by default the phone app the production relay serves (what a phone gets today). `--bundle app/dist-phone-hosted` serves this
+checkout's hosted build (`cd app && pnpm build:phone:hosted`) at the production origin instead, through Playwright's routing (service workers
+off), while the relay's WebSocket stays the real one: a change to the phone app is checked over the real relay before it is deployed.
+`--via auto|p2p|relay_turn|relay` picks the way in the picker.
+
+After pairing and starting the screen, the steps run in order (`--only` keeps some): nudge, ramp, path, still, click, move, targets, gestures,
+typing, zoom, mode, rotate, background, freeze, network, restart. Each prints PASS or FAIL; numbers go to `--json`. The shared window notes
+mouse and key input that was not injected (someone at this computer) and its being minimized: a step during which that happened is reported
+as TAINTED, and its result is not the phone's alone.
 """
 import argparse
 import ctypes
@@ -219,8 +226,28 @@ PROBE_JS = r"""
 """
 
 
+TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
+         ".webmanifest": "application/manifest+json", ".woff2": "font/woff2", ".ico": "image/x-icon", ".txt": "text/plain"}
+
+
+def serve_bundle(route, folder):
+    """A GET of the hosted app's files at the production origin, answered from this checkout's hosted build (`pnpm build:phone:hosted`)."""
+    from urllib.parse import urlparse
+
+    path = urlparse(route.request.url).path
+    if path.startswith("/v1/") or route.request.method != "GET":
+        return route.continue_()
+    rel = path.lstrip("/") or "index.html"
+    file = os.path.normpath(os.path.join(folder, rel))
+    if not file.startswith(os.path.normpath(folder)) or not os.path.isfile(file):
+        file = os.path.join(folder, "index.html")
+    with open(file, "rb") as f:
+        body = f.read()
+    route.fulfill(status=200, body=body, headers={"content-type": TYPES.get(os.path.splitext(file)[1], "application/octet-stream"), "cache-control": "no-store"})
+
+
 class Phone:
-    def __init__(self, rig, headed=False, video=False):
+    def __init__(self, rig, headed=False, video=False, bundle=None):
         from playwright.sync_api import sync_playwright
 
         self.rig = rig
@@ -228,10 +255,15 @@ class Phone:
         self.profile = tempfile.mkdtemp(prefix="kelpie-remote-real-chrome-", dir=rig.work)
         opts = dict(channel="chrome", headless=not headed, viewport={"width": 390, "height": 844}, device_scale_factor=3, is_mobile=True, has_touch=True,
                     user_agent=IPHONE_UA, locale="en-US", args=["--disable-features=CalculateNativeWinOcclusion", "--disable-backgrounding-occluded-windows"])
+        if bundle:
+            # The page is this checkout's hosted build, served at the production origin (the relay's WebSocket is not routed: it is the real one).
+            opts["service_workers"] = "block"
         if video:
             opts["record_video_dir"] = os.path.join(rig.work, "video")
             opts["record_video_size"] = {"width": 390, "height": 844}
         self.ctx = self.pw.chromium.launch_persistent_context(self.profile, **opts)
+        if bundle:
+            self.ctx.route(ORIGIN + "/**", lambda route: serve_bundle(route, bundle))
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
         self.cdp = self.ctx.new_cdp_session(self.page)
         self.authenticator = None
@@ -369,12 +401,18 @@ def step_pair(rig, phone):
     phone.passkeys()
     check("the hosted app stops at its lock, a passkey to set up", phone.wait("document.querySelector('[data-lock-screen]')?.dataset.lockScreen === 'enrol'", 30) is True, phone.state())
     phone.js("document.querySelector('[data-lock-go]').click()")
-    check("the passkey is set up and the app opens", bool(phone.wait("!document.querySelector('[data-lock-screen]') && !!document.querySelector('[data-see-screen]')", 40)), phone.state())
     # The person allows the screen through the relay (Settings → Mobile, verified) and control for this phone.
+    until(lambda: any(x["name"] == PHONE_NAME and x.get("passkey") for x in d.call("mobile.status")["devices"]), 40)
     d.call("mobile.set_screen", {"remote": True})
     dev = [x for x in d.call("mobile.status")["devices"] if x["name"] == PHONE_NAME][0]
     d.call("mobile.set_permission", {"id": dev["id"], "permission": "control"})
     rig.device = dev["id"]
+    t_lock = time.time()
+    opened = phone.wait("!document.querySelector('[data-lock-screen]') && !!document.querySelector('[data-see-screen]:not([disabled])')", 90)
+    metric("lock_to_app_s", round(time.time() - t_lock, 1))
+    if not check("the passkey is set up and the app opens", bool(opened), phone.state()):
+        phone.shot("after-passkey")
+        print(phone.js("document.querySelector('main')?.innerText?.slice(0, 600)"))
     metric("pair_s", round(time.time() - t0, 1))
 
 
@@ -385,6 +423,16 @@ def step_live(rig, phone, hwnd=None):
     phone.js("document.querySelector('[data-see-screen]').click()")
     rows = phone.wait("(() => { const r = [...document.querySelectorAll('[data-target]')]; return r.length ? r.map(e => ({id: e.dataset.target, text: e.innerText})) : null; })()", 30)
     metric("picker_rows", [r["text"].replace("\n", " | ") for r in rows or []])
+    metric("connect_through", phone.js("[...document.querySelectorAll('[data-via]')].map(r => ({via: r.dataset.via, ok: r.dataset.ok, text: r.innerText.split(String.fromCharCode(10)).join(' | '), checked: r.querySelector('input')?.checked}))"))
+    metric("webrtc_in_page", phone.js("typeof RTCPeerConnection"))
+    u = ctypes.windll.user32
+    metric("target_minimized_before_pick", bool(u.IsIconic(rig.hwnd())))
+    if u.IsIconic(rig.hwnd()):
+        u.ShowWindow(rig.hwnd(), 9)  # SW_RESTORE: the shared window shown, as the person would before sharing it
+        time.sleep(0.5)
+    if VIA[0] != "auto":
+        phone.js("(v) => document.querySelector(`[data-via=\"${v}\"] input`)?.click()", VIA[0])
+        time.sleep(0.3)
     want = f"w:{hwnd or rig.hwnd()}:"
     row = next((r for r in rows or [] if r["id"].startswith(want)), None)
     if not check("the picker lists the shared window", row is not None, rows):
@@ -395,6 +443,9 @@ def step_live(rig, phone, hwnd=None):
     first = until(lambda: (phone.times() or {}).get("presentInterval") is not None or (phone.times() or {}).get("decodeMs"), 30, 0.05)
     t1 = time.time()
     if not check("Face ID passes and the picture comes", bool(live and first), phone.state()):
+        phone.shot("no-picture")
+        print(phone.js("document.querySelector('main')?.innerText?.slice(0, 600)"))
+        print(chr(10).join(phone.console[-20:]))
         return False
     metric("first_picture_s", round(t1 - t0, 2))
     # The help sheet shows once: closed as a person does.
@@ -403,8 +454,15 @@ def step_live(rig, phone, hwnd=None):
     return True
 
 
-def step_path(rig, phone, wait_s=12):
-    time.sleep(wait_s)
+def step_path(rig, phone, wait_s=30):
+    seen, t0 = [], time.time()
+    while time.time() - t0 < wait_s:
+        d = phone.js("document.querySelector('[data-screen-details]')?.textContent")
+        if d and (not seen or seen[-1][1].split(' · ')[0] != d.split(' · ')[0]):
+            seen.append((round(time.time() - t0, 1), d))
+        time.sleep(0.5)
+    metric("path_changes", seen)
+    metric("load", {k: v for k, v in rig.d.call("mobile.load").items() if k in ("level", "reasons", "reading", "since")})
     st = phone.state()
     metric("details_after_%ds" % wait_s, st["details"])
     metric("quality", st["quality"])
@@ -500,9 +558,12 @@ def step_click_latency(rig, phone, n=10):
     x, y = screen_to_css(phone, rig, sx, sy)
     phone.js(PROBE_JS, [{"name": "patch", "x": x, "y": y}])
     since = time.time() * 1000
-    for _ in range(n):
+    metric("click_debug", {"want_screen": [sx, sy], "css": [round(x, 1), round(y, 1)], "box": phone.box(), "bounds": rig.bounds(), "mode": phone.js("document.querySelector('[data-screen-mode]')?.textContent")})
+    for i in range(n):
         phone.tap(x, y)
         time.sleep(0.9)
+        if i == 0:
+            metric("click_debug_cursor_after_tap", physical_cursor())
     lat = latency_from_probe(phone, "patch", 0)
     got = len(rig.events("patch", since))
     phone.js("window.__probe.stop()")
@@ -824,7 +885,62 @@ def step_restart(rig, phone):
     metric("restart_total_s", round(time.time() - since, 1))
 
 
-STEPS = {"path": step_path, "still": lambda r, p: step_stats(p, "still"), "click": step_click_latency, "move": step_move_latency, "targets": step_targets,
+def step_ramp(rig, phone, secs=60):
+    """A moving picture (the square crossing the board) for a minute: the frame rate, size and rate as the stream settles, every 5 s."""
+    open(rig.events_path + ".anim", "w").close()
+    rows = []
+    try:
+        t0 = time.time()
+        last_n = (phone.times() or {}).get("presentInterval", {}).get("n", 0)
+        while time.time() - t0 < secs:
+            time.sleep(5)
+            tm = phone.times() or {}
+            n = tm.get("presentInterval", {}).get("n", 0)
+            rows.append({"t": round(time.time() - t0), "fps_seen": round((n - last_n) / 5, 1) if n >= last_n else None, "details": phone.state()["details"], "quality": phone.state()["quality"]})
+            last_n = n
+            print(f"    {rows[-1]}", flush=True)
+        phone.shot("ramp-end")
+        metric("ramp_times", phone.times())
+    finally:
+        os.remove(rig.events_path + ".anim")
+    metric("ramp", rows)
+
+
+VIA = ["auto"]
+def step_nudge(rig, phone, n=6):
+    """Trackpad at full view: slow small slides (6 CSS px over 350 ms, under the tap's 10 px) move the cursor and click nothing; a quick tap is
+    still one click at once, and two quick taps a double click."""
+    set_mode(phone, "trackpad")
+    fit(phone)
+    put_cursor(rig, phone, *in_window(rig, 400, 400 + 120), tol=15)
+    b = phone.box()
+    c = (b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
+    since = time.time() * 1000
+    moves = []
+    for i in range(n):
+        before = physical_cursor()
+        d = 6 if i % 2 == 0 else -6
+        phone.slide(c[0], c[1], c[0] + d, c[1], ms=350, steps=10)
+        time.sleep(0.5)
+        after = physical_cursor()
+        moves.append(after[0] - before[0])
+    clicks = rig.events("click_any", since)
+    metric("nudge_cursor_dx_px", moves)
+    check(f"{n} slow small slides click nothing", not clicks, [(round(e["t"] - since), e["x"], e["y"]) for e in clicks])
+    check("...and each moves the computer's cursor its way", all((m > 0) == (i % 2 == 0) and m != 0 for i, m in enumerate(moves)), moves)
+    since = time.time() * 1000
+    phone.tap(*c, hold=0.06)
+    time.sleep(0.8)
+    check("a quick tap is still one click", len(rig.events("click_any", since)) == 1, len(rig.events("click_any", since)))
+    since = time.time() * 1000
+    phone.tap(*c, hold=0.05)
+    time.sleep(0.12)
+    phone.tap(*c, hold=0.05)
+    time.sleep(0.8)
+    check("two quick taps are a double click", len(rig.events("double_any", since)) == 1, rig.events(None, since))
+
+
+STEPS = {"nudge": step_nudge, "ramp": step_ramp, "path": step_path, "still": lambda r, p: step_stats(p, "still"), "click": step_click_latency, "move": step_move_latency, "targets": step_targets,
          "gestures": step_gestures, "typing": step_typing, "zoom": step_zoom, "mode": step_mode, "rotate": step_rotate, "background": step_background,
          "freeze": step_freeze, "network": step_network, "restart": step_restart}
 
@@ -837,26 +953,36 @@ def main():
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--video", action="store_true")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--bundle", default=None, help="this checkout's hosted build (app/dist-phone-hosted) served at the production origin")
+    ap.add_argument("--via", default="auto", help="the way chosen in the picker: auto, p2p, relay_turn, relay")
     ap.add_argument("--hold", type=float, default=0, help="seconds to keep everything up at the end (exploring)")
     args = ap.parse_args()
     if os.name != "nt":
         raise SystemExit(__doc__)
+    VIA[0] = args.via
     rig = Rig(args.scratch, args.app)
     phone = None
     try:
         rig.start()
-        phone = Phone(rig, headed=args.headed, video=args.video)
+        phone = Phone(rig, headed=args.headed, video=args.video, bundle=args.bundle and os.path.abspath(args.bundle))
         step_pair(rig, phone)
         if step_live(rig, phone):
             phone.shot("live")
             for name in [s for s in (args.only.split(",") if args.only else STEPS) if s]:
                 print(f"--- {name}", flush=True)
+                if ctypes.windll.user32.IsIconic(rig.hwnd()):
+                    ctypes.windll.user32.ShowWindow(rig.hwnd(), 9)
+                    time.sleep(0.5)
+                step_since = time.time() * 1000
                 try:
                     STEPS[name](rig, phone)
                 except Exception:  # noqa: BLE001 - one step's failure is reported, the next still runs
                     traceback.print_exc()
                     check(f"{name} ran to its end", False)
                     phone.shot(f"error-{name}")
+                other = [e["k"] + ":" + e.get("what", "") for e in rig.events(None, step_since) if e["k"] in ("human_input", "unmapped")]
+                if other:
+                    metric(f"{name}_TAINTED_by_someone_at_the_computer", other[:12])
                 if phone.state()["phase"] != "live":
                     back_to_picture(rig, phone, f"after_{name}")
         if args.hold:

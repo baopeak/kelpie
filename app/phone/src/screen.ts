@@ -29,6 +29,10 @@ export const FLUSH_MS = 33;
 export const LONG_PRESS_MS = 450;
 /** A touch that moves less than this (screen pixels) is a tap. */
 export const TAP_SLOP = 10;
+/** Trackpad: a finger down this long (ms) that moves this far (screen pixels), short of the slop, is a slow nudge of the cursor, not a tap:
+ *  a quick tap stays a click however the finger rolls as it lifts, and a small, deliberate correction moves the cursor. */
+export const NUDGE_MS = 200;
+export const NUDGE_PX = 4;
 /** Trackpad mode: the cursor moves this many times as far on the picture as the finger moves on the glass, at an ordinary speed. */
 export const TRACKPAD_GAIN = 1.2;
 /** Pointer acceleration: the gain's factor for the finger's speed (screen pixels a millisecond), straight between these points and flat past
@@ -738,7 +742,10 @@ export class Gestures {
     was.y = t.y;
     const s = scaleOf(f.el, f.srcW, f.srcH, f.view) || 1;
     if (this.state === "press") {
-      if (Math.hypot(t.x - was.x0, t.y - was.y0) <= TAP_SLOP) return NONE;
+      const far = Math.hypot(t.x - was.x0, t.y - was.y0);
+      const held = time - was.t0;
+      const nudge = this.mode === "trackpad" && far >= NUDGE_PX && held >= NUDGE_MS && held < LONG_PRESS_MS;
+      if (far <= TAP_SLOP && !nudge) return NONE;
       // Held, then moved: a drag from where it was held; but never from a trackpad cursor out of sight (then it is a plain slide).
       if (time - was.t0 >= LONG_PRESS_MS && !this.bringIn(f)) {
         this.state = "drag";
@@ -893,6 +900,11 @@ export class Gestures {
       // A tap or a long press with the trackpad's cursor out of sight brings it back first, and clicks nothing: the next tap clicks there.
       const hidden = this.bringIn(f);
       if (hidden) return this.broughtIn(hidden);
+      // Trackpad: a slow small slide (its last move came before `NUDGE_MS`) lifts as a nudge of the cursor, never as a click.
+      const held = time - was.t0;
+      if (this.mode === "trackpad" && held >= NUDGE_MS && held < LONG_PRESS_MS && Math.hypot(t.x - was.x0, t.y - was.y0) >= NUDGE_PX) {
+        return this.follow(f, t, t.x - was.x0, t.y - was.y0, scaleOf(f.el, f.srcW, f.srcH, f.view) || 1);
+      }
       const b: Button = time - was.t0 >= LONG_PRESS_MS ? "right" : "left";
       // A second left tap soon after one (near it, in direct mode; anywhere on the glass in trackpad mode, which clicks at the cursor): a
       // double click, at exactly the first one's point, so that the computer counts the two as one (Windows wants them within a few pixels

@@ -168,8 +168,76 @@ for w in (board, text, patch):
     w.bind("<Button-3>", context)
 board.bind("<Double-Button-1>", lambda e: note("double", where="board", x=e.x_root, y=e.y_root))
 board.bind("<MouseWheel>", lambda e: note("wheel", delta=e.delta))
+root.bind_all("<Button-1>", lambda e: note("click_any", x=e.x_root, y=e.y_root), add="+")
+root.bind_all("<Double-Button-1>", lambda e: note("double_any", x=e.x_root, y=e.y_root), add="+")
 root.bind_all("<Control-v>", lambda e: note("ctrl_v"), add="+")
 root.bind_all("<Control-c>", lambda e: note("ctrl_c"), add="+")
+
+
+# Motion on demand: while `<events-file>.anim` exists, a square crosses the board's lower strip at 30 frames a second (the frame rate a moving
+# picture gets is measured on it).
+import os  # noqa: E402
+
+runner = board.create_rectangle(0, 250, 30, 280, fill="#3366cc", outline="", state="hidden")
+pos = [0]
+
+
+def animate():
+    if os.path.exists(EVENTS + ".anim"):
+        pos[0] = (pos[0] + 12) % 940
+        board.coords(runner, pos[0], 250, pos[0] + 30, 280)
+        board.itemconfigure(runner, state="normal")
+    root.after(33, animate)
+
+
+root.after(33, animate)
+
+
+# Someone else at this computer: the window minimized or restored, and mouse or keyboard input that was not injected (the remote screen's
+# input is injected; a person's own is not). A measurement made meanwhile is not the phone's alone: the script marks it.
+root.bind("<Unmap>", lambda e: e.widget is root and note("unmapped"))
+root.bind("<Map>", lambda e: e.widget is root and note("mapped"))
+import ctypes.wintypes as wt  # noqa: E402
+
+HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, wt.WPARAM, wt.LPARAM)
+user32 = ctypes.windll.user32
+user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wt.WPARAM, wt.LPARAM]
+user32.CallNextHookEx.restype = ctypes.c_ssize_t
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, ctypes.c_void_p, wt.DWORD]
+user32.SetWindowsHookExW.restype = ctypes.c_void_p
+last_human = [0.0]
+
+
+class LL(ctypes.Structure):
+    _fields_ = [("a", wt.DWORD), ("b", wt.DWORD), ("flags", wt.DWORD), ("time", wt.DWORD), ("extra", ctypes.c_size_t)]
+
+
+class MSLL(ctypes.Structure):
+    _fields_ = [("x", wt.LONG), ("y", wt.LONG), ("data", wt.DWORD), ("flags", wt.DWORD), ("time", wt.DWORD), ("extra", ctypes.c_size_t)]
+
+
+def human(kind, injected):
+    now = time.time()
+    if not injected and now - last_human[0] > 0.5:
+        last_human[0] = now
+        note("human_input", what=kind)
+
+
+@HOOKPROC
+def mouse_hook(code, wparam, lparam):
+    if code >= 0:
+        human("mouse", ctypes.cast(lparam, ctypes.POINTER(MSLL)).contents.flags & 0x1)  # LLMHF_INJECTED
+    return user32.CallNextHookEx(None, code, wparam, lparam)
+
+
+@HOOKPROC
+def key_hook(code, wparam, lparam):
+    if code >= 0:
+        human("key", ctypes.cast(lparam, ctypes.POINTER(LL)).contents.flags & 0x10)  # LLKHF_INJECTED
+    return user32.CallNextHookEx(None, code, wparam, lparam)
+
+
+hooks = [user32.SetWindowsHookExW(14, mouse_hook, None, 0), user32.SetWindowsHookExW(13, key_hook, None, 0)]  # WH_MOUSE_LL, WH_KEYBOARD_LL
 
 
 def where():
