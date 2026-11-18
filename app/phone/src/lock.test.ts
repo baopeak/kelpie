@@ -235,6 +235,30 @@ describe("the grace after leaving", () => {
     expect(lock.face).toBe("unlock");
   });
 
+  it("a sleep found only on waking counts from when it began: past the grace it locks, within it nothing is asked", () => {
+    const { lock, lockNow, state } = open();
+    // The phone slept with no hiding (an iPhone locking): found a whole grace later, with the time it went to sleep.
+    const asleep = state.now;
+    state.now += GRACE + 1;
+    lock.left(asleep);
+    lock.back();
+    expect(lockNow).toHaveBeenCalledTimes(1);
+    expect(lock.face).toBe("unknown");
+    const short = open();
+    const at = short.state.now;
+    short.state.now += 10_000;
+    short.lock.left(at);
+    short.lock.back();
+    expect(short.lockNow).not.toHaveBeenCalled();
+    expect(short.lock.clear()).toBe(true);
+    // A time ahead of the clock is not believed.
+    const ahead = open();
+    ahead.lock.left(ahead.state.now + GRACE * 2);
+    ahead.state.now += 1;
+    ahead.lock.back();
+    expect(ahead.lockNow).not.toHaveBeenCalled();
+  });
+
   it("is never longer than the computer's idle time", () => {
     const r = rig();
     r.state.grace = GRACE;

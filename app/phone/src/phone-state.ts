@@ -23,6 +23,7 @@ import { forgetHistory } from "./history";
 import { discardKept, forgetGoneChats, goneChats, loadKept, saveKept, type GoneChat } from "./kept-messages";
 import { browserReloadEnv, ShellReload, SHELL_CHANGED } from "./shell-reload";
 import { labelOf } from "./inbox-order";
+import { PageSleep } from "./page-sleep";
 import { hadOldToken, store, wipeTypedText } from "./storage";
 import { lockGrace, rememberedVia, rememberVia, vibrate } from "./prefs";
 import { computerBlock, isLocalHost, isTailscaleHost, livePath, pageMethod, screenOffered, screenWhy } from "./conn-path";
@@ -898,6 +899,48 @@ function readHash() {
   return { code, want };
 }
 
+/** Notices a page the system suspended without hiding it first (`page-sleep.ts`). */
+const sleep = new PageSleep();
+
+/** The person left the app (the page hidden). `since`: when, for a sleep found only on waking. */
+function wentAway(since?: number) {
+  // First: the system may take its picture of the app for the switcher at any moment from here.
+  lock.left(since);
+  // Leaving the app ends a screen or a takeover at once, whatever the lock's grace (owner rule 2026-11-06). With no grace the lock
+  // does it (the computer stops them on `lock_now`, and the screen says it ended when the phone locked).
+  if (lockGrace.get() > 0) {
+    remoteScreens.close();
+    takeovers.close();
+  }
+  link.setHidden(true);
+  // Nothing goes out from a hidden page, not even a late acknowledgement.
+  for (const s of syncs.values()) s.dispose();
+}
+
+/** The person is back (the page shown again). */
+function cameBack() {
+  lock.back();
+  // A session asked for while out of sight (a tap on an alert) opens on the way back: within the grace no new hello comes to open it.
+  if (wantSession && connected() && lock.clear()) {
+    const want = wantSession;
+    const waited = wantFromAlert;
+    wantSession = null;
+    wantFromAlert = false;
+    openWanted(want, waited);
+  }
+  link.setHidden(false);
+  recompute();
+  shellReload.visible();
+}
+
+/** The page slept without being hidden (an iPhone locking, a frozen tab) and runs again: it left and came back, so a screen or a
+ *  takeover open before ends (the next one asks for Face ID again), and the lock decides as it does on any return. */
+function slept(since?: number) {
+  sleep.reset();
+  wentAway(since);
+  cameBack();
+}
+
 export function startApp() {
   store.del("kelpie-history"); // an earlier build kept sent text here
   void alerts.recheck(null); // Says at once if this page cannot have them; the look itself waits for the computer's hello.
@@ -910,6 +953,9 @@ export function startApp() {
   }
   const tick = () => {
     if (document.hidden) return;
+    // A page the system suspended with no hiding (an iPhone locking): leaving and coming back, as though it had been hidden meanwhile.
+    const asleepSince = sleep.tick(Date.now());
+    if (asleepSince !== null) slept(asleepSince);
     recompute();
     lock.tick();
     for (const s of senders.values()) s.prune();
@@ -929,28 +975,13 @@ export function startApp() {
   // What counts as the person being there, for the computer's idle time.
   for (const type of ["pointerdown", "keydown"]) document.addEventListener(type, () => lock.touched(), { passive: true, capture: true });
   document.addEventListener("visibilitychange", () => {
-    // First: the system may take its picture of the app for the switcher at any moment from here.
-    if (document.hidden) lock.left();
-    else lock.back();
-    // Leaving the app ends a screen or a takeover at once, whatever the lock's grace (owner rule 2026-11-06). With no grace the lock
-    // does it (the computer stops them on `lock_now`, and the screen says it ended when the phone locked).
-    if (document.hidden && lockGrace.get() > 0) {
-      remoteScreens.close();
-      takeovers.close();
-    }
-    // A session asked for while out of sight (a tap on an alert) opens on the way back: within the grace no new hello comes to open it.
-    if (!document.hidden && wantSession && connected() && lock.clear()) {
-      const want = wantSession;
-      const waited = wantFromAlert;
-      wantSession = null;
-      wantFromAlert = false;
-      openWanted(want, waited);
-    }
-    link.setHidden(document.hidden);
-    // Nothing goes out from a hidden page, not even a late acknowledgement.
-    if (document.hidden) for (const s of syncs.values()) s.dispose();
-    if (!document.hidden) recompute();
-    if (!document.hidden) shellReload.visible();
+    sleep.reset();
+    if (document.hidden) wentAway();
+    else cameBack();
+  });
+  // Chrome says when it froze a page and lets it run again; Safari does not (the tick's late clock finds it).
+  document.addEventListener("resume", () => {
+    if (!document.hidden) slept();
   });
   window.addEventListener("hashchange", () => {
     const waited = readAlertLink(location.hash).waited;

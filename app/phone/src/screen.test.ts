@@ -51,6 +51,8 @@ import {
   DOUBLE_TAP_MS,
   DOUBLE_TAP_PX,
   cursorIntoView,
+  decoderWedged,
+  DECODER_WEDGED_MS,
   EDGE_PAN_DELAY_MS,
   EDGE_PAN_PX,
   EDGE_PAN_SPEED,
@@ -1201,6 +1203,17 @@ describe("a trackpad tap after the finger moved the cursor", () => {
     // With a finger down the gesture's own point is not touched.
     ({ tapAt } = followHostCursor(drawn, { x: 7, y: 8 }, { shape: 0, visible: true, x: 600, y: 600 }, 5000, null, false));
     expect(tapAt).toEqual({ x: 7, y: 8 });
+  });
+});
+
+describe("a decoder that is wedged", () => {
+  it("took a keyframe a while ago and has shown nothing since: made again; a working or new one is left alone", () => {
+    expect(decoderWedged(null, null, 99_999), "no keyframe given yet").toBe(false);
+    expect(decoderWedged(1_000, null, 1_000 + DECODER_WEDGED_MS - 1), "a moment to decode it").toBe(false);
+    expect(decoderWedged(1_000, null, 1_000 + DECODER_WEDGED_MS), "nothing ever came out").toBe(true);
+    expect(decoderWedged(1_000, 1_020, 60_000), "it showed that keyframe: working, however long ago").toBe(false);
+    // An iPhone that slept: pictures came out before, then a keyframe went in and nothing came out of it.
+    expect(decoderWedged(5_000, 4_990, 5_000 + DECODER_WEDGED_MS)).toBe(true);
   });
 });
 

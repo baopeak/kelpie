@@ -470,6 +470,16 @@ export function followHostCursor(drawn: CursorPos, tapAt: { x: number; y: number
   const next = reconcileCursor(drawn, host, now, echo);
   return { drawn: next.drawn, echo: next.echo, tapAt: idle ? { x: next.drawn.x, y: next.drawn.y } : tapAt };
 }
+/** A decoder given a keyframe this long ago (ms) that has put out no picture since is wedged: it neither decodes nor fails (an iPhone's
+ *  hardware decoder after the phone slept), so its own error never comes to make it again. It is made again from the next keyframe. */
+export const DECODER_WEDGED_MS = 1500;
+
+/** Whether a decoder is wedged: fed a keyframe at `keyFedAt` (null: none since it was made, or since its last picture), its last picture
+ *  out at `outputAt` (null: none yet), and now `now`. */
+export function decoderWedged(keyFedAt: number | null, outputAt: number | null, now: number): boolean {
+  return keyFedAt !== null && (outputAt === null || outputAt < keyFedAt) && now - keyFedAt >= DECODER_WEDGED_MS;
+}
+
 /** A decoder this many chunks behind its own usual queue is behind. */
 export const BACKLOG_OVER = 2;
 /** Its usual queue: the least seen over this long (some Android decoders always keep two or three). */

@@ -30,6 +30,9 @@ Checks, each PASS or FAIL, then a summary (`--json` writes them too):
 6. text: shown in the field as typed, Hide masks it; text with Vietnamese diacritics arrives whole; Backspace, Enter, Tab, Esc; Ctrl with a
    letter is a shortcut.
 7. Stop ends it, and it starts again; leaving the app (the page hidden) ends it within a second and nothing more lands.
+8. The phone sleeping (an iPhone locking), with CDP's page lifecycle and network: a decoder that wedges (takes chunks, shows nothing, never
+   fails) is made again and the picture comes back; a page frozen with no hiding (offline meanwhile) ends its screen on waking, the app
+   answers, and the next screen asks for Face ID again; hidden, frozen and shown again, the same. Each start after a sleep asks Face ID.
 `--chrome` runs the phone in the installed Google Chrome (Playwright's `chrome` channel, a throwaway profile) instead of Playwright's own
 Chromium: the browser a person has. `--load` pins this script's daemon at a load level (`KELPIE_LOAD_FORCE`, calm by default). At L2 every check above runs on a screen that started
 at its lowest rung. At L3 the start is refused instead: the picker says why and when it tries again, Stop trying stops it, and nothing else runs.
@@ -162,6 +165,25 @@ PROBE = r'''
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+  const Decoder = window.VideoDecoder;
+  if (Decoder) {
+    const made = new Set();
+    const decode = Decoder.prototype.decode;
+    Decoder.prototype.decode = function (chunk) {
+      if (this.__wedged) return;
+      return decode.call(this, chunk);
+    };
+    window.VideoDecoder = class extends Decoder {
+      constructor(init) {
+        super(init);
+        made.add(this);
+      }
+    };
+    window.__wedgeDecoders = () => {
+      for (const d of made) d.__wedged = true;
+      return made.size;
+    };
+  }
 })();
 '''
 
@@ -317,6 +339,12 @@ def start_screen(phone):
     """From the inbox: the picker, then the test window: the picture live. Returns the picker's ways (ids and whether usable)."""
     page = phone.page
     page.click("[data-see-screen]")
+    # After the app was left since the passkey last opened it, seeing the computer asks for Face ID again first (the virtual authenticator).
+    first = page.wait_for_selector(f"[data-target]:has-text('{TITLE}'), [data-lock-screen=unlock]", timeout=30000)
+    phone.asked_face_id = first.get_attribute("data-lock-screen") == "unlock"
+    if phone.asked_face_id:
+        page.click("[data-lock-go]")
+        page.wait_for_selector("[data-lock-screen]", state="detached", timeout=20000)
     row = page.wait_for_selector(f"[data-target]:has-text('{TITLE}')", timeout=30000)
     ways = phone.js("() => [...document.querySelectorAll('[data-via]')].map(r => [r.dataset.via, r.dataset.ok])")
     row.query_selector("button").click()
@@ -576,6 +604,72 @@ def run_phone(d, phone, hwnd):
     check("leaving the app ends the screen within a second", bool(gone) and time.time() - t0 < 1.5, time.time() - t0)
     ended = lambda: json.dumps(d.call("mobile.audit", {"limit": 50})["entries"]).count("screen_stop")  # noqa: E731
     check("…and the computer ended it too (its audit says so)", bool(until(lambda: ended() >= stops + 1, 5)), (stops, ended()))
+    phone_slept(phone)
+
+
+SHOWN = """(hidden) => {
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => hidden ? "hidden" : "visible" });
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+  document.dispatchEvent(new Event("visibilitychange"));
+}"""
+
+
+def frames(phone):
+    return phone.js("() => window.__kelpieScreenTimes?.().presentInterval.n ?? -1")
+
+
+def asleep(phone, secs, hidden):
+    """The phone sleeps `secs`: the page frozen (CDP's lifecycle) with the network gone, hidden first or not, then running and shown."""
+    if hidden:
+        phone.js(SHOWN, True)
+        time.sleep(0.3)
+    phone.cdp.send("Network.enable")
+    phone.cdp.send("Network.emulateNetworkConditions", {"offline": True, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1})
+    phone.cdp.send("Page.setWebLifecycleState", {"state": "frozen"})
+    time.sleep(secs)
+    phone.cdp.send("Page.setWebLifecycleState", {"state": "active"})
+    phone.cdp.send("Network.emulateNetworkConditions", {"offline": False, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1})
+    if hidden:
+        phone.js(SHOWN, False)
+
+
+def phone_slept(phone):
+    page = phone.page
+    # Section 7 left the page hidden: back in sight, then a screen again (asking Face ID: the app was left since the passkey opened it).
+    phone.js(SHOWN, False)
+    page.wait_for_selector("[data-see-screen]", timeout=20000)
+    start_screen(phone)
+    check("after leaving the app, seeing the screen again asks for Face ID first", phone.asked_face_id)
+
+    # A wedged decoder: it takes every chunk and never shows or fails. The picture comes back on a new one.
+    n0 = frames(phone)
+    wedged = phone.js("() => window.__wedgeDecoders?.() ?? 0")
+    time.sleep(1.5)
+    stalled = frames(phone)
+    back = until(lambda: frames(phone) > stalled + 10, 12)
+    check("a wedged decoder is made again: the picture comes back on its own", wedged > 0 and stalled - n0 < 15 and bool(back), (wedged, n0, stalled, frames(phone)))
+
+    # Frozen with no hiding (an iPhone that locks may not say), the network gone meanwhile: on waking the screen ends, the app answers.
+    asleep(phone, 8, hidden=False)
+    gone = until(lambda: page.locator(".screen-live").count() == 0, 8)
+    check("frozen with no hiding: on waking the screen ends (never left running on a dead connection)", bool(gone), page.locator(".screen-live[data-phase]").get_attribute("data-phase") if not gone else "")
+    check("…and the app answers: the inbox is back", bool(until(lambda: phone.has("[data-see-screen]"), 10)))
+    if not gone:
+        # A page that kept its screen (an older build): ended by hand, so that the rest still runs.
+        page.click("[data-screen-stop]")
+        page.click("[data-screen-ended] .btn")
+        page.wait_for_selector("[data-see-screen]", timeout=10000)
+    start_screen(phone)
+    check("…and the next screen asks for Face ID again", phone.asked_face_id)
+    check("…and its picture is live", page.locator(".screen-live[data-phase=live]").count() == 1)
+
+    # Hidden, frozen and shown again (the iPhone that says it is leaving): the same.
+    asleep(phone, 5, hidden=True)
+    check("hidden, frozen and shown again: the screen has ended and the app answers", bool(until(lambda: page.locator(".screen-live").count() == 0 and phone.has("[data-see-screen]"), 10)))
+    start_screen(phone)
+    check("…and the next screen asks for Face ID again, and is live", phone.asked_face_id and page.locator(".screen-live[data-phase=live]").count() == 1)
+    page.click("[data-screen-stop]")
+    check("…and Stop still ends it", bool(page.wait_for_selector("[data-screen-ended]", timeout=5000)))
 
 
 def zoomed_fingers(phone, pic, pad, centre):
