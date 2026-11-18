@@ -7,14 +7,14 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { avcChunk, Backlog, canDecode, clampView, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, keepInView, KEYS, LONG_PRESS_MS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Feel, type Frame, type GestureOut, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { holdPageStill } from "./screen-page-guard";
-import { screenGesturesSeen } from "./prefs";
+import { screenGesturesSeen, screenMouseBar } from "./prefs";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
 import { pathText } from "./conn-path";
 import { needsProof, pathRows, type ViaId } from "./screen-paths";
 import { HOSTED } from "./hosted";
 import { msg, t } from "./i18n";
 
-const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", F5: "F5", ContextMenu: "☰", Meta: "⊞" };
+const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", ContextMenu: "☰", Meta: "⊞", F1: "F1", F2: "F2", F3: "F3", F4: "F4", F5: "F5", F6: "F6", F7: "F7", F8: "F8", F9: "F9", F10: "F10", F11: "F11", F12: "F12" };
 const MOD_LABELS: Record<Mod, string> = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", meta: "Win" };
 
 /** What a finger does in each mode, as the help sheet lists it: the gesture, then what the computer gets. */
@@ -192,6 +192,9 @@ function Live() {
   const [dragging, setDragging] = createSignal(false);
   const [loupe, setLoupe] = createSignal<{ x: number; y: number } | null>(null);
   const [help, setHelp] = createSignal(!screenGesturesSeen.get());
+  // The on-screen mouse (under the picture, never over it), and whether its Hold keeps the left button down.
+  const [mouseBar, setMouseBar] = createSignal(screenMouseBar.get());
+  const [holding, setHolding] = createSignal(false);
   // The text field shows what is typed; hidden (a password) on request.
   const [hideText, setHideText] = createSignal(false);
   // The on-screen keyboard is up: the screen fits in what is left above it (the visual viewport), not under it.
@@ -414,6 +417,7 @@ function Live() {
     if (panFrame) cancelAnimationFrame(panFrame);
     panFrame = 0;
     clearTimeout(holdTimer);
+    letGo();
     onScreenMedia(null);
     decoder?.close();
     latest?.close();
@@ -529,6 +533,34 @@ function Live() {
     showHeld();
   };
 
+  /** An on-screen mouse button at the cursor: a click, a scroll notch, or Hold (the left button down until tapped again; a slide meanwhile drags).
+   *  A cursor out of sight (zoomed away from it) is brought back first, and nothing else is done. */
+  const mouse = (what: "left" | "middle" | "right" | "up" | "down" | "hold") => {
+    if (!live() || !src.w) return;
+    const back = gestures.bringBack(frame());
+    if (back) return out(back);
+    const at = gestures.cursor;
+    if (what === "up" || what === "down") return out({ ops: [{ k: "wheel", x: at.x, y: at.y, dx: 0, dy: what === "down" ? 120 : -120 }] });
+    if (what === "hold") {
+      const on = !holding();
+      setHolding(on);
+      return out({ ops: [{ k: on ? "down" : "up", x: at.x, y: at.y, b: "left" }], feel: on ? "drag" : undefined });
+    }
+    out({ ops: [{ k: "click", x: at.x, y: at.y, b: what }], feel: what === "right" ? "right" : "click" });
+  };
+  /** Hold let go wherever the screen goes (stopped, ended, lost): the computer's button is never left down. */
+  const letGo = () => {
+    if (!holding()) return;
+    setHolding(false);
+    send([{ k: "up", x: gestures.cursor.x, y: gestures.cursor.y, b: "left" }]);
+  };
+  const toggleMouseBar = () => {
+    const on = !mouseBar();
+    if (!on) letGo();
+    setMouseBar(on);
+    screenMouseBar.set(on);
+  };
+
   const key = (k: string) => {
     send([{ k: "key", key: k, mods: mods() }]);
     setMods([]);
@@ -582,6 +614,7 @@ function Live() {
         <span class="takeover-title">{s().title}</span>
         <button class="btn" data-screen-mode onClick={() => setMode(mode() === "trackpad" ? "direct" : "trackpad")}>{mode() === "trackpad" ? t("Trackpad") : t("Direct touch")}</button>
         <button class="btn" data-screen-help aria-label={t("How the fingers work")} aria-expanded={help()} onClick={() => (help() ? closeHelp() : setHelp(true))}>?</button>
+        <button class="btn" classList={{ primary: mouseBar() }} aria-pressed={mouseBar()} data-screen-mouse-toggle onClick={toggleMouseBar}>{t("Mouse")}</button>
         <Show when={view().zoom > 1}><button class="btn" data-screen-fit onClick={resetView}>{t("Fit")}</button></Show>
         <button class="btn danger" data-screen-stop onClick={() => void remoteScreens.stop()}>{t("Stop")}</button>
       </div>
@@ -617,6 +650,17 @@ function Live() {
           <pre class="screen-debug">{JSON.stringify({ ...s().stats, age_ms_p50: s().age, queue: queue(), shown: shownSeq, tiles: overlay.count, encoder: s().encoder, phone: { ...times.snapshot(), desynchronized: lowLatency() } }, null, 1)}</pre>
         </Show>
       </div>
+      <Show when={mouseBar()}>
+        {/* Under the picture, never over it: buttons that act where the cursor is, for a person who would rather press than gesture. */}
+        <div class="screen-mouse" role="toolbar" aria-label={t("Mouse buttons")} data-screen-mouse>
+          <button class="btn" disabled={!live()} onClick={() => mouse("left")} data-mouse="left">{t("Left")}</button>
+          <button class="btn" disabled={!live()} onClick={() => mouse("middle")} data-mouse="middle">{t("Middle")}</button>
+          <button class="btn" disabled={!live()} onClick={() => mouse("right")} data-mouse="right">{t("Right")}</button>
+          <button class="btn" disabled={!live()} aria-label={t("Scroll up")} onClick={() => mouse("up")} data-mouse="up">▲</button>
+          <button class="btn" disabled={!live()} aria-label={t("Scroll down")} onClick={() => mouse("down")} data-mouse="down">▼</button>
+          <button class="btn" classList={{ primary: holding() }} aria-pressed={holding()} disabled={!live()} onClick={() => mouse("hold")} data-mouse="hold">{holding() ? t("Release") : t("Hold")}</button>
+        </div>
+      </Show>
       <p class="muted screen-quality" onClick={() => setDebug(!debug())}>
         {qualityText(s().stats, t)}
         <Show when={s().encoder === "sw"}> · {t("software encoder")}</Show>

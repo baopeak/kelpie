@@ -987,7 +987,61 @@ def step_nudge(rig, phone, n=6):
     check("two quick taps are a double click", len(rig.events("double_any", since)) == 1, rig.events(None, since))
 
 
-STEPS = {"memory": step_memory, "nudge": step_nudge, "ramp": step_ramp, "path": step_path, "still": lambda r, p: step_stats(p, "still"), "click": step_click_latency, "move": step_move_latency, "targets": step_targets,
+def step_mouse(rig, phone):
+    """The on-screen mouse and the full key bar: Left, Middle and Right click at the cursor, the arrows scroll, Hold keeps the button down across
+    slides (a drag-and-drop made of several slides, the finger lifted between them), Release drops; F1 to F12 reach the window."""
+    set_mode(phone, "trackpad")
+    fit(phone)
+    if not phone.js("!!document.querySelector('[data-screen-mouse]')"):
+        phone.js("document.querySelector('[data-screen-mouse-toggle]').click()")
+    check("the Mouse button shows the mouse buttons under the picture", phone.wait("(() => { const m = document.querySelector('[data-screen-mouse]')?.getBoundingClientRect(); const b = document.querySelector('.screen-canvas').getBoundingClientRect(); return !!m && m.top >= b.bottom - 1; })()", 5))
+    press = lambda what: phone.js("(w) => document.querySelector(`[data-mouse=\"${w}\"]`).click()", what)
+    put_cursor(rig, phone, *in_window(rig, 400, 400 + 60), tol=10)
+    for what, kind in (("left", "click_any"), ("middle", "middle_any"), ("right", "right")):
+        since = time.time() * 1000
+        press(what)
+        time.sleep(0.6)
+        if what == "right":
+            phone.js("document.querySelector('.keybar button[aria-label=\"Escape\"]').click()")
+        check(f"{what.capitalize()} clicks at the cursor", len(rig.events(kind, since)) == 1, rig.events(None, since))
+    put_cursor(rig, phone, *in_window(rig, 700, 200), tol=10)
+    since = time.time() * 1000
+    for _ in range(3):
+        press("down")
+        time.sleep(0.25)
+    time.sleep(0.5)
+    tops = [e["top"] for e in rig.events("list_scroll", since)]
+    check("the down arrow scrolls the list down", bool(tops) and tops[-1] > 0, tops)
+    since = time.time() * 1000
+    press("up")
+    time.sleep(0.6)
+    up = [e["top"] for e in rig.events("list_scroll", since)]
+    check("...and the up arrow back up", bool(up) and up[-1] < tops[-1], up)
+    # Drag and drop with Hold: the square onto the target in as many slides as it takes.
+    since = time.time() * 1000
+    put_cursor(rig, phone, *in_window(rig, 10 + 80, 400 + 140), tol=6)
+    press("hold")
+    time.sleep(0.3)
+    put_cursor(rig, phone, *in_window(rig, 10 + 850, 400 + 150), tol=12)
+    press("hold")
+    time.sleep(0.6)
+    drops = rig.events("drop", since)
+    check("Hold, slides, Release: the square is dropped on the target", bool(drops) and drops[-1]["inside"], drops or rig.events(None, since)[-6:])
+    # The function keys, into the text field.
+    put_cursor(rig, phone, *in_window(rig, 300, 367), tol=6)
+    press("left")
+    time.sleep(0.4)
+    since = time.time() * 1000
+    for n in range(1, 13):
+        phone.js("(k) => document.querySelector(`.keybar button[aria-label=\"${k}\"]`).click()", f"F{n}")
+        time.sleep(0.15)
+    time.sleep(0.6)
+    got = [e["key"] for e in rig.events("fkey", since)]
+    check("F1 to F12 from the key bar reach the window", got == [f"F{n}" for n in range(1, 13)], got)
+    phone.shot("mouse-bar")
+
+
+STEPS = {"mouse": step_mouse, "memory": step_memory, "nudge": step_nudge, "ramp": step_ramp, "path": step_path, "still": lambda r, p: step_stats(p, "still"), "click": step_click_latency, "move": step_move_latency, "targets": step_targets,
          "gestures": step_gestures, "typing": step_typing, "zoom": step_zoom, "mode": step_mode, "rotate": step_rotate, "background": step_background,
          "freeze": step_freeze, "network": step_network, "restart": step_restart}
 

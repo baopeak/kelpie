@@ -1589,7 +1589,10 @@ A ring shows where each click went (two for a double click, orange for a right c
 drag* before anything is sent, and *Dragging* stays at the top while the button is held. Android also buzzes for each; Safari on the iPhone cannot. *Fit*
 shows the whole picture again after a zoom. The pointer drawn on the phone follows your finger at once and is never pulled back to where it was a moment ago,
 so a tap right after a move clicks where you see it. The key row has Ctrl, Shift, Alt and Win (tap one,
-then a key, or type one letter with it held for a shortcut such as Ctrl+S or Win+E), Esc, Tab, Enter, the arrows, ⊞ (the Windows key alone, for Start) and a few more.
+then a key, or type one letter with it held for a shortcut such as Ctrl+S or Win+E), Esc, Tab, Enter, the arrows, Home, End, PgUp, PgDn, ⊞ (the Windows key alone, for Start) and F1 to F12 (slide the row
+for the rest). *Mouse* at the top shows a row of mouse buttons under the picture (never over it), remembered for next time: *Left*, *Middle*
+and *Right* click where the pointer is, ▲ and ▼ scroll a notch, and *Hold* keeps the left button down until you tap *Release*, so a drag can
+take several slides with your finger lifted between them.
 The text field shows what you type, in any language your keyboard has (Vietnamese with its marks included); *Hide* masks it while you type a password. Return
 on the phone's keyboard or *Type it* types it on the computer, the keyboard stays up for more, and the phone says *Typed on the computer* or *Not sent*. While the
 keyboard is up the picture fits in the space above it. Under the picture the phone says how it is going (`720p · 15 fps · reduced: computer busy`), and a

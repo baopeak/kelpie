@@ -411,6 +411,9 @@ a.btn { text-decoration: none; }
 .takeover .keybar { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
 .takeover .keybar .btn { padding: 0 var(--s3); flex: none; font-family: var(--mono); font-size: var(--fs-sm); }
 .takeover-text { display: flex; gap: var(--s2); }
+/* The on-screen mouse: one compact row under the picture (it never covers it). */
+.screen-mouse { display: flex; gap: 6px; padding: 6px var(--s3) 0; overflow-x: auto; scrollbar-width: none; }
+.screen-mouse .btn { flex: 1 0 auto; padding: 0 var(--s2); }
 .takeover-text .field { flex: 1; min-width: 0; }
 /* 16 px or more: Safari on the iPhone zooms the page into a smaller field, which would undo the screen's fit above the keyboard. */
 .screen-live .takeover-text .field { font-size: 16px; }
