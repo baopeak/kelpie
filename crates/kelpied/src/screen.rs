@@ -101,8 +101,8 @@ pub enum Admit {
 /// L3 includes memory under 8 % free (`load::Sample::wants`), which on a computer of about 7.5 GB or more is reached before the floor, with
 /// gigabytes still free on a large one: an L3 that memory causes (`Status::short_of_memory`) with nothing else asking for L3 in the last
 /// second (`Sample::asks_l3_without_memory`: lag over 200 ms) and at least the floor measured free starts low as L2 does; reasons that ask for
-/// less (some lag, the CPU, heat, battery saver) do not stop it. The helper is told L3, so the stream keeps L3's cap and its pause after five
-/// minutes, as one that reaches L3 does.
+/// less (some lag, the CPU, heat, battery saver) do not stop it. The helper is told the level without memory (`Load::stream_level`): memory alone
+/// never lowers the picture nor pauses it, so such a start is at full quality.
 pub fn admit(status: &crate::load::Status, measured: Option<&crate::load::Sample>) -> Admit {
     let free_mb = measured.and_then(|m| m.reading.memory_free_mb);
     let short = free_mb.is_some_and(|mb| mb < MIN_FREE_MB);
