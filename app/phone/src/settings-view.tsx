@@ -13,7 +13,7 @@ import { currentPairing } from "./pairing-store";
 import { ALERT_PREFS_API } from "../../src/lib/attention";
 import type { AlertPrefs, QuietHours } from "./link";
 import { ALERT_KINDS, choosesKind, DEFAULT_QUIET, withKind, type AlertKind } from "./push";
-import { alertEvents, alertPrefs, alertsError, alertsState, chooseAlerts, clearKept, computerOnTailscale, connected, daemonApi, device, forgetDevice, link, livePathNow, lockAppNow, lockInfo, lockShown, PAGE_METHOD, rtt, screenWhyNow, setTrustOpen, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
+import { alertEvents, ask, alertPrefs, alertsError, alertsState, chooseAlerts, clearKept, computerOnTailscale, connected, daemonApi, device, forgetDevice, link, livePathNow, lockAppNow, lockInfo, lockShown, PAGE_METHOD, rtt, screenWhyNow, setTrustOpen, testAlert, turnAlertsOff, turnAlertsOn } from "./phone-state";
 import { applyDisplay, confirmCtrlC, defaultKeyBar, INBOX_VIEWS, inboxView, keyBar, LOCK_GRACE_CHOICES, lockGrace, moveKey, order, showStopped, TEXT_SIZES, textSize, toggleKey, vibrate, wrapLines, type InboxView, type LockGrace, type TextSize } from "./prefs";
 import { setTheme, theme, type ThemeSetting } from "./theme";
 
@@ -295,7 +295,7 @@ function ConnectionSection(props: { onClose: () => void }) {
     return p === "control" ? t("may take control") : p === "write" ? t("may type") : t("may read");
   };
   const forget = () => {
-    if (!confirm(t("Forget this pairing on this device?"))) return;
+    if (!ask(t("Forget this pairing on this device?"))) return;
     forgetDevice();
     props.onClose();
   };

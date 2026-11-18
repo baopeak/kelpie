@@ -1610,7 +1610,7 @@ network, and the picture moves back onto it once it is up).
 On the computer an orange border goes around what is shared, with a badge naming the phone and the stop hotkey, and the status bar says *Shared with <phone>*
 with *Stop*. **Ctrl+Alt+Shift+K stops it from anywhere**; it is always on (you can pick another key in Settings → Mobile → Advanced, not turn it off, and Kelpie
 tells you if another program holds it). Stop on the phone ends it too, and so do 10 minutes with nothing done, the phone locking or leaving the app (at once,
-with no grace), removing the phone or lowering what it may do (within a second), and closing the shared window. It needs the Kelpie app open on the computer (the phone says so otherwise), works over Tailscale or your HTTPS
+with no grace, also when the browser slept without saying so: Kelpie notices on waking, and the next screen asks for Face ID), removing the phone or lowering what it may do (within a second), and closing the shared window. It needs the Kelpie app open on the computer (the phone says so otherwise), works over Tailscale or your HTTPS
 address, or through the relay once you allow it (*Seeing the screen without Tailscale* above), and one phone at a time. Before it starts the
 phone asks which way to connect (*Automatic*, *Tailscale*, *Direct (peer to peer)*, the relay and, from a relay with TURN, *Kelpie's relay (TURN)*;
 see *Direct (peer to peer)* above), says which are available now and why not, and remembers your choice. If the computer's processor is busy, it is hot or it responds slowly, a new screen starts at a low quality and sharpens as the computer allows.

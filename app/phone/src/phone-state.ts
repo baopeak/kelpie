@@ -791,7 +791,7 @@ export async function pairDevice(code: string, name: string): Promise<string | n
   const hosted: HostedPairing | undefined = HOSTED
     ? {
         origin: location.origin,
-        confirm: (question) => confirm(question),
+        confirm: (question) => ask(question),
         leave: async () => {
           lock.forget();
           await alerts.forget();
@@ -933,6 +933,16 @@ function cameBack() {
   shellReload.visible();
 }
 
+/** The browser's own yes/no question (`confirm`): it stops the page's timers while it waits, which is not the page sleeping. */
+export function ask(question: string): boolean {
+  const yes = confirm(question);
+  sleep.reset();
+  return yes;
+}
+
+/** When Chrome froze the page (its `freeze` event; Safari has none): the time away counts from then. */
+let frozeAt: number | undefined;
+
 /** The page slept without being hidden (an iPhone locking, a frozen tab) and runs again: it left and came back, so a screen or a
  *  takeover open before ends (the next one asks for Face ID again), and the lock decides as it does on any return. */
 function slept(since?: number) {
@@ -980,8 +990,13 @@ export function startApp() {
     else cameBack();
   });
   // Chrome says when it froze a page and lets it run again; Safari does not (the tick's late clock finds it).
+  document.addEventListener("freeze", () => {
+    frozeAt = Date.now();
+  });
   document.addEventListener("resume", () => {
-    if (!document.hidden) slept();
+    const since = frozeAt;
+    frozeAt = undefined;
+    if (!document.hidden) slept(since);
   });
   window.addEventListener("hashchange", () => {
     const waited = readAlertLink(location.hash).waited;

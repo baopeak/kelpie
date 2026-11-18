@@ -5,7 +5,7 @@
 // browser offers one, and a frame the decoder is too far behind for is skipped. The cursor is a layer of its own over the picture: moving it
 // never draws the picture again, so it follows the finger at the screen's own rate, at once where the finger puts it (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, Backlog, canDecode, clampView, decoderWedged, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, keepInView, KEYS, LONG_PRESS_MS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Feel, type Frame, type GestureOut, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { avcChunk, Backlog, canDecode, clampView, decoderWedged, fedSince, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, keepInView, KEYS, LONG_PRESS_MS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Feel, type Frame, type GestureOut, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { holdPageStill } from "./screen-page-guard";
 import { screenGesturesSeen, screenMouseBar } from "./prefs";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
@@ -205,8 +205,8 @@ function Live() {
   let setup: DecoderSetup | null = null;
   let latest: VideoFrame | null = null;
   let skipToKey = true;
-  // For a wedged decoder (`decoderWedged`): the first keyframe given to it since its last picture, and when its last picture came out.
-  let keyFedAt: number | null = null;
+  // For a wedged decoder (`decoderWedged`): the first frame given to it since its last picture, and when its last picture came out.
+  let fedAt: number | null = null;
   let outputAt: number | null = null;
   let src = { w: 0, h: 0 };
   let cursor = { shape: 0, visible: false, x: 0, y: 0 };
@@ -288,7 +288,7 @@ function Live() {
     latest?.close();
     latest = null;
     setup = next;
-    keyFedAt = outputAt = null;
+    fedAt = outputAt = null;
     decoder = new VideoDecoder({
       output: (f) => {
         const seq = f.timestamp;
@@ -313,23 +313,33 @@ function Live() {
         draw();
         times.presented(seq, out, performance.now());
       },
-      error: () => {
-        // A decoder that failed is made again from the next keyframe. The frames it held are acknowledged, so the computer never waits for them,
-        // and their unpaints still apply.
-        setup = null;
-        skipToKey = true;
-        let last = 0;
-        for (const [seq, p] of pending) {
-          overlay.onFrame({ seq, ...p });
-          last = Math.max(last, seq);
-        }
-        pending.clear();
-        if (last) remoteScreens.skipped(last);
-        else remoteScreens.needKeyframe();
-        redraw();
-      },
+      error: () => remake(),
     });
     decoder.configure({ codec: next.codec, description: next.description, codedWidth: next.codedWidth, codedHeight: next.codedHeight, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
+  };
+
+  /** A decoder that failed, or wedged, is made again from the next keyframe. The frames it held are acknowledged, so the computer never
+   *  waits for them (it stops sending while they are unanswered), and their unpaints still apply. */
+  const remake = () => {
+    setup = null;
+    skipToKey = true;
+    fedAt = outputAt = null;
+    let last = 0;
+    for (const [seq, p] of pending) {
+      overlay.onFrame({ seq, ...p });
+      last = Math.max(last, seq);
+    }
+    pending.clear();
+    if (last) remoteScreens.skipped(last);
+    else remoteScreens.needKeyframe();
+    redraw();
+  };
+  /** A wedged decoder (`decoderWedged`) never fails on its own: it is closed and made again as a failed one is. */
+  const unwedge = () => {
+    if (!decoder || decoder.state !== "configured" || !decoderWedged(fedAt, outputAt, performance.now())) return;
+    decoder.close();
+    decoder = null;
+    remake();
   };
 
   const onMedia = (bytes: Uint8Array) => {
@@ -353,8 +363,7 @@ function Live() {
     times.arrival(m.seq, performance.now());
     if (m.key) {
       const next = setupFor(m.au, m.codedW, m.codedH);
-      // A new stream, a decoder that failed, or one that took a keyframe a while ago and has shown nothing since (wedged): a new decoder.
-      if (next && (!sameSetup(next, setup) || !decoder || decoder.state !== "configured" || decoderWedged(keyFedAt, outputAt, performance.now()))) configure(next);
+      if (next && (!sameSetup(next, setup) || !decoder || decoder.state !== "configured")) configure(next);
       skipToKey = false;
     }
     // A frame that is not decoded is still acknowledged (the computer must not wait for it), and its unpaint still applies, so that no crisp tile
@@ -377,7 +386,7 @@ function Live() {
     pending.set(m.seq, { unpaint: m.unpaint, unpaintAll: m.unpaintAll, srcW: m.srcW, srcH: m.srcH, captureMs: m.captureMs });
     if (pending.size > 30) pending.delete(pending.keys().next().value!);
     times.decoding(m.seq, performance.now());
-    if (m.key && (keyFedAt === null || (outputAt !== null && outputAt >= keyFedAt))) keyFedAt = performance.now();
+    fedAt = fedSince(fedAt, outputAt, performance.now());
     decoder.decode(new EncodedVideoChunk({ type: m.key ? "key" : "delta", timestamp: m.seq, data: avcChunk(m.au) }));
   };
 
@@ -399,6 +408,9 @@ function Live() {
     });
     sized.observe(box);
     onCleanup(() => sized.disconnect());
+    // A wedged decoder is looked for on a timer: one that never answers leaves frames unacknowledged, and the computer stops sending.
+    const wedgeCheck = setInterval(unwedge, 500);
+    onCleanup(() => clearInterval(wedgeCheck));
     // Only the app's view zooms and pans: Safari's own pinch and the page's scroll are cancelled while the screen is open.
     onCleanup(holdPageStill(box, document, () => window.visualViewport?.scale ?? 1));
     // The keyboard: Safari shrinks the visual viewport and leaves the page's height alone, so the screen is fitted to the visual viewport

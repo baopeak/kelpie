@@ -53,6 +53,7 @@ import {
   cursorIntoView,
   decoderWedged,
   DECODER_WEDGED_MS,
+  fedSince,
   EDGE_PAN_DELAY_MS,
   EDGE_PAN_PX,
   EDGE_PAN_SPEED,
@@ -1207,13 +1208,24 @@ describe("a trackpad tap after the finger moved the cursor", () => {
 });
 
 describe("a decoder that is wedged", () => {
-  it("took a keyframe a while ago and has shown nothing since: made again; a working or new one is left alone", () => {
-    expect(decoderWedged(null, null, 99_999), "no keyframe given yet").toBe(false);
+  it("was given a frame a while ago and has shown nothing since: made again; a working or new one is left alone", () => {
+    expect(decoderWedged(null, null, 99_999), "nothing given yet").toBe(false);
     expect(decoderWedged(1_000, null, 1_000 + DECODER_WEDGED_MS - 1), "a moment to decode it").toBe(false);
     expect(decoderWedged(1_000, null, 1_000 + DECODER_WEDGED_MS), "nothing ever came out").toBe(true);
-    expect(decoderWedged(1_000, 1_020, 60_000), "it showed that keyframe: working, however long ago").toBe(false);
-    // An iPhone that slept: pictures came out before, then a keyframe went in and nothing came out of it.
+    expect(decoderWedged(1_000, 1_020, 60_000), "it showed that frame: working, however long the screen stays still").toBe(false);
+    // An iPhone that slept: pictures came out before, then a frame went in and nothing came out of it.
     expect(decoderWedged(5_000, 4_990, 5_000 + DECODER_WEDGED_MS)).toBe(true);
+  });
+
+  it("waits from the first frame given since the last picture, not from the latest one", () => {
+    // Frames keep coming every 33 ms and none comes out: the wait is not started over by each one.
+    let fed: number | null = null;
+    for (let t = 0; t <= 2_000; t += 33) fed = fedSince(fed, null, t);
+    expect(fed).toBe(0);
+    expect(decoderWedged(fed, null, 2_000)).toBe(true);
+    // Working: each picture comes out right after its frame, so the next frame starts a new wait.
+    expect(fedSince(1_000, 1_010, 1_033)).toBe(1_033);
+    expect(fedSince(1_000, 990, 1_033), "still waiting for the frame given at 1000").toBe(1_000);
   });
 });
 

@@ -470,14 +470,21 @@ export function followHostCursor(drawn: CursorPos, tapAt: { x: number; y: number
   const next = reconcileCursor(drawn, host, now, echo);
   return { drawn: next.drawn, echo: next.echo, tapAt: idle ? { x: next.drawn.x, y: next.drawn.y } : tapAt };
 }
-/** A decoder given a keyframe this long ago (ms) that has put out no picture since is wedged: it neither decodes nor fails (an iPhone's
- *  hardware decoder after the phone slept), so its own error never comes to make it again. It is made again from the next keyframe. */
+/** A decoder given a frame this long ago (ms) that has put out no picture since is wedged: it neither decodes nor fails (an iPhone's
+ *  hardware decoder after the phone slept), so its own error never comes. Checked on a timer, not on the next frame: a decoder that never
+ *  answers leaves frames unacknowledged, and the computer then stops sending. */
 export const DECODER_WEDGED_MS = 1500;
 
-/** Whether a decoder is wedged: fed a keyframe at `keyFedAt` (null: none since it was made, or since its last picture), its last picture
- *  out at `outputAt` (null: none yet), and now `now`. */
-export function decoderWedged(keyFedAt: number | null, outputAt: number | null, now: number): boolean {
-  return keyFedAt !== null && (outputAt === null || outputAt < keyFedAt) && now - keyFedAt >= DECODER_WEDGED_MS;
+/** Whether a decoder is wedged: the first frame given to it since its last picture at `fedAt` (null: none), its last picture out at
+ *  `outputAt` (null: none yet), and now `now`. */
+export function decoderWedged(fedAt: number | null, outputAt: number | null, now: number): boolean {
+  return fedAt !== null && (outputAt === null || outputAt < fedAt) && now - fedAt >= DECODER_WEDGED_MS;
+}
+
+/** When a frame given to a decoder now starts the wait for its next picture: the first frame since the last picture (an earlier one
+ *  still unanswered keeps its time). */
+export function fedSince(fedAt: number | null, outputAt: number | null, now: number): number {
+  return fedAt === null || (outputAt !== null && outputAt >= fedAt) ? now : fedAt;
 }
 
 /** A decoder this many chunks behind its own usual queue is behind. */
