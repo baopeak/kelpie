@@ -38,6 +38,7 @@ import {
   SHARPEN_GAP_MS,
   STUCK_MS,
   toClient,
+  scaleOf,
   toSource,
   visibleRect,
   zoomAt,
@@ -49,6 +50,12 @@ import {
   accel,
   DOUBLE_TAP_MS,
   DOUBLE_TAP_PX,
+  cursorIntoView,
+  EDGE_PAN_DELAY_MS,
+  EDGE_PAN_PX,
+  EDGE_PAN_SPEED,
+  followMargin,
+  followView,
   keepInView,
   KEEP_IN_VIEW_PX,
   TRACKPAD_CURVE,
@@ -825,20 +832,13 @@ describe("gestures made for a phone", () => {
     expect(fine.cursor.x - before).toBeGreaterThanOrEqual(2);
   });
 
-  it("zoomed in, the view keeps the cursor in it: a trackpad move near an edge, and a pinch that zooms around the cursor", () => {
+  it("zoomed in, the view keeps a point in it when the box changes (the keyboard), and a pinch zooms around the cursor", () => {
     expect(keepInView(el, 1600, 900, f().view, { x: 0, y: 0 }), "at zoom 1 all is shown").toEqual(f().view);
     // Zoom 2 at the centre shows 400..1200 × 225..675 at half a screen px a source px; a point at 1190 is within 40 screen px (80 source
     // px) of the right edge, so the view moves right until it is not.
     const moved = keepInView(el, 1600, 900, f(2).view, { x: 1190, y: 450 });
     expect(moved.cx).toBe(800 + (1190 + 80 - 1200));
     expect(keepInView(el, 1600, 900, f(2).view, { x: 800, y: 450 }), "inside: unchanged").toEqual(f(2).view);
-    const g = new Gestures();
-    g.cursor = { x: 1150, y: 450 };
-    g.down({ id: 1, x: 100, y: 100 }, 0, f(2));
-    const out = g.move({ id: 1, x: 130, y: 100 }, 100, f(2));
-    expect(out.view, "the view goes with the cursor").toBeDefined();
-    const shown = toClient(g.cursor.x, g.cursor.y, el, 1600, 900, out.view!);
-    expect(shown.x).toBeLessThanOrEqual(el.width - KEEP_IN_VIEW_PX + 0.001);
     // A pinch in trackpad mode: the cursor stays where it is on the glass while the picture grows around it.
     const p = new Gestures();
     p.cursor = { x: 1200, y: 300 };
@@ -851,6 +851,245 @@ describe("gestures made for a phone", () => {
     expect(z.view!.zoom).toBeGreaterThan(1.5);
     const after = toClient(1200, 300, el, 1600, 900, z.view!);
     expect(Math.abs(after.x - at.x) + Math.abs(after.y - at.y), "the cursor did not move on the glass").toBeLessThan(1);
+  });
+});
+
+describe("zoomed in, a finger moves the cursor and the view follows it", () => {
+  // A phone's picture box (390 × 300) over a 1920 × 1080 screen: zoom 1 shows it 0.203 screen px a source px, zoom 3 about 0.61.
+  const el = { left: 0, top: 100, width: 390, height: 300 };
+  const W = 1920;
+  const H = 1080;
+  const f = (zoom = 3, cx = 960, cy = 540): Frame => ({ el, srcW: W, srcH: H, view: { zoom, cx, cy } });
+  const onGlass = (p: { x: number; y: number }, fr: Frame) => toClient(p.x, p.y, el, W, H, fr.view);
+  /** A trackpad stroke of `n` steps of (`dx`, `dy`) screen px, 16 ms apart, the frame following each view the gesture asks for. */
+  const stroke = (g: Gestures, start: Frame, dx: number, dy: number, n: number, x0 = 195, y0 = 250) => {
+    let fr = start;
+    const views: Frame["view"][] = [];
+    const glass: { x: number; y: number }[] = [];
+    g.down({ id: 1, x: x0, y: y0 }, 0, fr);
+    for (let i = 1; i <= n; i++) {
+      const o = g.move({ id: 1, x: x0 + dx * i, y: y0 + dy * i }, i * 16, fr);
+      expect(o.ops.every((op) => op.k === "move"), "a slide sends only moves: never a scroll").toBe(true);
+      if (o.view) fr = { ...fr, view: o.view };
+      views.push(fr.view);
+      glass.push(onGlass(g.cursor, fr));
+    }
+    g.up({ id: 1, x: x0 + dx * n, y: y0 + dy * n }, n * 16 + 10, fr);
+    return { fr, views, glass };
+  };
+
+  it("the inner area is a fifth of the box's smaller side, between 40 and 120 px", () => {
+    expect(followMargin(el)).toBe(60);
+    expect(followMargin({ left: 0, top: 0, width: 100, height: 100 })).toBe(KEEP_IN_VIEW_PX);
+    expect(followMargin({ left: 0, top: 0, width: 1200, height: 900 })).toBe(120);
+  });
+
+  it("trackpad: inside the inner area only the cursor moves; past it the view follows, the cursor held at the line, never jumping", () => {
+    const g = new Gestures();
+    g.cursor = { x: 960, y: 540 };
+    const m = followMargin(el);
+    // A short slide right from the middle: the cursor moves on the glass, the picture stays.
+    const short = stroke(g, f(), 4, 0, 10);
+    expect(short.fr.view, "the view did not move").toEqual(f().view);
+    expect(g.cursor.x).toBeGreaterThan(960);
+    // A long slide on: the cursor glides to the inner line, then the view moves with it and the cursor stays on that line.
+    const long = stroke(g, short.fr, 4, 0, 60);
+    expect(long.fr.view.cx, "the view followed").toBeGreaterThan(960);
+    const last = long.glass[long.glass.length - 1];
+    expect(last.x).toBeCloseTo(el.left + el.width - m, 0);
+    expect(last.y, "a slide right never moves the view up or down").toBeCloseTo(onGlass({ x: 0, y: 540 }, f()).y, 0);
+    // Never a jump: the view moves at most as far as the cursor went past the line on any one move.
+    const cxs = [short.fr.view.cx, ...long.views.map((v) => v.cx)];
+    const steps = cxs.slice(1).map((cx, i) => cx - cxs[i]);
+    expect(Math.min(...steps), "only ever right, with the cursor").toBeGreaterThanOrEqual(0);
+    const s = scaleOf(el, W, H, f().view);
+    expect(Math.max(...steps) * s, "each step no more than the finger's move times the gain at its fastest").toBeLessThanOrEqual(4 * TRACKPAD_GAIN * TRACKPAD_CURVE[TRACKPAD_CURVE.length - 1][1] + 1);
+    // Back inward: the cursor moves, the view stays where it went.
+    const back = stroke(g, long.fr, -3, 0, 20);
+    expect(back.fr.view).toEqual(long.fr.view);
+    expect(back.glass[back.glass.length - 1].x).toBeLessThan(last.x);
+  });
+
+  it("trackpad: at the picture's own edge the view stops and the cursor goes on to it", () => {
+    const g = new Gestures();
+    g.cursor = { x: 1800, y: 540 };
+    const end = stroke(g, f(3, 1600, 540), 6, 0, 80);
+    expect(end.fr.view.cx, "the view went as far as the picture goes").toBe(W - el.width / scaleOf(el, W, H, f().view) / 2);
+    expect(g.cursor.x).toBe(W - 1);
+  });
+
+  it("trackpad: a cursor out of the picture shown is brought into it, and the view does not jump to it", () => {
+    // The view was moved to the top left (two fingers); the cursor stayed at the bottom right.
+    const fr = f(3, 400, 250);
+    expect(cursorIntoView(el, W, H, fr.view, { x: 500, y: 300 }, 60), "shown already: as it is").toEqual({ x: 500, y: 300 });
+    const g = new Gestures();
+    g.cursor = { x: 1700, y: 1000 };
+    g.down({ id: 1, x: 195, y: 250 }, 0, fr);
+    const o = g.move({ id: 1, x: 175, y: 250 }, 16, fr);
+    expect(o.view, "the view stays where it was put").toBeUndefined();
+    const c = onGlass(g.cursor, fr);
+    expect(c.x).toBeGreaterThanOrEqual(el.left);
+    expect(c.x).toBeLessThanOrEqual(el.left + el.width);
+    expect(c.y).toBeGreaterThanOrEqual(el.top);
+    expect(c.y).toBeLessThanOrEqual(el.top + el.height);
+    expect(o.ops).toEqual([{ k: "move", x: g.cursor.x, y: g.cursor.y }]);
+  });
+
+  it("trackpad: with the cursor out of sight a tap, a long press, a held drag or a two-finger tap only bring it back, clicking nothing", () => {
+    // The view moved away to the top left; the cursor is still over something at the bottom right.
+    const fr = f(3, 400, 250);
+    const hiddenAt = { x: 1700, y: 1000 };
+    const shown = (p: { x: number; y: number }) => {
+      const c = onGlass(p, fr);
+      return c.x >= el.left && c.x <= el.left + el.width && c.y >= el.top && c.y <= el.top + el.height;
+    };
+    const tapped = new Gestures();
+    tapped.cursor = { ...hiddenAt };
+    tapped.down({ id: 1, x: 200, y: 250 }, 0, fr);
+    const o = tapped.up({ id: 1, x: 200, y: 250 }, 60, fr);
+    expect(o.ops).toEqual([{ k: "move", ...tapped.cursor }]);
+    expect(o.feel, "no click shown").toBeUndefined();
+    expect(shown(tapped.cursor)).toBe(true);
+    // Now in sight: the next tap clicks there (a click of its own, not the second half of a double click).
+    tapped.down({ id: 1, x: 200, y: 250 }, 120, fr);
+    expect(tapped.up({ id: 1, x: 200, y: 250 }, 180, fr)).toEqual({ ops: [{ k: "click", ...tapped.cursor, b: "left" }], feel: "click" });
+
+    const pressed = new Gestures();
+    pressed.cursor = { ...hiddenAt };
+    pressed.down({ id: 1, x: 200, y: 250 }, 0, fr);
+    expect(pressed.held(LONG_PRESS_MS + 10, fr), "no ring for a press at a cursor out of sight").toBeNull();
+    expect(pressed.up({ id: 1, x: 200, y: 250 }, LONG_PRESS_MS + 20, fr).ops.map((op) => op.k), "no right click").toEqual(["move"]);
+
+    const dragged = new Gestures();
+    dragged.cursor = { ...hiddenAt };
+    dragged.down({ id: 1, x: 200, y: 250 }, 0, fr);
+    const d = dragged.move({ id: 1, x: 230, y: 250 }, LONG_PRESS_MS + 20, fr);
+    expect(d.ops.map((op) => op.k), "a slide, not a drag").toEqual(["move"]);
+    expect(dragged.dragging()).toBe(false);
+    expect(dragged.up({ id: 1, x: 230, y: 250 }, LONG_PRESS_MS + 40, fr).ops).toEqual([]);
+
+    const two = new Gestures();
+    two.cursor = { ...hiddenAt };
+    two.down({ id: 1, x: 150, y: 250 }, 0, fr);
+    two.down({ id: 2, x: 250, y: 250 }, 5, fr);
+    two.up({ id: 1, x: 150, y: 250 }, 50, fr);
+    expect(two.up({ id: 2, x: 250, y: 250 }, 60, fr).ops.map((op) => op.k), "no right click").toEqual(["move"]);
+    // Direct touch is never affected: a tap clicks under the finger.
+    const direct = new Gestures();
+    direct.mode = "direct";
+    direct.cursor = { ...hiddenAt };
+    direct.down({ id: 1, x: 200, y: 250 }, 0, fr);
+    expect(direct.up({ id: 1, x: 200, y: 250 }, 60, fr).ops[0].k).toBe("click");
+  });
+
+  it("followView: at zoom 1 nothing moves, and inward moves never pan", () => {
+    expect(followView(el, W, H, f(1).view, { x: 10, y: 10 }, { x: 0, y: 0 }, 60)).toEqual(f(1).view);
+    const v = f().view;
+    // From inside the band on the right, going left (inward): nothing.
+    const inBand = toSource(el.left + el.width - 10, 250, el, W, H, v)!;
+    const inward = toSource(el.left + el.width - 30, 250, el, W, H, v)!;
+    expect(followView(el, W, H, v, inBand, inward, 60)).toBe(v);
+  });
+
+  it("direct: a one-finger slide moves the cursor under the finger instead of scrolling; at zoom 1 it still scrolls", () => {
+    const g = new Gestures();
+    g.mode = "direct";
+    const fr = f();
+    g.down({ id: 1, x: 150, y: 200 }, 0, fr);
+    const o = g.move({ id: 1, x: 190, y: 220 }, 50, fr);
+    expect(o.ops).toEqual([{ k: "move", ...toSource(190, 220, el, W, H, fr.view)! }]);
+    expect(o.view, "the view stays").toBeUndefined();
+    expect(g.up({ id: 1, x: 190, y: 220 }, 80, fr).ops, "lifting after a move clicks nothing").toEqual([]);
+    g.down({ id: 1, x: 150, y: 200 }, 200, f(1));
+    expect(g.move({ id: 1, x: 150, y: 120 }, 250, f(1)).ops[0].k, "zoom 1: a scroll, as before").toBe("wheel");
+  });
+
+  it("direct: a finger held near an edge pans the view after a moment, the cursor under it; a tap there never pans", () => {
+    const g = new Gestures();
+    g.mode = "direct";
+    let fr = f();
+    const nearRight = { x: el.left + el.width - 6, y: 250 };
+    g.down({ id: 1, x: 300, y: 250 }, 0, fr);
+    g.move({ id: 1, ...nearRight }, 30, fr);
+    expect(g.edgePanning()).toBe(true);
+    // Not at once: a finger reaching for a target near the edge is not panned away from it.
+    for (let t = 40; t < 30 + EDGE_PAN_DELAY_MS; t += 16) expect(g.tick(t, fr).view, `at ${t} ms`).toBeUndefined();
+    let pans = 0;
+    for (let t = 30 + EDGE_PAN_DELAY_MS; t < 30 + EDGE_PAN_DELAY_MS + 500; t += 16) {
+      const o = g.tick(t, fr);
+      if (!o.view) continue;
+      pans++;
+      expect(o.view.cx, "toward the edge the finger is at").toBeGreaterThan(fr.view.cx);
+      // Never faster than the edge speed allows, and the cursor stays under the finger.
+      expect((o.view.cx - fr.view.cx) * scaleOf(el, W, H, fr.view)).toBeLessThanOrEqual(EDGE_PAN_SPEED * 16 + 0.001);
+      fr = { ...fr, view: o.view };
+      expect(o.ops).toEqual([{ k: "move", ...toSource(nearRight.x, nearRight.y, el, W, H, fr.view)! }]);
+    }
+    expect(pans).toBeGreaterThan(20);
+    // Away from the edge: it stops.
+    g.move({ id: 1, x: 200, y: 250 }, 1000, fr);
+    expect(g.tick(1016, fr).view).toBeUndefined();
+    g.up({ id: 1, x: 200, y: 250 }, 1030, fr);
+    expect(g.edgePanning()).toBe(false);
+    // A tap at the edge: a click under the finger, the view where it was.
+    const tap0 = fr.view;
+    g.down({ id: 1, ...nearRight }, 2000, fr);
+    expect(g.tick(2000 + EDGE_PAN_DELAY_MS + 100, fr).view, "a press is not a pan").toBeUndefined();
+    const click = g.up({ id: 1, ...nearRight }, 2060, fr);
+    expect(click.ops[0]).toMatchObject({ k: "click", b: "left" });
+    expect(click.view).toBeUndefined();
+    expect(fr.view).toBe(tap0);
+    expect(EDGE_PAN_PX).toBeLessThan(followMargin(el));
+  });
+
+  it("direct: a long-press drag held near an edge pans too, the button still held", () => {
+    const g = new Gestures();
+    g.mode = "direct";
+    const fr = f();
+    g.down({ id: 1, x: 100, y: 300 }, 0, fr);
+    const picked = g.move({ id: 1, x: 100, y: el.top + el.height - 4 }, LONG_PRESS_MS + 10, fr);
+    expect(picked.ops[0].k).toBe("down");
+    g.tick(LONG_PRESS_MS + 20, fr);
+    const o = g.tick(LONG_PRESS_MS + 20 + EDGE_PAN_DELAY_MS + 16, fr);
+    expect(o.view!.cy, "down, toward the bottom edge").toBeGreaterThan(fr.view.cy);
+    expect(o.ops[0].k).toBe("move");
+    expect(g.dragging()).toBe(true);
+  });
+
+  it("trackpad never edge-pans by itself: its view follows the cursor's moves only", () => {
+    const g = new Gestures();
+    g.cursor = { x: 960, y: 540 };
+    g.down({ id: 1, x: el.width - 4, y: 250 }, 0, f());
+    g.move({ id: 1, x: el.width - 2, y: 262 }, 30, f());
+    expect(g.edgePanning()).toBe(false);
+    expect(g.tick(1000, f())).toEqual({ ops: [] });
+  });
+
+  it("two fingers moving together: zoomed in they move the phone's view and send nothing; at zoom 1 they scroll", () => {
+    for (const mode of ["trackpad", "direct"] as const) {
+      const g = new Gestures();
+      g.mode = mode;
+      g.cursor = { x: 960, y: 540 };
+      const fr = f();
+      g.down({ id: 1, x: 150, y: 250 }, 0, fr);
+      g.down({ id: 2, x: 250, y: 250 }, 5, fr);
+      g.move({ id: 1, x: 120, y: 250 }, 30, fr);
+      const o = g.move({ id: 2, x: 220, y: 250 }, 40, fr);
+      expect(o.ops, mode).toEqual([]);
+      // The fingers went left 30 px: the picture went with them, so the view now shows more of the right.
+      expect(o.view!.cx, mode).toBeCloseTo(960 + 30 / scaleOf(el, W, H, fr.view), 3);
+      expect(o.view!.zoom, `${mode}: no zoom`).toBeCloseTo(3);
+      expect(g.up({ id: 1, x: 120, y: 250 }, 60, fr).ops, "lifting sends nothing (not a right click)").toEqual([]);
+      expect(g.up({ id: 2, x: 220, y: 250 }, 70, fr).ops).toEqual([]);
+    }
+    // A pan may leave the trackpad's cursor out of the picture shown: the view goes where the fingers took it.
+    const p = new Gestures();
+    p.cursor = { x: 960, y: 540 };
+    p.down({ id: 1, x: 150, y: 250 }, 0, f());
+    p.down({ id: 2, x: 250, y: 250 }, 5, f());
+    p.move({ id: 1, x: 150 + 300, y: 250 }, 30, f());
+    const far = p.move({ id: 2, x: 250 + 300, y: 250 }, 40, f());
+    expect(far.view!.cx).toBeCloseTo(960 - 300 / scaleOf(el, W, H, f().view), 3);
   });
 });
 

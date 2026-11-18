@@ -1569,13 +1569,21 @@ it again. The button next to it switches between the two ways a finger works:
 
 | Gesture | Trackpad (the default) | Direct touch |
 | --- | --- | --- |
-| Slide one finger | Moves the pointer by the finger's move: a slow finger points finely at a small target, a quick one crosses the screen | Scrolls |
+| Slide one finger | Moves the pointer by the finger's move: a slow finger points finely at a small target, a quick one crosses the screen | Scrolls; zoomed in, moves the pointer under the finger |
 | Tap | Clicks where the pointer is | Clicks under the finger |
 | Tap twice | Double-clicks at the pointer | Double-clicks where the first tap was, even if the second lands a little off |
 | Hold, then lift (or tap with two fingers) | Right-clicks at the pointer | Right-clicks under the finger |
 | Hold until the ring shows, then move | Drags from the pointer; lift to drop | Drags from under the finger, with a magnifier above it; lift to drop |
-| Slide two fingers | Scrolls | Scrolls |
-| Pinch | Zooms the phone's view (not the computer's) around the pointer, which the view then follows | Zooms around the fingers |
+| Slide two fingers | Scrolls; zoomed in, moves the phone's view instead | Scrolls; zoomed in, moves the phone's view instead |
+| Pinch | Zooms the phone's view (not the computer's) around the pointer | Zooms around the fingers |
+
+Zoomed in, your fingers work on the pointer and on the phone's view, never on the page itself, which neither zooms nor scrolls while the
+screen is open (only Kelpie's own pinch zooms the picture; a page Safari had zoomed before can still be pinched back out above or below it). In Trackpad the pointer moves freely in the inner part of the picture shown, and the view follows
+it smoothly only as it nears an edge, so the pointer stays in sight and the picture never jumps; a pointer you left out of the picture shown
+(after moving the view) comes back into it at your next slide, and a tap, a hold or a two-finger tap while it is out of sight only brings it
+back and clicks nothing, so nothing is ever clicked where you cannot see. In Direct touch a slide moves the pointer under your finger, and holding the
+finger at an edge for a moment moves the view that way; a tap near an edge clicks without moving the view. To scroll the computer while
+zoomed in, tap *Fit* and slide two fingers, or use PgUp, PgDn and the arrows in the key row.
 
 A ring shows where each click went (two for a double click, orange for a right click); holding still shows a ring and *Lift for a right click, or move to
 drag* before anything is sent, and *Dragging* stays at the top while the button is held. Android also buzzes for each; Safari on the iPhone cannot. *Fit*

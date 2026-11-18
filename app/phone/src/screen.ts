@@ -313,6 +313,54 @@ export function keepInView(el: Box, srcW: number, srcH: number, v: View, p: { x:
   return clampView(el, srcW, srcH, { ...v, cx, cy });
 }
 
+/** Zoomed in, the inner part of the picture box the trackpad's cursor moves in freely (this far from each edge, screen pixels): a fifth of
+ *  the box's smaller side, between `KEEP_IN_VIEW_PX` and 120. Past it the view follows the cursor. */
+export function followMargin(el: Box): number {
+  return Math.min(Math.max(Math.round(Math.min(el.width, el.height) / 5), KEEP_IN_VIEW_PX), 120);
+}
+
+/** Zoomed in, the view after the cursor moved from source point `from` to `to`: it pans only by how far the cursor went on toward an edge
+ *  past the inner area (`marginPx` inside the box), so the cursor glides to that line and the picture then moves under it, never jumping.
+ *  A move back inward, or anywhere inside the inner area, leaves the view alone. At the picture's own edge the view stops and the cursor
+ *  goes on to it. */
+export function followView(el: Box, srcW: number, srcH: number, v: View, from: { x: number; y: number }, to: { x: number; y: number }, marginPx: number): View {
+  const s = scaleOf(el, srcW, srcH, v);
+  if (!s || v.zoom <= 1) return v;
+  const a = toClient(from.x, from.y, el, srcW, srcH, v);
+  const b = toClient(to.x, to.y, el, srcW, srcH, v);
+  const mx = Math.min(marginPx, el.width / 2);
+  const my = Math.min(marginPx, el.height / 2);
+  // How far (screen pixels) the picture moves on one axis: the part of the move past the inner line, outward only.
+  const shift = (a: number, b: number, lo: number, hi: number) => (b < lo && b < a ? b - Math.min(a, lo) : b > hi && b > a ? b - Math.max(a, hi) : 0);
+  const dx = shift(a.x, b.x, el.left + mx, el.left + el.width - mx);
+  const dy = shift(a.y, b.y, el.top + my, el.top + el.height - my);
+  if (!dx && !dy) return v;
+  const next = clampView(el, srcW, srcH, { ...v, cx: v.cx + dx / s, cy: v.cy + dy / s });
+  return next.cx === v.cx && next.cy === v.cy ? v : next;
+}
+
+/** Zoomed in, the cursor brought into the picture shown when it is out of it (the view was moved away from it, or the computer moved it
+ *  there): to the nearest point of the inner area, so a trackpad move starts where the person is looking instead of the view jumping
+ *  to the cursor. Inside the picture shown (or at zoom 1), the cursor as it is. */
+export function cursorIntoView(el: Box, srcW: number, srcH: number, v: View, p: { x: number; y: number }, marginPx: number): { x: number; y: number } {
+  const s = scaleOf(el, srcW, srcH, v);
+  if (!s || v.zoom <= 1) return p;
+  const c = toClient(p.x, p.y, el, srcW, srcH, v);
+  if (c.x >= el.left && c.x <= el.left + el.width && c.y >= el.top && c.y <= el.top + el.height) return p;
+  const mx = Math.min(marginPx, el.width / 2);
+  const my = Math.min(marginPx, el.height / 2);
+  const x = Math.min(Math.max(c.x, el.left + mx), el.left + el.width - mx);
+  const y = Math.min(Math.max(c.y, el.top + my), el.top + el.height - my);
+  return toSource(x, y, el, srcW, srcH, v) ?? p;
+}
+
+/** Direct touch, zoomed in: a finger this close (screen pixels) to an edge of the picture box pans the view that way while it moves the
+ *  cursor or drags, after `EDGE_PAN_DELAY_MS` there (a finger only passing by, or reaching for a target near the edge, pans nothing), at up
+ *  to `EDGE_PAN_SPEED` screen pixels a millisecond at the very edge. */
+export const EDGE_PAN_PX = 36;
+export const EDGE_PAN_DELAY_MS = 250;
+export const EDGE_PAN_SPEED = 0.6;
+
 /** The part of the picture the phone shows now, in source pixels (whole pixels, inside the picture): what Sharpen sends crisp. */
 export function visibleRect(el: Box, srcW: number, srcH: number, v: View): Rect | null {
   const a = toSourceRaw(el.left, el.top, el, srcW, srcH, v);
@@ -571,12 +619,16 @@ const NONE: GestureOut = { ops: [] };
 /**
  * Fingers on the picture.
  * - **Trackpad** (the default): one finger moves the computer's cursor by how far it moves, more for a quick move and less for a slow one
- *   (`accel`; finer when zoomed in, and the zoomed view follows the cursor); a tap clicks where the cursor is, a long press without moving
- *   right-clicks there; a long press then a move drags. A pinch zooms around the cursor.
+ *   (`accel`; finer when zoomed in). Zoomed in, the cursor moves freely in the inner part of the picture shown and the view follows it only
+ *   past that (`followView`); a cursor out of the picture shown is first brought into it (`cursorIntoView`), so the view never jumps. A tap
+ *   clicks where the cursor is, a long press without moving right-clicks there; a long press then a move drags. A pinch zooms around the
+ *   cursor.
  * - **Direct**: a tap clicks under the finger, a long press without moving right-clicks there; a long press then a move drags; a quick
- *   one-finger drag scrolls. A pinch zooms around the fingers.
+ *   one-finger drag scrolls, or zoomed in moves the cursor under the finger, the view panning while the finger is held near an edge
+ *   (`tick`). A pinch zooms around the fingers.
  * - Both: a second tap soon after a tap, near it, clicks again at the first tap's point (a double click, never two places); two fingers
- *   moving together scroll; two fingers pinching zoom the phone's view (nothing is sent) and pan it; two fingers tapped together right-click.
+ *   moving together scroll, or zoomed in move the phone's view (nothing is sent); two fingers pinching zoom the phone's view (nothing is
+ *   sent) and pan it; two fingers tapped together right-click.
  */
 export class Gestures {
   mode: "trackpad" | "direct" = "trackpad";
@@ -591,7 +643,9 @@ export class Gestures {
   /** The finger a one-finger gesture follows: another one that lands during it is ignored. */
   private first: number | null = null;
   private state: "idle" | "press" | "point" | "drag" | "scroll1" | "two" | "two_up" | "scroll2" | "pinch" = "idle";
-  private pinch0 = { d: 0, view: null as View | null, mid: { x: 0, y: 0 }, anchor: { x: 0, y: 0 }, follow: false };
+  private pinch0 = { d: 0, view: null as View | null, mid: { x: 0, y: 0 }, anchor: { x: 0, y: 0 } };
+  /** Direct touch, zoomed in: since when the finger is near an edge, and the last edge pan's time (null: not near one). */
+  private edge: { since: number; last: number } | null = null;
   private carry = { x: 0, y: 0 };
   /** What trackpad moves leave over of a source pixel, so that a slow finger still moves the cursor. */
   private rest = { x: 0, y: 0 };
@@ -606,7 +660,25 @@ export class Gestures {
     if (this.state !== "press" || this.touches.size !== 1 || this.first === null) return null;
     const t = this.touches.get(this.first)!;
     if (time - t.t0 < LONG_PRESS_MS) return null;
+    // A trackpad cursor out of the picture shown: the press only brings it back, nothing to show held.
+    if (this.bringIn(f)) return null;
     return this.mode === "trackpad" ? { ...this.cursor } : this.src(f, t.x0, t.y0);
+  }
+
+  /** Trackpad, zoomed in, the cursor out of the picture shown (the view was moved away from it, or the computer moved it): where it comes
+   *  back into view (`cursorIntoView`); null when it is in view, or in direct mode, or at zoom 1. Nothing is ever clicked, pressed or dragged
+   *  at a cursor the person cannot see. */
+  private bringIn(f: Frame): { x: number; y: number } | null {
+    if (this.mode !== "trackpad") return null;
+    const at = cursorIntoView(f.el, f.srcW, f.srcH, f.view, this.cursor, followMargin(f.el));
+    return at.x !== this.cursor.x || at.y !== this.cursor.y ? at : null;
+  }
+
+  /** The cursor brought back into view (`bringIn`): a move there, and no click. */
+  private broughtIn(at: { x: number; y: number }): GestureOut {
+    this.cursor = at;
+    this.rest = { x: 0, y: 0 };
+    return { ops: [{ k: "move", x: at.x, y: at.y }] };
   }
 
   /** A drag is going on (the button is held on the computer). */
@@ -636,6 +708,7 @@ export class Gestures {
       this.state = "press";
       this.first = t.id;
       this.lastMove = null;
+      this.edge = null;
     }
     else if (this.touches.size === 2 && (this.state === "press" || this.state === "idle")) {
       this.state = "two";
@@ -644,8 +717,7 @@ export class Gestures {
       const c = toClient(this.cursor.x, this.cursor.y, f.el, f.srcW, f.srcH, f.view);
       const shown = c.x >= f.el.left && c.x <= f.el.left + f.el.width && c.y >= f.el.top && c.y <= f.el.top + f.el.height;
       // A cursor out of the picture shown (zoomed away from it) is not chased: the pinch goes around the fingers.
-      const follow = this.mode === "trackpad" && shown;
-      this.pinch0 = { d: p.d, view: f.view, mid: p.mid, anchor: follow ? c : p.mid, follow };
+      this.pinch0 = { d: p.d, view: f.view, mid: p.mid, anchor: this.mode === "trackpad" && shown ? c : p.mid };
     }
     return NONE;
   }
@@ -667,15 +739,18 @@ export class Gestures {
     const s = scaleOf(f.el, f.srcW, f.srcH, f.view) || 1;
     if (this.state === "press") {
       if (Math.hypot(t.x - was.x0, t.y - was.y0) <= TAP_SLOP) return NONE;
-      if (time - was.t0 >= LONG_PRESS_MS) {
-        // Held, then moved: a drag from where it was held.
+      // Held, then moved: a drag from where it was held; but never from a trackpad cursor out of sight (then it is a plain slide).
+      if (time - was.t0 >= LONG_PRESS_MS && !this.bringIn(f)) {
         this.state = "drag";
         const at = this.mode === "trackpad" ? { ...this.cursor } : this.src(f, was.x0, was.y0);
         if (!at) return NONE;
         const then = this.follow(f, t, t.x - was.x0, t.y - was.y0, s);
         return { ops: [{ k: "down", x: at.x, y: at.y, b: "left" }, ...then.ops], view: then.view, feel: "drag" };
       }
-      this.state = this.mode === "trackpad" ? "point" : "scroll1";
+      // Zoomed in, a direct finger moves the cursor too (the person is pointing at something small), not the computer's page.
+      this.state = this.mode === "trackpad" || f.view.zoom > 1 ? "point" : "scroll1";
+      const at = this.bringIn(f);
+      if (at) this.broughtIn(at);
       // The move that went past the slop counts from where the finger started.
       dx = t.x - was.x0;
       dy = t.y - was.y0;
@@ -693,16 +768,17 @@ export class Gestures {
         if (!p) return NONE;
         if (this.state === "two") {
           if (Math.abs(p.d - this.pinch0.d) > 24) this.state = "pinch";
-          else if (Math.hypot(p.mid.x - this.pinch0.mid.x, p.mid.y - this.pinch0.mid.y) > TAP_SLOP) this.state = "scroll2";
+          // Moving together: zoomed in, the view moves with the fingers (a pinch's pan); otherwise the computer scrolls.
+          else if (Math.hypot(p.mid.x - this.pinch0.mid.x, p.mid.y - this.pinch0.mid.y) > TAP_SLOP) this.state = (this.pinch0.view?.zoom ?? 1) > 1 ? "pinch" : "scroll2";
           else return NONE;
         }
         if (this.state === "pinch") {
           if (!this.pinch0.view || this.pinch0.d <= 0) return NONE;
           const zoomed = zoomAt(f.el, f.srcW, f.srcH, this.pinch0.view, p.d / this.pinch0.d, this.pinch0.anchor.x, this.pinch0.anchor.y);
           const zs = scaleOf(f.el, f.srcW, f.srcH, zoomed) || 1;
-          const view = clampView(f.el, f.srcW, f.srcH, { ...zoomed, cx: zoomed.cx - (p.mid.x - this.pinch0.mid.x) / zs, cy: zoomed.cy - (p.mid.y - this.pinch0.mid.y) / zs });
-          // Panning with the pinch never takes the cursor out of the picture shown in trackpad mode (it would be lost there).
-          return { ops: [], view: this.pinch0.follow ? keepInView(f.el, f.srcW, f.srcH, view, this.cursor) : view };
+          // The view goes where the fingers take it, the cursor's place included: moving the view on purpose. The next trackpad move
+          // brings a cursor left out of it back in (`cursorIntoView`).
+          return { ops: [], view: clampView(f.el, f.srcW, f.srcH, { ...zoomed, cx: zoomed.cx - (p.mid.x - this.pinch0.mid.x) / zs, cy: zoomed.cy - (p.mid.y - this.pinch0.mid.y) / zs }) };
         }
         // Both fingers move the page with them: each finger's move is half the pair's.
         return this.wheel(f, p.mid.x, p.mid.y, -dx / s / 2, -dy / s / 2);
@@ -726,10 +802,51 @@ export class Gestures {
     const x = Math.round(fx);
     const y = Math.round(fy);
     this.rest = { x: fx - x, y: fy - y };
+    const from = this.cursor;
     this.cursor = { x, y };
-    // Zoomed in, the view goes with the cursor near an edge.
-    const view = keepInView(f.el, f.srcW, f.srcH, f.view, this.cursor);
+    // Zoomed in, the view goes with the cursor once it leaves the inner area, by as much as it went on past it.
+    const view = followView(f.el, f.srcW, f.srcH, f.view, from, this.cursor, followMargin(f.el));
     return view === f.view ? { ops: [{ k: "move", x, y }] } : { ops: [{ k: "move", x, y }], view };
+  }
+
+  /** Direct touch, zoomed in, one finger moving the cursor or dragging: the view can pan while it is held near an edge (`tick`). */
+  edgePanning(): boolean {
+    return this.mode === "direct" && (this.state === "point" || this.state === "drag");
+  }
+
+  /** Called each frame while `edgePanning()`: a finger held near an edge for `EDGE_PAN_DELAY_MS` pans the view that way, faster the nearer
+   *  it is, and the cursor (under the finger) goes with the picture. Away from the edges, or at the picture's own edge, nothing. */
+  tick(time: number, f: Frame): GestureOut {
+    const t = this.first === null ? undefined : this.touches.get(this.first);
+    const s = scaleOf(f.el, f.srcW, f.srcH, f.view);
+    if (!this.edgePanning() || !t || !s || f.view.zoom <= 1) {
+      this.edge = null;
+      return NONE;
+    }
+    const z = Math.min(EDGE_PAN_PX, f.el.width / 4, f.el.height / 4);
+    // -1..1: how deep into the left (top) or the right (bottom) band the finger is.
+    const depth = (p: number, lo: number, size: number) => (p < lo + z ? -Math.min(1, (lo + z - p) / z) : p > lo + size - z ? Math.min(1, (p - (lo + size - z)) / z) : 0);
+    const ux = depth(t.x, f.el.left, f.el.width);
+    const uy = depth(t.y, f.el.top, f.el.height);
+    if (!ux && !uy) {
+      this.edge = null;
+      return NONE;
+    }
+    if (!this.edge) {
+      this.edge = { since: time, last: time };
+      return NONE;
+    }
+    // A late frame (a busy page) is not a jump.
+    const dt = Math.min(Math.max(time - this.edge.last, 0), 50);
+    this.edge.last = time;
+    if (time - this.edge.since < EDGE_PAN_DELAY_MS) return NONE;
+    const step = (EDGE_PAN_SPEED * dt) / s;
+    const view = clampView(f.el, f.srcW, f.srcH, { ...f.view, cx: f.view.cx + ux * step, cy: f.view.cy + uy * step });
+    if (view.cx === f.view.cx && view.cy === f.view.cy) return NONE;
+    const p = toSource(t.x, t.y, f.el, f.srcW, f.srcH, view);
+    if (!p) return { ops: [], view };
+    this.cursor = p;
+    return { ops: [{ k: "move", x: p.x, y: p.y }], view };
   }
 
   /** Scroll by a distance in source pixels: whole notches of 120 go, the rest waits for the next move. */
@@ -755,6 +872,7 @@ export class Gestures {
     if (!this.touches.size) {
       this.state = "idle";
       this.carry = { x: 0, y: 0 };
+      this.edge = null;
     }
     const oneFinger = state === "point" || state === "drag" || state === "scroll1";
     // A finger that landed during a one-finger gesture lifts: the gesture goes on.
@@ -772,6 +890,9 @@ export class Gestures {
       return at ? { ops: [{ k: "up", x: at.x, y: at.y, b: "left" }] } : NONE;
     }
     if (state === "press") {
+      // A tap or a long press with the trackpad's cursor out of sight brings it back first, and clicks nothing: the next tap clicks there.
+      const hidden = this.bringIn(f);
+      if (hidden) return this.broughtIn(hidden);
       const b: Button = time - was.t0 >= LONG_PRESS_MS ? "right" : "left";
       // A second left tap soon after one (near it, in direct mode; anywhere on the glass in trackpad mode, which clicks at the cursor): a
       // double click, at exactly the first one's point, so that the computer counts the two as one (Windows wants them within a few pixels
@@ -792,6 +913,8 @@ export class Gestures {
     }
     if (state === "two" || state === "two_up") {
       if (this.touches.size) return NONE;
+      const hidden = this.bringIn(f);
+      if (hidden) return this.broughtIn(hidden);
       const at = this.mode === "trackpad" ? this.cursor : this.src(f, this.pinch0.mid.x, this.pinch0.mid.y);
       return at ? { ops: [{ k: "click", x: at.x, y: at.y, b: "right" }], feel: "right" } : NONE;
     }
@@ -806,6 +929,7 @@ export class Gestures {
     this.first = null;
     this.lastTap = null;
     this.carry = { x: 0, y: 0 };
+    this.edge = null;
     return dragging ? { ops: [{ k: "up", x: this.cursor.x, y: this.cursor.y, b: "left" }] } : NONE;
   }
 }
