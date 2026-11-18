@@ -505,7 +505,7 @@ prompt**; for a terminal it is a startup command.
 
 Right-click a terminal for copy / paste / select all / clear, **Copy Context** (the last 400
 lines as text), **Appearance…**, splits, your quick commands and hand-offs. `Ctrl/⌘+click` on an address opens it; on a file path
-(`src/a.ts:42`, `D:\w\x.py`, or a bare `name.py`) it opens the file in Kelpie's viewer at that line, looked for from session's folder, then the project's, then by its name in the project. Right-click a path for *Open*, *Copy Relative*, *Copy Path*, *Copy Name* and *Reveal in Explorer*, or an address for *Open Link* and *Copy Link*. Settings → Terminal → *Colour
+(`src/a.ts:42`, `D:\w\x.py`, or a bare `name.py`) it opens the file in Kelpie's viewer at that line, looked for from session's folder, then the project's, then by its name in the project. Resting the pointer on a link shows a reminder of the key. Right-click a path for *Open*, *Copy Relative*, *Copy Path*, *Copy Name* and *Reveal in Explorer*, or an address for *Open Link* and *Copy Link*. Settings → Terminal → *Colour
 theme* offers Dracula, Nord, One Dark, Tokyo Night, Catppuccin, Gruvbox, Solarized, GitHub
 Light, Monokai, Material Dark, Ayu Dark and Light, Rosé Pine and Rosé Pine Dawn, Everforest Dark,
 Kanagawa and Night Owl (agents are told the same colours when they ask); *Cursor style* is block,
