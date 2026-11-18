@@ -1569,7 +1569,7 @@ it again. The button next to it switches between the two ways a finger works:
 
 | Gesture | Trackpad (the default) | Direct touch |
 | --- | --- | --- |
-| Slide one finger | Moves the pointer by the finger's move: a slow finger points finely at a small target (even a tiny, slow nudge moves it and never clicks), a quick one crosses the screen | Scrolls; zoomed in, moves the pointer under the finger |
+| Slide one finger | Moves the pointer by the finger's move: a slow finger points finely at a small target (a tiny, slow nudge moves it rather than clicking; a quick tap always clicks), a quick one crosses the screen | Scrolls; zoomed in, moves the pointer under the finger |
 | Tap | Clicks where the pointer is | Clicks under the finger |
 | Tap twice | Double-clicks at the pointer | Double-clicks where the first tap was, even if the second lands a little off |
 | Hold, then lift (or tap with two fingers) | Right-clicks at the pointer | Right-clicks under the finger |

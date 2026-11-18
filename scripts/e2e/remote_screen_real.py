@@ -908,8 +908,8 @@ def step_ramp(rig, phone, secs=60):
 
 VIA = ["auto"]
 def step_nudge(rig, phone, n=6):
-    """Trackpad at full view: slow small slides (6 CSS px over 350 ms, under the tap's 10 px) move the cursor and click nothing; a quick tap is
-    still one click at once, and two quick taps a double click."""
+    """Trackpad at full view: slow small slides (8 CSS px over 400 ms, under the tap's 10 px) move the cursor and click nothing; a long press
+    whose finger drifts 5 px as it lands still right-clicks; a quick tap is still one click at once, and two quick taps a double click."""
     set_mode(phone, "trackpad")
     fit(phone)
     put_cursor(rig, phone, *in_window(rig, 400, 400 + 120), tol=15)
@@ -919,8 +919,8 @@ def step_nudge(rig, phone, n=6):
     moves = []
     for i in range(n):
         before = physical_cursor()
-        d = 6 if i % 2 == 0 else -6
-        phone.slide(c[0], c[1], c[0] + d, c[1], ms=350, steps=10)
+        d = 8 if i % 2 == 0 else -8
+        phone.slide(c[0], c[1], c[0] + d, c[1], ms=400, steps=12)
         time.sleep(0.5)
         after = physical_cursor()
         moves.append(after[0] - before[0])
@@ -928,6 +928,18 @@ def step_nudge(rig, phone, n=6):
     metric("nudge_cursor_dx_px", moves)
     check(f"{n} slow small slides click nothing", not clicks, [(round(e["t"] - since), e["x"], e["y"]) for e in clicks])
     check("...and each moves the computer's cursor its way", all((m > 0) == (i % 2 == 0) and m != 0 for i, m in enumerate(moves)), moves)
+    since = time.time() * 1000
+    phone._touch("touchStart", [c])
+    for k in (2, 4, 5):
+        time.sleep(0.025)
+        phone._touch("touchMove", [(c[0] + k, c[1])])
+    time.sleep(0.7)
+    phone._touch("touchEnd", [])
+    time.sleep(0.6)
+    rights, lefts = rig.events("right_any", since), rig.events("click_any", since)
+    phone.js("document.querySelector('.keybar button[aria-label=\"Escape\"]').click()")
+    time.sleep(0.3)
+    check("a long press that drifts 5 px as it lands still right-clicks", len(rights) == 1 and not lefts, (len(rights), len(lefts)))
     since = time.time() * 1000
     phone.tap(*c, hold=0.06)
     time.sleep(0.8)

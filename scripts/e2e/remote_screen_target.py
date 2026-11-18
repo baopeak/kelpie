@@ -169,6 +169,7 @@ for w in (board, text, patch):
 board.bind("<Double-Button-1>", lambda e: note("double", where="board", x=e.x_root, y=e.y_root))
 board.bind("<MouseWheel>", lambda e: note("wheel", delta=e.delta))
 root.bind_all("<Button-1>", lambda e: note("click_any", x=e.x_root, y=e.y_root), add="+")
+root.bind_all("<Button-3>", lambda e: note("right_any", x=e.x_root, y=e.y_root), add="+")
 root.bind_all("<Double-Button-1>", lambda e: note("double_any", x=e.x_root, y=e.y_root), add="+")
 root.bind_all("<Control-v>", lambda e: note("ctrl_v"), add="+")
 root.bind_all("<Control-c>", lambda e: note("ctrl_c"), add="+")
