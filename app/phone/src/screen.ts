@@ -1516,7 +1516,12 @@ export class ScreenSession {
   }
 
   private thawed() {
-    if (this.state?.phase === "frozen") this.patch({ phase: "live", graceLeft: null });
+    if (this.state?.phase !== "frozen") return;
+    this.patch({ phase: "live", graceLeft: null });
+    // Heard again on the same connection (it never dropped, so there was no rebind): what the computer sent meanwhile may never have
+    // arrived (a phone asleep behind the relay), and it would wait for those frames' acknowledgements for good, sending nothing and
+    // dropping every touch as onto a stale picture. A keyframe makes the helper give them up, and its acknowledgement clears them all.
+    this.needKeyframe();
   }
 
   /** A video frame captured `captureMs` after the stream started was shown: how old it was, by the computer's clock. */
