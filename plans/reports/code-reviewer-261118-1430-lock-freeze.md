@@ -109,3 +109,14 @@ Cases:
 ## Unresolved questions
 - Does an iPhone that locks actually suspend Safari without a visibilitychange? The fix is built on that assumption, and nothing has checked it on a device.
 - Is the iOS hardware decoder wedge per decoder (so a new decoder recovers) or system-wide after a wake (so new decoders wedge too)? The answer decides whether a rebuild loop like N5 matters in practice.
+
+## Re-review of 3e4d7c6 (summary kept by the implementer)
+
+Status: DONE, no BLOCKING items. 139/139 vitest, typecheck clean; e2e reviewed by reading only.
+
+- B1 resolved: the 500 ms `unwedge` timer catches a wedge on any frame within about 2 s. `remake()` acknowledges pending frames, which frees the daemon's and the helper's windows so the requested keyframe gets through. Closing the decoder raises AbortError, which never reaches its error callback, so `remake` does not run twice.
+- N1, N2, N3, N4 and N6 resolved. The `window` capture listener runs before the app's `document` listener, so the clock path really is tested. Every native `confirm` now goes through `ask()`.
+- N5: no concrete loop. The SPS has `max_num_reorder_frames = 0`. A `decodeQueueSize > 0` or `flush()` guard is optional.
+- R1 (non-blocking): a decoder that stays wedged is rebuilt about every 2 s without end, sending a keyframe each time. A software fallback after repeated wedges or a backoff was suggested. **Done afterwards:** after two wedge rebuilds in a row, the next decoder uses `prefer-software`; if that fails, it goes back to `no-preference`.
+- R2 (negligible): a real sleep while a `confirm` dialog is open is not detected.
+- R3: the `.claude/agent-memory/code-reviewer/*` edits stay out of the change.

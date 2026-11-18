@@ -207,6 +207,11 @@ function Live() {
   let skipToKey = true;
   // For a wedged decoder (`decoderWedged`): the first frame given to it since its last picture, and when its last picture came out.
   let fedAt: number | null = null;
+  // Wedged decoders made again in a row with no picture between (`unwedge`): from the second one on, a software decoder is tried (a
+  // hardware one still waking keeps wedging), unless one failed here already.
+  let wedges = 0;
+  let softFailed = false;
+  let soft = false;
   let outputAt: number | null = null;
   let src = { w: 0, h: 0 };
   let cursor = { shape: 0, visible: false, x: 0, y: 0 };
@@ -289,11 +294,13 @@ function Live() {
     latest = null;
     setup = next;
     fedAt = outputAt = null;
+    soft = wedges >= 2 && !softFailed;
     decoder = new VideoDecoder({
       output: (f) => {
         const seq = f.timestamp;
         const out = performance.now();
         outputAt = out;
+        wedges = 0;
         latest?.close();
         latest = f;
         const p = pending.get(seq);
@@ -313,9 +320,12 @@ function Live() {
         draw();
         times.presented(seq, out, performance.now());
       },
-      error: () => remake(),
+      error: () => {
+        if (soft) softFailed = true;
+        remake();
+      },
     });
-    decoder.configure({ codec: next.codec, description: next.description, codedWidth: next.codedWidth, codedHeight: next.codedHeight, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
+    decoder.configure({ codec: next.codec, description: next.description, codedWidth: next.codedWidth, codedHeight: next.codedHeight, optimizeForLatency: true, hardwareAcceleration: soft ? "prefer-software" : "no-preference" });
   };
 
   /** A decoder that failed, or wedged, is made again from the next keyframe. The frames it held are acknowledged, so the computer never
@@ -339,6 +349,7 @@ function Live() {
     if (!decoder || decoder.state !== "configured" || !decoderWedged(fedAt, outputAt, performance.now())) return;
     decoder.close();
     decoder = null;
+    wedges++;
     remake();
   };
 
