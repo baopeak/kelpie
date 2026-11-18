@@ -689,8 +689,9 @@ export class Gestures {
   /** Before an on-screen mouse button acts at the cursor: the cursor brought back into view when it is out of sight (and nothing else done),
    *  or null when it is in view and the button may act there. */
   bringBack(f: Frame): GestureOut | null {
-    const at = this.bringIn(f);
-    return at ? this.broughtIn(at) : null;
+    // Whatever the mode: the buttons always act at the cursor, so a cursor out of sight is brought back in Direct touch too.
+    const at = cursorIntoView(f.el, f.srcW, f.srcH, f.view, this.cursor, followMargin(f.el));
+    return at.x !== this.cursor.x || at.y !== this.cursor.y ? this.broughtIn(at) : null;
   }
 
   /** The cursor brought back into view (`bringIn`): a move there, and no click. */

@@ -483,6 +483,8 @@ function Live() {
       redraw();
     }
     const sent = o.ops.length > 0 && live();
+    // Anything else that lets the left button go (a tap, a drag's end, the Left button) ends Hold too: the button says what the computer has.
+    if (sent && holding() && o.ops.some((op) => (op.k === "up" || op.k === "click") && op.b === "left")) setHolding(false);
     send(o.ops);
     // What was sent puts the computer's cursor somewhere (a move, or a click, press or wheel at the finger in direct mode): shown there at
     // once (local echo), the computer's next positions reconciled to it. Nothing sent, nothing echoed.
@@ -537,14 +539,19 @@ function Live() {
    *  A cursor out of sight (zoomed away from it) is brought back first, and nothing else is done. */
   const mouse = (what: "left" | "middle" | "right" | "up" | "down" | "hold") => {
     if (!live() || !src.w) return;
+    gestures.mode = mode();
+    // Release lets go where the cursor is, seen or not: bringing it back first would drag what is held to the view's edge.
+    if (what === "hold" && holding()) {
+      setHolding(false);
+      return send([{ k: "up", x: gestures.cursor.x, y: gestures.cursor.y, b: "left" }]);
+    }
     const back = gestures.bringBack(frame());
     if (back) return out(back);
     const at = gestures.cursor;
     if (what === "up" || what === "down") return out({ ops: [{ k: "wheel", x: at.x, y: at.y, dx: 0, dy: what === "down" ? 120 : -120 }] });
     if (what === "hold") {
-      const on = !holding();
-      setHolding(on);
-      return out({ ops: [{ k: on ? "down" : "up", x: at.x, y: at.y, b: "left" }], feel: on ? "drag" : undefined });
+      setHolding(true);
+      return out({ ops: [{ k: "down", x: at.x, y: at.y, b: "left" }], feel: "drag" });
     }
     out({ ops: [{ k: "click", x: at.x, y: at.y, b: what }], feel: what === "right" ? "right" : "click" });
   };
