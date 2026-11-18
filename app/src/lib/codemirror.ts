@@ -1,7 +1,7 @@
 // Shared CodeMirror 6 setup: colours come from the app's CSS variables (dark / light themes
 // restyle open editors live), lazy language loading.
 import { EditorView, ViewPlugin, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, highlightSpecialChars, rectangularSelection, crosshairCursor } from "@codemirror/view";
-import { Compartment, EditorState, type Extension } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting, HighlightStyle, LanguageDescription } from "@codemirror/language";
@@ -79,6 +79,21 @@ const PHRASES = [
 ];
 export const editorPhrases = () => EditorState.phrases.of(Object.fromEntries(PHRASES.map((p) => [p, tr(p)])));
 
+/** A press inside the selected text starts a new selection there, as anywhere else. CodeMirror leaves such a press to the browser, which
+ *  begins dragging the selected text away and cancels the press a few pixels later: in Kelpie, where a file is read to pick text out of
+ *  it (to copy, or to hand to an agent), a second selection could then never be made over the first, nor any after Ctrl+A. Shift (extend),
+ *  Alt (rectangle), Ctrl/Cmd (another range) and double or triple clicks keep their own meaning. Moving text by dragging it goes with it. */
+const pressSelectsAnew = EditorView.domEventHandlers({
+  mousedown(e, view) {
+    if (e.button !== 0 || e.detail > 1 || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return false;
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos === null || !view.state.selection.ranges.some((r) => !r.empty && pos >= r.from && pos <= r.to)) return false;
+    // Collapsed where the press is, CodeMirror's own handling (which runs next) starts an ordinary drag-select from there.
+    view.dispatch({ selection: EditorSelection.cursor(pos) });
+    return false;
+  },
+});
+
 export function baseExtensions(opts: { readOnly?: boolean; onSave?: () => void } = {}): Extension[] {
   const exts: Extension[] = [
     editorPhrases(),
@@ -88,6 +103,7 @@ export function baseExtensions(opts: { readOnly?: boolean; onSave?: () => void }
     history(),
     foldGutter(),
     drawSelection(),
+    pressSelectsAnew,
     EditorState.allowMultipleSelections.of(true),
     indentOnInput(),
     syntaxHighlighting(syntax, { fallback: true }),
