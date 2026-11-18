@@ -1,7 +1,7 @@
 """The computer's screen from the real phone page: the phone app in Playwright's Chromium as an iPhone (390×844 at 3×, touch), against the real
 app, its screen helper and a daemon of this script's own (Windows). Every function of the remote screen a person reaches with their fingers.
 
-    python -X utf8 scripts/e2e/screen_phone.py <scratch-dir> <app> [--json out.json] [--load L2:memory]
+    python -X utf8 scripts/e2e/screen_phone.py <scratch-dir> <app> [--json out.json] [--load L2:memory] [--chrome]
 
 <app> is a debug build of the app with its frontend embedded (`cd app && pnpm tauri build --debug --no-bundle`), with the debug kelpied (built
 after `pnpm build:phone`, which it embeds: the page tested is the daemon's own) and kelpie-screen next to it. Needs tauri-driver (PATH or
@@ -23,11 +23,15 @@ Checks, each PASS or FAIL, then a summary (`--json` writes them too):
    double click; a long press and a two-finger tap right-click; a long press then a move drags; two fingers scroll; the page's cost per move.
 3. the gestures' feedback: rings for clicks, the long press's hint, the drag's chip; the help sheet.
 4. direct touch: the same gestures under the finger, the magnifier while dragging.
-5. pinch zoom keeps the cursor in the picture shown; Fit goes back.
+5. pinch zoom keeps the cursor in the picture shown; Fit goes back. Zoomed in: a trackpad slide moves the cursor and the view only follows
+   it near an edge, the cursor kept inside the picture shown; two fingers move the view and scroll nothing; direct touch's slide moves the
+   cursor under the finger, a finger held at an edge pans the view and a tap there does not; the page itself never zooms or scrolls, and
+   its touch and Safari gesture listeners cancel (Chromium honours touch-action anyway: the iPhone's own page zoom is not reproducible here).
 6. text: shown in the field as typed, Hide masks it; text with Vietnamese diacritics arrives whole; Backspace, Enter, Tab, Esc; Ctrl with a
    letter is a shortcut.
 7. Stop ends it, and it starts again; leaving the app (the page hidden) ends it within a second and nothing more lands.
-`--load` pins this script's daemon at a load level (`KELPIE_LOAD_FORCE`, calm by default). At L2 every check above runs on a screen that started
+`--chrome` runs the phone in the installed Google Chrome (Playwright's `chrome` channel, a throwaway profile) instead of Playwright's own
+Chromium: the browser a person has. `--load` pins this script's daemon at a load level (`KELPIE_LOAD_FORCE`, calm by default). At L2 every check above runs on a screen that started
 at its lowest rung. At L3 the start is refused instead: the picker says why and when it tries again, Stop trying stops it, and nothing else runs.
 Not here: the relay and its Face ID check (screen_relay.py, with an emulated phone), peer to peer under impairment (screen_rtc.py).
 """
@@ -51,6 +55,7 @@ ap.add_argument("scratch")
 ap.add_argument("app")
 ap.add_argument("--json", default=None)
 ap.add_argument("--load", default=None, help="the daemon's pinned load level and reason, such as L2:memory or L3:memory")
+ap.add_argument("--chrome", action="store_true", help="the installed Google Chrome instead of Playwright's Chromium")
 ARGS = ap.parse_args()
 if ARGS.load:
     os.environ["KELPIE_E2E_LOAD"] = ARGS.load
@@ -163,7 +168,7 @@ PROBE = r'''
 
 class Phone:
     def __init__(self, pw):
-        self.browser = pw.chromium.launch()
+        self.browser = pw.chromium.launch(channel="chrome") if ARGS.chrome else pw.chromium.launch()
         self.ctx = self.browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=3, is_mobile=True, has_touch=True, ignore_https_errors=True,
                                            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1")
         self.ctx.add_init_script(PROBE)
@@ -264,6 +269,13 @@ class Picture:
         b = self.box()
         return min(b["width"] / self.frame[2], b["height"] / self.frame[3])
 
+    def under(self, cx, cy, v):
+        """The phone's screen (CSS pixels) → the computer's screen (physical pixels), at the page's view `v` (zoomed and panned)."""
+        fx, fy = self.frame[0], self.frame[1]
+        b = self.box()
+        s = self.scale() * v["zoom"]
+        return fx + v["cx"] + (cx - b["x"] - b["width"] / 2) / s, fy + v["cy"] + (cy - b["y"] - b["height"] / 2) / s
+
 
 def shown_cursor(phone):
     """The phone's cursor (CSS pixels, viewport), or None when the page draws none of its own layer."""
@@ -274,6 +286,23 @@ def shown_cursor(phone):
       const r = box.getBoundingClientRect();
       return m ? [r.left + Number(m[1]), r.top + Number(m[2])] : null;
     }""")
+
+
+def view(phone):
+    """How the page shows the picture now: {zoom, cx, cy} (source pixels at the box's centre). A page without the probe (an older build)
+    gives NaNs, new ones each time (a dict holding the same NaN object would compare equal): every check that compares them fails, and
+    the checks that need nothing of it still run."""
+    return phone.js("() => window.__kelpieScreenView?.() ?? null") or {k: float("nan") for k in ("zoom", "cx", "cy")}
+
+
+def page_still(phone):
+    """The page itself is neither zoomed nor scrolled (only the app's view of the picture moves)."""
+    return phone.js("""() => ({ scale: window.visualViewport?.scale ?? 1, x: window.scrollX, y: window.scrollY,
+      main: document.querySelector("main")?.scrollTop ?? 0, body: document.body.scrollTop })""")
+
+
+def still(state):
+    return state["scale"] == 1 and not state["x"] and not state["y"] and not state["main"] and not state["body"]
 
 
 def wait_event(n, kind, timeout=5):
@@ -487,6 +516,7 @@ def run_phone(d, phone, hwnd):
     time.sleep(0.4)
     shown = shown_cursor(phone)
     check("…also after a trackpad slide toward the edge (the view follows it)", shown is not None and b["x"] <= shown[0] <= b["x"] + b["width"], (shown, b))
+    zoomed_fingers(phone, pic, pad, centre)
     if zoomed:
         page.locator(".takeover-head button:has-text('Fit')").click()
     check("Fit goes back to the whole picture", not page.locator(".takeover-head button:has-text('Fit')").count())
@@ -546,6 +576,109 @@ def run_phone(d, phone, hwnd):
     check("leaving the app ends the screen within a second", bool(gone) and time.time() - t0 < 1.5, time.time() - t0)
     ended = lambda: json.dumps(d.call("mobile.audit", {"limit": 50})["entries"]).count("screen_stop")  # noqa: E731
     check("…and the computer ended it too (its audit says so)", bool(until(lambda: ended() >= stops + 1, 5)), (stops, ended()))
+
+
+def zoomed_fingers(phone, pic, pad, centre):
+    """Zoomed in, what the owner's iPhone got wrong: one finger moves the cursor and the view follows it only near an edge; the page itself
+    never moves."""
+    page = phone.page
+    b = pic.box()
+    v0 = view(phone)
+    check("zoomed: the page shows its view to a test driver", v0["zoom"] > 1.2, v0)
+    check("zoomed: the page itself is not zoomed or scrolled", still(page_still(phone)), page_still(phone))
+    # The page's guards are wired: a finger moving on the picture and Safari's pinch events are cancelled.
+    guarded = phone.js("""() => {
+      const box = document.querySelector(".screen-canvas");
+      const t = new Touch({ identifier: 9, target: box, clientX: 10, clientY: 10 });
+      const move = new TouchEvent("touchmove", { cancelable: true, bubbles: true, touches: [t], targetTouches: [t], changedTouches: [t] });
+      box.dispatchEvent(move);
+      const g = new Event("gesturestart", { cancelable: true });
+      document.dispatchEvent(g);
+      return [move.defaultPrevented, g.defaultPrevented];
+    }""")
+    check("…a touch moving on the picture and Safari's gesturestart are cancelled (non-passive guards)", guarded == [True, True], guarded)
+
+    # Trackpad, the cursor first put in the middle of the picture shown (a slide from wherever it is, then back to the middle on the glass).
+    mid = (b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+    for _ in range(3):
+        c = shown_cursor(phone)
+        if c and abs(c[0] - mid[0]) < 30 and abs(c[1] - mid[1]) < 30:
+            break
+        if c:
+            phone.slide(mid[0], mid[1], (mid[0] - c[0]) / 1.2, (mid[1] - c[1]) / 1.2, steps=40, fps=30)
+            time.sleep(0.5)
+    c = shown_cursor(phone)
+    check("zoomed trackpad: the cursor is put near the middle of the picture shown first", near(c, mid, 60), (c, mid))
+    v1 = view(phone)
+    before = ss.cursor()
+    n = len(events())
+    phone.slide(mid[0] - 40, mid[1] + 40, 30, 0, steps=20, fps=30)
+    time.sleep(0.8)
+    after = ss.cursor()
+    v2 = view(phone)
+    check("zoomed trackpad: a short slide moves the computer's cursor", after[0] - before[0] > 3, (before, after))
+    check("…and the view stays where it is (the cursor moves, not the picture)", v2 == v1, (v1, v2))
+    check("…and sends no scroll", not since(n, "wheel"), since(n, "wheel"))
+    # A long slide right: the cursor reaches the inner line, then the view follows, the cursor kept inside the picture shown.
+    n = len(events())
+    phone.slide(b["x"] + 30, mid[1] + 40, b["width"] - 60, 0, steps=60, fps=30)
+    phone.slide(b["x"] + 30, mid[1] + 40, b["width"] - 60, 0, steps=60, fps=30)
+    time.sleep(0.8)
+    v3 = view(phone)
+    shown = shown_cursor(phone)
+    check("zoomed trackpad: a long slide right makes the view follow the cursor", v3["cx"] > v2["cx"] + 5, (v2, v3))
+    check("…the cursor kept inside the picture shown, off the edge", shown is not None and b["x"] + 30 <= shown[0] <= b["x"] + b["width"] - 30, (shown, b))
+    check("…the view never moved up or down for a slide right", abs(v3["cy"] - v2["cy"]) < 1, (v2, v3))
+    check("…and still no scroll, and the page itself never moved", not since(n, "wheel") and still(page_still(phone)), (since(n, "wheel"), page_still(phone)))
+
+    # Two fingers moving together, zoomed in: the view moves, nothing reaches the computer.
+    n = len(events())
+    cur = ss.cursor()
+    # Right, back the way the view just went (it may stand at the picture's right edge now).
+    phone.two(mid[0], mid[1], dx=80, steps=20)
+    time.sleep(0.8)
+    v4 = view(phone)
+    check("zoomed: two fingers moving together move the phone's view", v4["cx"] < v3["cx"] - 5, (v3, v4))
+    check("…and send nothing: no scroll, no click, the cursor where it was", not events()[n:] and near(ss.cursor(), cur, 2), (events()[n:], cur, ss.cursor()))
+
+    # Direct touch, zoomed: a one-finger slide moves the cursor under the finger.
+    page.click("[data-screen-mode]")
+    time.sleep(0.4)
+    n = len(events())
+    end = (mid[0] + 40, mid[1] + 20)
+    phone.slide(mid[0] - 40, mid[1] - 20, 80, 40, steps=20, fps=30)
+    time.sleep(0.8)
+    v5 = view(phone)
+    shown = shown_cursor(phone)
+    tol = max(6, int(3 / (pic.scale() * (v4["zoom"] if v4["zoom"] > 1 else 1))))
+    check("zoomed direct touch: a slide moves the cursor, which ends under the finger", near(shown, end, 3) and near(ss.cursor(), pic.under(*end, v4), tol + 4), (shown, end, ss.cursor(), pic.under(*end, v4)))
+    check("…and sends no scroll, the view where it was", not since(n, "wheel") and v5 == v4, (since(n, "wheel"), v4, v5))
+    # A tap near the right edge: a click there (where the computer's cursor went), the view where it was.
+    edge = (b["x"] + b["width"] - 8, mid[1])
+    phone.tap(*edge)
+    time.sleep(0.8)
+    check("zoomed direct touch: a tap near an edge clicks under the finger and does not pan the view", view(phone) == v5 and near(ss.cursor(), pic.under(*edge, v5), tol + 4), (v5, view(phone), ss.cursor(), pic.under(*edge, v5)))
+    time.sleep(0.6)
+    # A finger slid to an edge and held there (the side with more picture beyond it): the view pans that way, the cursor under the finger.
+    half = b["width"] / (pic.scale() * v5["zoom"]) / 2
+    left = v5["cx"] - half > pic.frame[2] - (v5["cx"] + half)
+    at_edge = (b["x"] + 6 if left else b["x"] + b["width"] - 6, mid[1])
+    phone.touch("touchStart", [mid])
+    for i in range(1, 16):
+        phone.touch("touchMove", [(mid[0] + (at_edge[0] - mid[0]) * i / 15, mid[1])])
+        time.sleep(1 / 30)
+    time.sleep(1.0)
+    phone.touch("touchEnd", [])
+    time.sleep(0.5)
+    # Read once the finger is up: the pan stops with it, and the cursor was put under the finger at the view's last frame.
+    v6 = view(phone)
+    shown = shown_cursor(phone)
+    moved = (v5["cx"] - v6["cx"]) if left else (v6["cx"] - v5["cx"])
+    check("zoomed direct touch: a finger held at an edge pans the view that way", moved > 5, (left, v5, v6))
+    check("…the cursor still under the finger", near(shown, at_edge, 4) and near(ss.cursor(), pic.under(*at_edge, v6), tol + 4), (shown, ss.cursor(), pic.under(*at_edge, v6)))
+    check("…and the page itself never zoomed or scrolled", still(page_still(phone)), page_still(phone))
+    page.click("[data-screen-mode]")  # back to trackpad, as the rest expects
+    time.sleep(0.3)
 
 
 COST = {}

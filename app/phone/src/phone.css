@@ -438,6 +438,9 @@ a.btn { text-decoration: none; }
 .screen-help th, .screen-help td { text-align: left; vertical-align: top; padding: 6px 4px; border-top: 1px solid var(--border); }
 .screen-help th { font-weight: 600; width: 42%; }
 .screen-live { position: relative; }
+/* While the screen is open the page never scrolls or bounces: only the app's view of the picture moves (screen-page-guard.ts). */
+html:has(.screen-live), body:has(.screen-live) { overscroll-behavior: none; }
+main:has(.screen-live) { overscroll-behavior: none; }
 /* The keyboard is up: the screen fills what is left above it, and the lines under the picture make room for it. */
 .screen-live.keyboard { z-index: 20; background: var(--bg); }
 .screen-live.keyboard .screen-quality, .screen-live.keyboard .screen-details, .screen-live.keyboard .screen-way { display: none; }

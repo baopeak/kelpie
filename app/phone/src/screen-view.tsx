@@ -6,6 +6,7 @@
 // never draws the picture again, so it follows the finger at the screen's own rate, at once where the finger puts it (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { avcChunk, Backlog, canDecode, clampView, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, keepInView, KEYS, LONG_PRESS_MS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Feel, type Frame, type GestureOut, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { holdPageStill } from "./screen-page-guard";
 import { screenGesturesSeen } from "./prefs";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
 import { pathText } from "./conn-path";
@@ -24,7 +25,9 @@ const GESTURE_ROWS: Record<"trackpad" | "direct", [string, string][]> = {
     [msg("Tap twice"), msg("Double-clicks there")],
     [msg("Hold, then lift, or tap with two fingers"), msg("Right-clicks")],
     [msg("Hold until the ring shows, then move"), msg("Drags; lift the finger to drop")],
-    [msg("Slide two fingers"), msg("Scrolls")],
+    [msg("Slide one finger, zoomed in"), msg("The cursor moves inside the picture shown; near an edge the view follows it")],
+    [msg("Tap with the cursor out of sight"), msg("Brings the cursor back into view and clicks nothing; tap again to click")],
+    [msg("Slide two fingers"), msg("Scrolls; zoomed in, moves this phone's view instead (Fit, then slide, to scroll)")],
     [msg("Pinch"), msg("Zooms this phone's view around the cursor; Fit shows all of it again")],
   ],
   direct: [
@@ -32,7 +35,8 @@ const GESTURE_ROWS: Record<"trackpad" | "direct", [string, string][]> = {
     [msg("Tap twice"), msg("Double-clicks there")],
     [msg("Hold, then lift, or tap with two fingers"), msg("Right-clicks")],
     [msg("Hold until the ring shows, then move"), msg("Drags, with a magnifier above the finger; lift it to drop")],
-    [msg("Slide one or two fingers"), msg("Scrolls")],
+    [msg("Slide one finger"), msg("Scrolls; zoomed in, moves the cursor under the finger, and holding it near an edge moves the view")],
+    [msg("Slide two fingers"), msg("Scrolls; zoomed in, moves this phone's view instead (Fit, then slide, to scroll)")],
     [msg("Pinch"), msg("Zooms this phone's view; Fit shows all of it again")],
   ],
 };
@@ -205,6 +209,8 @@ function Live() {
   const overlay = new Overlay<ImageBitmap>((b) => b.close());
   let shownSeq = 0;
   let drawFrame = 0;
+  /** The edge pan's next frame (direct touch, zoomed in), 0 when none is asked for. */
+  let panFrame = 0;
   let ctx2d: CanvasRenderingContext2D | null = null;
   // Where and when the phone last put the cursor, and the places it sent before: the computer's cursor messages (a round trip old, or
   // later) never pull it back to one of those (`reconcileCursor`).
@@ -213,6 +219,8 @@ function Live() {
   const backlog = new Backlog();
   // For the measurement plan: what the phone saw, read from the page (a debugging console or a test driver).
   (globalThis as { __kelpieScreenTimes?: () => unknown }).__kelpieScreenTimes = () => ({ ...times.snapshot(), desynchronized: lowLatency() });
+  // And how the picture is shown now (zoom, and the source point at the box's centre): whether a gesture moved the view or only the cursor.
+  (globalThis as { __kelpieScreenView?: () => View }).__kelpieScreenView = () => ({ ...view() });
   // Asked for once, before any other drawing: a canvas the browser may show without waiting for the next composited frame.
   const context = () => (ctx2d ??= canvas.getContext("2d", { desynchronized: true, alpha: false }));
   const lowLatency = () => !!(context()?.getContextAttributes?.() as { desynchronized?: boolean } | undefined)?.desynchronized;
@@ -366,13 +374,23 @@ function Live() {
   onMount(() => {
     onScreenMedia(onMedia);
     // The box changes size with the window, the keyboard and the lines around it (a status, the way's choice): the picture and the cursor
-    // follow, and a zoomed view keeps the cursor in it (where the person is typing, near enough).
+    // follow, and a zoomed view keeps a cursor that was in it in it (where the person is typing, near enough). A view moved away from the
+    // cursor on purpose stays where it is: the lines under the picture change height as their figures change.
+    let before: Frame["el"] | null = null;
     const sized = new ResizeObserver(() => {
-      if (src.w && cursor.visible) setView((v) => keepInView(frame().el, src.w, src.h, v, cursor));
+      const now = frame();
+      if (src.w && cursor.visible && before) {
+        const c = toClient(cursor.x, cursor.y, before, src.w, src.h, view());
+        const wasShown = c.x >= before.left && c.x <= before.left + before.width && c.y >= before.top && c.y <= before.top + before.height;
+        if (wasShown) setView((v) => keepInView(now.el, src.w, src.h, v, cursor));
+      }
+      before = now.el;
       redraw();
     });
     sized.observe(box);
     onCleanup(() => sized.disconnect());
+    // Only the app's view zooms and pans: Safari's own pinch and the page's scroll are cancelled while the screen is open.
+    onCleanup(holdPageStill(box, document, () => window.visualViewport?.scale ?? 1));
     // The keyboard: Safari shrinks the visual viewport and leaves the page's height alone, so the screen is fitted to the visual viewport
     // while the text field has the focus, and the picture keeps the part above the keyboard.
     const vv = window.visualViewport;
@@ -390,8 +408,11 @@ function Live() {
   });
   onCleanup(() => {
     delete (globalThis as { __kelpieScreenTimes?: unknown }).__kelpieScreenTimes;
+    delete (globalThis as { __kelpieScreenView?: unknown }).__kelpieScreenView;
     if (drawFrame) cancelAnimationFrame(drawFrame);
     drawFrame = 0;
+    if (panFrame) cancelAnimationFrame(panFrame);
+    panFrame = 0;
     clearTimeout(holdTimer);
     onScreenMedia(null);
     decoder?.close();
@@ -483,9 +504,19 @@ function Live() {
       if (hold()) buzz(BUZZ.right);
     }, LONG_PRESS_MS + 10);
   };
+  // Direct touch, zoomed in: while a finger moving the cursor or dragging is held near an edge, the view pans each frame (`Gestures.tick`),
+  // even with the finger still.
+  const edgePan = () => {
+    panFrame = 0;
+    if (!gestures.edgePanning()) return;
+    out(gestures.tick(performance.now(), frame()));
+    if (loupe()) showHeld();
+    panFrame = requestAnimationFrame(edgePan);
+  };
   const move = (e: PointerEvent) => {
     out(gestures.move(touch(e), e.timeStamp, frame()));
     if (hold() || dragging() || loupe()) showHeld();
+    if (!panFrame && view().zoom > 1 && gestures.edgePanning()) panFrame = requestAnimationFrame(edgePan);
   };
   const up = (e: PointerEvent) => {
     out(gestures.up(touch(e), e.timeStamp, frame()));
