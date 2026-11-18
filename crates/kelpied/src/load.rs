@@ -192,11 +192,18 @@ impl Sample {
     /// and heat ask for L2 at most and battery saver for L1. A screen may start low at an L3 that memory alone causes (`screen::admit`):
     /// on a large computer under 8 % free can be gigabytes. The reasons list says which reasons ask, not for which level.
     pub fn asks_l3_without_memory(&self) -> bool {
+        let mut rest = self.without_memory();
+        // A pegged CPU asks for L2 at most, so its three-sample count does not matter here.
+        rest.wants(true).0 == Level::L3
+    }
+
+    /// These measurements with memory left out: what the screen's stream is held by (`Load::stream_level`).
+    pub fn without_memory(&self) -> Sample {
         let mut rest = self.clone();
         rest.reading.low_memory = false;
         rest.reading.memory_free = None;
-        // A pegged CPU asks for L2 at most, so its three-sample count does not matter here.
-        rest.wants(true).0 == Level::L3
+        rest.reading.memory_free_mb = None;
+        rest
     }
 
     /// The level these measurements ask for, and the reasons, with whether the CPU has been above 95 %
@@ -323,6 +330,10 @@ pub struct Load {
     beat: AtomicU64,
     stall: AtomicU64,
     last: Mutex<Sample>,
+    /// The level with memory left out, held as the level is (`Machine`): what the screen's stream is held to. Memory alone never lowers the
+    /// picture (owner, 2026-11-18): its rate and size change nothing in how much memory is free. Whether a screen may start still follows the
+    /// whole level (`screen::admit`).
+    stream: Mutex<Level>,
     /// Every probe since the start (or the last reset), by how late it was: for the lag percentiles over a long run.
     lags: [AtomicU64; LAG_EDGES_MS.len() + 1],
     phones: Mutex<(usize, Option<os::Activity>)>,
@@ -337,6 +348,7 @@ impl Load {
             beat: AtomicU64::new(0),
             stall: AtomicU64::new(0),
             last: Mutex::new(Sample::default()),
+            stream: Mutex::new(Level::L0),
             lags: std::array::from_fn(|_| AtomicU64::new(0)),
             phones: Mutex::new((0, None)),
         })
@@ -350,15 +362,28 @@ impl Load {
         self.status.borrow().clone()
     }
 
+    /// The level the screen's stream is held to: the load's without memory.
+    pub fn stream_level(&self) -> Level {
+        *self.stream.lock()
+    }
+
+    /// The stream's level for a level and its reasons as a pinned one gives them: none for memory alone.
+    fn stream_for(level: Level, reasons: &[String]) -> Level {
+        if reasons.iter().all(|r| r == "memory") { Level::L0 } else { level }
+    }
+
     /// Pins the level and its reasons.
     #[cfg(test)]
     pub fn set_reasons_for_test(&self, level: Level, reasons: &[&str]) {
-        self.status.send_replace(Arc::new(Status { level, reasons: reasons.iter().map(|r| r.to_string()).collect(), since: 0 }));
+        let reasons: Vec<String> = reasons.iter().map(|r| r.to_string()).collect();
+        *self.stream.lock() = Load::stream_for(level, &reasons);
+        self.status.send_replace(Arc::new(Status { level, reasons, since: 0 }));
     }
 
     /// Pins the level, as the test hook does.
     #[cfg(test)]
     pub fn set_for_test(&self, level: Level) {
+        *self.stream.lock() = level;
         self.status.send_replace(Arc::new(Status { level, reasons: vec!["test".into()], since: 0 }));
     }
 
@@ -442,6 +467,7 @@ impl Load {
         os::opt_out_of_throttling();
         let forced = forced();
         self.status.send_replace(Arc::new(Status::default()));
+        *self.stream.lock() = Level::L0;
         self.tasks.fetch_add(1, Ordering::Relaxed);
         let done = Arc::new(AtomicBool::new(false));
         self.beat.store(self.ms() + 1, Ordering::Relaxed);
@@ -473,8 +499,10 @@ impl Load {
         second.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut lags: VecDeque<f64> = VecDeque::with_capacity(LAGS_KEPT);
         let (mut machine, mut os) = (Machine::default(), os::Probe::default());
+        let mut stream = Machine::default();
         let mut last = Instant::now();
         if let Some((level, reason)) = &forced {
+            *self.stream.lock() = Load::stream_for(*level, std::slice::from_ref(reason));
             self.status.send_replace(Arc::new(Status { level: *level, reasons: vec![reason.clone()], since: crate::session::now_millis() }));
         }
         loop {
@@ -504,6 +532,9 @@ impl Load {
                         if let Some(status) = machine.feed(self.ms(), crate::session::now_millis(), &sample) {
                             tracing::info!(level = status.level.number(), reasons = ?status.reasons, lag_p95_ms = sample.lag_p95_ms, "load level");
                             self.status.send_replace(Arc::new(status));
+                        }
+                        if let Some(status) = stream.feed(self.ms(), crate::session::now_millis(), &sample.without_memory()) {
+                            *self.stream.lock() = status.level;
                         }
                     }
                 }

@@ -853,7 +853,8 @@ impl Broker {
     async fn start(&self, d: &Arc<Daemon>, phone: &Phone<'_>, req: &Value) -> Result<Value, Refused> {
         let target = req["target"].as_str().filter(|t| kelpie_screen::targets::TargetId::parse(t).is_some()).ok_or_else(|| refused("bad_request", "missing target"))?.to_string();
         let status = d.mobile.load.status();
-        let level = status.level;
+        // The stream is held by the load without memory; whether it may start, by the whole load.
+        let level = d.mobile.load.stream_level();
         if let Admit::Busy(refusal) = admit(&status, d.mobile.load.measured().as_ref()) {
             return Err(refusal);
         }
@@ -1081,7 +1082,7 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
             return;
         }
         let now = Instant::now();
-        let level = d.mobile.load.level();
+        let level = d.mobile.load.stream_level();
         let (ending, beat) = {
             let mut st = hold.state.lock();
             st.level = level;
