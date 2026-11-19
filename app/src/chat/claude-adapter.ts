@@ -200,8 +200,9 @@ function pushUser(ctx: AdapterContext, text: string, uuid?: string, images?: Use
     ctx.patch(pending.id, (i: any) => {
       i.pending = false;
       // A copy from the daemon's log that has only the pictures' names (a phone's view, a picture this window does not have): the
-      // echo's can be shown. One that has them, by path, keeps its own.
-      if (images && !i.images?.some((x: UserImage) => x.path || x.data)) i.images = images;
+      // echo's can be shown. One that has them, by path, keeps its own; an echo with no bytes either keeps the real names.
+      const viewable = (list?: UserImage[]) => !!list?.some((x) => x.path || x.data);
+      if (viewable(images) && !viewable(i.images)) i.images = images;
     });
   }
   else ctx.upsert({ kind: "user", id: uuid ?? `u-${ctx.state.items.length}`, text, ...(images ? { images } : {}) });

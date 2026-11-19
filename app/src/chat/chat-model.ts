@@ -900,8 +900,9 @@ export class ChatController {
       (e) => {
         const why = String(e);
         console.warn("the daemon did not take the message", why);
-        // Too late because the daemon wrote it already (this window answered after its wait): it is on its way, as shown.
-        if (this.loggedSent.has(qid)) return void this.mine.delete(cid);
+        // Too late because the daemon wrote it already (this window answered after its wait): it is on its way, as shown. Only for
+        // an adapter that shows a logged message itself; the others still undo what building the lines did (a parked copy).
+        if (this.adapter.sent && this.loggedSent.has(qid)) return void this.mine.delete(cid);
         // `busy`: another turn started meanwhile, which is why it is busy; the rest is as if nothing had been built.
         this.rollback(added, wasBusy, restore, !/busy/.test(why));
         // Those it asks again about. Anything else would only fail again each time it is offered, and hold up what waits behind it: a

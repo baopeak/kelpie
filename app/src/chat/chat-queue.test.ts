@@ -534,10 +534,12 @@ describe("a new Claude chat's first message, before Claude has read it", () => {
     const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
     // A message the log has, whose echo does not match (Claude rewrote it): it waits for good.
     feed(sentLine("c1", "never echoed"), { type: "result", subtype: "success", uuid: "r0" });
-    feed({ type: "system", subtype: "init", session_id: "S" });
-    ctrl.send("start", true);
-    feed(echo("start"));
+    expect(users(ctrl).map((u) => [u.text, u.pending])).toEqual([["never echoed", true]]);
+    // A turn runs (its prompt, as the CLI prints one written by someone else), and a message said during it goes into it.
+    feed({ type: "system", subtype: "init", session_id: "S" }, { type: "user", uuid: "u1", message: { role: "user", content: [{ type: "text", text: "start" }] } });
+    expect(ctrl.state.busy).toBe(true);
     ctrl.send("and this", true);
+    expect(users(ctrl).find((u) => u.text === "and this")?.pending, "steered into the turn").toBe(true);
     feed({ type: "user", uuid: "u2", isReplay: true, message: { role: "user", content: [{ type: "text", text: "and this" }] } });
     feed({ type: "result", subtype: "success", uuid: "r1" });
     expect(ctrl.state.busy).toBe(false);
