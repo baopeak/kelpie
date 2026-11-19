@@ -420,19 +420,88 @@ describe("what the log says was sent", () => {
   });
 
   it("labels the echo of a phone's message for the agents that echo it", () => {
-    const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
+    const { ctrl, feed } = setup((c) => createCodexAdapter(c));
     feed({ type: "kelpie_sent", qid: "q1", cid: "c1", by: "phone", name: "Pixel", text: "run the tests", images: [] });
     expect(ctrl.state.items.filter((i) => i.kind === "user")).toHaveLength(0);
-    feed({ type: "user", uuid: "u1", message: { role: "user", content: [{ type: "text", text: "run the tests" }] } });
+    const echo = (id: string, text: string) => ({ method: "item/started", params: { item: { type: "userMessage", id, content: [{ type: "text", text }] } } });
+    feed(echo("u1", "run the tests"));
     const user = ctrl.state.items.filter((i) => i.kind === "user") as { text: string; from?: string }[];
     expect(user).toHaveLength(1);
     expect([user[0].text, user[0].from]).toEqual(["run the tests", "Pixel"]);
     // The desktop's own messages carry no label, and the label is used once.
     feed({ type: "kelpie_sent", qid: "q2", cid: "c2", by: "desktop", name: "desktop", text: "mine", images: [] });
-    feed({ type: "user", uuid: "u2", message: { role: "user", content: "mine" } });
-    feed({ type: "user", uuid: "u3", message: { role: "user", content: "run the tests" } });
-    const all = ctrl.state.items.filter((i) => i.kind === "user") as { id: string; from?: string }[];
-    expect(all.map((i) => [i.id, i.from])).toEqual([["u1", "Pixel"], ["u2", undefined], ["u3", undefined]]);
+    feed(echo("u2", "mine"));
+    feed(echo("u3", "run the tests"));
+    const all = ctrl.state.items.filter((i) => i.kind === "user") as { from?: string }[];
+    expect(all.map((i) => i.from)).toEqual(["Pixel", undefined, undefined]);
+  });
+
+  it("shows a message Claude has not read yet as waiting, with its sender, until the echo takes its place", () => {
+    const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
+    feed({ type: "kelpie_sent", qid: "q1", cid: "c1", by: "phone", name: "Pixel", text: "run the tests", images: [] });
+    const users = () => ctrl.state.items.filter((i) => i.kind === "user") as { id: string; text: string; from?: string; pending?: boolean }[];
+    expect(users().map((u) => [u.text, u.from, u.pending])).toEqual([["run the tests", "Pixel", true]]);
+    expect(ctrl.state.busy, "the turn is on its way").toBe(true);
+    feed({ type: "user", uuid: "u1", isReplay: true, message: { role: "user", content: [{ type: "text", text: "run the tests" }] } });
+    expect(users().map((u) => [u.text, u.from, !!u.pending])).toEqual([["run the tests", "Pixel", false]]);
+    // The desktop's own message, logged by the daemon: shown once, with no label.
+    feed({ type: "kelpie_sent", qid: "q2", cid: "c2", by: "desktop", name: "desktop", text: "mine", images: [] });
+    feed({ type: "user", uuid: "u2", isReplay: true, message: { role: "user", content: "mine" } });
+    expect(users().map((u) => [u.text, u.from, !!u.pending])).toEqual([["run the tests", "Pixel", false], ["mine", undefined, false]]);
+  });
+});
+
+describe("a new Claude chat's first message, before Claude has read it", () => {
+  const sentLine = (cid: string, text: string) => ({ type: "kelpie_sent", qid: "q1", cid, by: "desktop", name: "desktop", text, images: [] });
+  const echo = (text: string) => ({ type: "user", uuid: "u1", isReplay: true, message: { role: "user", content: [{ type: "text", text }] } });
+  const users = (c: ChatController) => c.state.items.filter((i) => i.kind === "user") as { text: string; pending?: boolean }[];
+
+  it("is still there, waiting, when the transcript is loaded again from the log", async () => {
+    const { ctrl, asked, feed } = setup((c) => createClaudeAdapter(c));
+    ctrl.send("hello", true);
+    await tick();
+    ctrl.turnReady("q1", asked.enqueue[0].cid);
+    await tick();
+    feed(sentLine(asked.enqueue[0].cid, "hello"));
+    expect(users(ctrl).map((u) => [u.text, u.pending]), "the window's own copy, not a second one").toEqual([["hello", true]]);
+    // The window loads the chat again (it fell behind, the connection came back): the log is all it has.
+    (ctrl as unknown as { resetState(): void }).resetState();
+    ctrl.set("ready", true);
+    (ctrl as unknown as { isReplaying: boolean }).isReplaying = true;
+    feed(sentLine(asked.enqueue[0].cid, "hello"));
+    (ctrl as unknown as { isReplaying: boolean }).isReplaying = false;
+    expect(users(ctrl).map((u) => [u.text, u.pending])).toEqual([["hello", true]]);
+    expect(ctrl.state.busy, "Claude is about to work on it").toBe(true);
+    feed(echo("hello"), { type: "result", subtype: "success", uuid: "r1" });
+    expect(users(ctrl).map((u) => [u.text, !!u.pending])).toEqual([["hello", false]]);
+    expect(ctrl.state.busy).toBe(false);
+  });
+
+  it("shows once, not waiting, in a log replayed after it was answered", () => {
+    const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
+    (ctrl as unknown as { isReplaying: boolean }).isReplaying = true;
+    feed(sentLine("c1", "hello"), echo("hello"), { type: "result", subtype: "success", uuid: "r1" });
+    (ctrl as unknown as { isReplaying: boolean }).isReplaying = false;
+    expect(users(ctrl).map((u) => [u.text, !!u.pending])).toEqual([["hello", false]]);
+    expect(ctrl.state.busy).toBe(false);
+  });
+
+  it("keeps a picture's name until the echo brings the picture", () => {
+    const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
+    feed({ type: "kelpie_sent", qid: "q1", cid: "c1", by: "desktop", name: "desktop", text: "look", images: ["a.png"] });
+    const user = () => ctrl.state.items.find((i) => i.kind === "user") as { text: string; images?: { name?: string }[]; pending?: boolean };
+    expect([user().text, user().images, user().pending]).toEqual(["look", [{ name: "a.png" }], true]);
+    feed({ type: "user", uuid: "u1", isReplay: true, message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }, { type: "text", text: "look" }] } });
+    expect(ctrl.state.items.filter((i) => i.kind === "user")).toHaveLength(1);
+    expect([user().images, !!user().pending]).toEqual([[{ name: "a.png" }], false]);
+  });
+
+  it("is not shown twice when the log kept only part of it", () => {
+    const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
+    const long = "x".repeat(64 * 1024);
+    feed(sentLine("c1", long));
+    expect(users(ctrl), "the echo shows it, whole").toHaveLength(0);
+    expect(ctrl.state.busy).toBe(true);
   });
 
   it("tells the one who sent it when its own message shows up", () => {

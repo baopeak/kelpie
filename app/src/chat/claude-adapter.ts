@@ -173,6 +173,9 @@ export function applyTaskEvent(ctx: AdapterContext, m: any) {
 /** Our optimistic copy of a message with this text, the oldest first. */
 const waitingCopy = (ctx: AdapterContext, text: string) => ctx.state.items.find((i) => i.kind === "user" && i.pending && i.text.trim() === text.trim());
 
+/** How much of a message's text the daemon's log keeps (`kelpie_sent`, crates/kelpied/src/chat.rs `SENT_TEXT_MAX`), in bytes. */
+const SENT_TEXT_MAX = 64 * 1024;
+
 /** Tagged text (`<system-reminder>`, `<command-name>`) is Claude's, not a message, unless the person
  *  just sent exactly that: then this is its echo, and the message must not wait for ever. */
 const isClaudesOwnText = (ctx: AdapterContext, text: string) => text.startsWith("<") && !waitingCopy(ctx, text);
@@ -193,7 +196,13 @@ function pushUser(ctx: AdapterContext, text: string, uuid?: string, images?: Use
   // echo's bytes are not held for a message that has them on disk. A picture sent alone echoes with
   // no text, so its copy is the oldest one waiting with none.
   const pending = waitingCopy(ctx, text);
-  if (pending) ctx.patch(pending.id, (i: any) => (i.pending = false));
+  if (pending) {
+    ctx.patch(pending.id, (i: any) => {
+      i.pending = false;
+      // A copy from the daemon's log that could not carry them (a phone's view, a picture this window does not have).
+      if (images && !i.images?.length) i.images = images;
+    });
+  }
   else ctx.upsert({ kind: "user", id: uuid ?? `u-${ctx.state.items.length}`, text, ...(images ? { images } : {}) });
 }
 
@@ -462,6 +471,18 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
       ctx.set("busy", true);
       const pictures = (images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } }));
       ctx.write({ type: "user", message: { role: "user", content: [...pictures, ...(text.trim() ? [{ type: "text", text }] : [])] } });
+    },
+    // A message the daemon wrote to the CLI. Claude shows it only when it reads it (its echo), which can be long after: a chat
+    // still starting runs its hooks and servers first. Meanwhile a transcript built again from the log (the window fell behind,
+    // came back to the daemon, or let the daemon write the message for it) would have no trace of it, and no sign of work: it
+    // waits here, as a message sent from this window does, and the echo takes its place. The window's own copy is already there.
+    sent({ qid, text, images, from }) {
+      // Logged in part (64 KiB): its echo would not be recognised, and would show it twice.
+      if (!waitingCopy(ctx, text) && new TextEncoder().encode(text).length < SENT_TEXT_MAX) {
+        ctx.upsert({ kind: "user", id: `sent-${qid}`, text, images, from, pending: true });
+      }
+      ctx.set("busy", true);
+      return true;
     },
     // The CLI takes a message mid-turn, pictures and all, and reads it when the running tools finish, echoing it then (it
     // stays pending until that echo). If the run ends first (its own end, or a stop), the CLI starts another run for it at once.
