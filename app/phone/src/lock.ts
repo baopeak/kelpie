@@ -194,8 +194,9 @@ export class LockModel {
     this.runPending();
   }
 
-  /** The page was hidden. A ceremony's own sheet does that too, and is not leaving. */
-  left() {
+  /** The page was hidden. A ceremony's own sheet does that too, and is not leaving. `since`: when it was, if earlier than now (a page the
+   *  system suspended without saying so finds out only once it runs again; its time away counts from then). */
+  left(since?: number) {
     if (this.asking || !["open", "unlock", "enrol", "unknown"].includes(this.face)) return;
     this.covered = true;
     this.away = true;
@@ -207,7 +208,7 @@ export class LockModel {
         // Out of sight for a while is not leaving yet: the secret stays in memory, and coming back in time asks nothing.
         // The computer's idle time starts from now if the person did something it has not heard about.
         const now = this.env.now();
-        this.hiddenAt ??= now;
+        this.hiddenAt ??= Math.min(since ?? now, now);
         if (this.activeAt > this.touchedAt) this.sendTouch(now);
       } else {
         this.lockOut();

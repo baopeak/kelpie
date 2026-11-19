@@ -4,7 +4,7 @@ import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox, STATE_WORDS } from "./inbox";
 import { t } from "./i18n";
-import { canStartSessions, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, projects, remoteScreen, remoteScreens, stateBannerShown, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
+import { ask, canStartSessions, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, projects, remoteScreen, remoteScreens, stateBannerShown, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
 import { NewSessionSheet } from "./new-session";
 import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } from "./hosted";
 import { PaneTakeover } from "./pane-takeover";
@@ -125,7 +125,7 @@ function StateBanner() {
           <b>{info().label}</b> {info().detail}
           <Show when={!connected() && asOf()}><div class="asof">{asOf()}</div></Show>
           <Show when={conn().kind === "not_paired_here"}>
-            <div class="actions"><button class="btn danger" data-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) forgetDevice(); }}>{t("Forget this device")}</button></div>
+            <div class="actions"><button class="btn danger" data-forget onClick={() => { if (ask(t("Forget this pairing on this device?"))) forgetDevice(); }}>{t("Forget this device")}</button></div>
           </Show>
         </div>
       </div>
@@ -193,7 +193,7 @@ function Sheet(props: { onClose: () => void; onSettings: () => void }) {
         <div class="actions">
           <button class="btn primary" onClick={() => { link.kick(); props.onClose(); }}>{t("Reconnect now")}</button>
           <Show when={lockShown().clear} fallback={
-            <button class="btn danger" data-sheet-forget onClick={() => { if (confirm(t("Forget this pairing on this device?"))) { forgetDevice(); props.onClose(); } }}>{t("Forget this device")}</button>
+            <button class="btn danger" data-sheet-forget onClick={() => { if (ask(t("Forget this pairing on this device?"))) { forgetDevice(); props.onClose(); } }}>{t("Forget this device")}</button>
           }>
             <button class="btn" data-sheet-settings onClick={() => { props.onClose(); props.onSettings(); }}>{t("Settings")}</button>
           </Show>

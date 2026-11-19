@@ -341,7 +341,7 @@ async fn a_dropped_link_pauses_the_helper_and_keeps_the_screen_for_the_same_devi
     let sc = r.start().await;
     r.send(&sc, &video(1, true, 100));
     r.frames();
-    // The same connection asking again (a hello after an unlock) changes nothing.
+    // The same connection asking again (a hello after an unlock) keeps the screen; the picture starts again from a keyframe.
     r.verb("sc_rebind", json!({"sc": sc})).await.unwrap();
     r.d.screen.link_closed(&r.d, 1);
     assert_eq!(r.told_now("screen.pause").await[0]["paused"], true);

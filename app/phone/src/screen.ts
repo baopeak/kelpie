@@ -470,6 +470,23 @@ export function followHostCursor(drawn: CursorPos, tapAt: { x: number; y: number
   const next = reconcileCursor(drawn, host, now, echo);
   return { drawn: next.drawn, echo: next.echo, tapAt: idle ? { x: next.drawn.x, y: next.drawn.y } : tapAt };
 }
+/** A decoder given a frame this long ago (ms) that has put out no picture since is wedged: it neither decodes nor fails (an iPhone's
+ *  hardware decoder after the phone slept), so its own error never comes. Checked on a timer, not on the next frame: a decoder that never
+ *  answers leaves frames unacknowledged, and the computer then stops sending. */
+export const DECODER_WEDGED_MS = 1500;
+
+/** Whether a decoder is wedged: the first frame given to it since its last picture at `fedAt` (null: none), its last picture out at
+ *  `outputAt` (null: none yet), and now `now`. */
+export function decoderWedged(fedAt: number | null, outputAt: number | null, now: number): boolean {
+  return fedAt !== null && (outputAt === null || outputAt < fedAt) && now - fedAt >= DECODER_WEDGED_MS;
+}
+
+/** When a frame given to a decoder now starts the wait for its next picture: the first frame since the last picture (an earlier one
+ *  still unanswered keeps its time). */
+export function fedSince(fedAt: number | null, outputAt: number | null, now: number): number {
+  return fedAt === null || (outputAt !== null && outputAt >= fedAt) ? now : fedAt;
+}
+
 /** A decoder this many chunks behind its own usual queue is behind. */
 export const BACKLOG_OVER = 2;
 /** Its usual queue: the least seen over this long (some Android decoders always keep two or three). */
@@ -1481,6 +1498,11 @@ export class ScreenSession {
   /** A media message, from the link or peer to peer: whether it goes to the view. A video frame older than one already taken does not (in a switch
    *  the old way's last frames can come after the new way's first, which is a keyframe). */
   incoming(bytes: Uint8Array): boolean {
+    // Only a screen starting or shown takes media. A closed one's last frames still come (a page that slept reads all that was sent
+    // meanwhile, after it closed the screen): taken, they would put the order past the next screen's frames, which count from 0
+    // again, and that screen would show nothing and ask for keyframes for good.
+    const phase = this.state?.phase;
+    if (phase !== "starting" && phase !== "live" && phase !== "frozen") return false;
     const video = bytes[1] === KIND_VIDEO;
     if (video) {
       const m = parseMedia(bytes);
@@ -1499,7 +1521,12 @@ export class ScreenSession {
   }
 
   private thawed() {
-    if (this.state?.phase === "frozen") this.patch({ phase: "live", graceLeft: null });
+    if (this.state?.phase !== "frozen") return;
+    this.patch({ phase: "live", graceLeft: null });
+    // Heard again on the same connection (it never dropped, so there was no rebind): what the computer sent meanwhile may never have
+    // arrived (a phone asleep behind the relay), and it would wait for those frames' acknowledgements for good, sending nothing and
+    // dropping every touch as onto a stale picture. A keyframe makes the helper give them up, and its acknowledgement clears them all.
+    this.needKeyframe();
   }
 
   /** A video frame captured `captureMs` after the stream started was shown: how old it was, by the computer's clock. */

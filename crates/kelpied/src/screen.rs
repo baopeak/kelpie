@@ -8,8 +8,8 @@
 //! - **A hold** is keyed by its device, the link connection and the provider's connection, rests on a grant flag (`Mobile::grant`) that a
 //!   revoke, a lower permission, the app lock and phone access going off clear at once, and on the record as it is now (`control_held`, looked
 //!   at again by its task); every input checks it, and its own task lets go within `WATCH`. A dropped link keeps it `SCREEN_REBIND_WINDOW` for
-//!   the same device's next connection only (the same connection asking again is no change; a newer connection of the device takes it over at
-//!   once, `mobile::connection_opened`). **One screen at a time**: a start reserves the screen for its whole length, so a second one that comes
+//!   the same device's next connection only (the same connection asking again keeps it, its picture started again from a keyframe; a newer
+//!   connection of the device takes it over at once, `mobile::connection_opened`). **One screen at a time**: a start reserves the screen for its whole length, so a second one that comes
 //!   meanwhile is refused as in use, and the first holder keeps it.
 //! - **Flow:** the link is TCP, so nothing is lost and nothing should pile up. The helper encodes only while fewer frames than its window wait
 //!   for the phone's acknowledgement (`sc_ack`, forwarded with its round trip as `screen.flow`, which also says how long the link's window has
@@ -19,6 +19,10 @@
 //!   more than the window's bytes wait, video is dropped up to the next keyframe, which is asked for at most once a second: a decoder given a
 //!   frame whose reference never came would show garbage. **What is dropped is said**: `screen.flow` carries `dropped_through`, so the helper
 //!   never waits for an acknowledgement that cannot come, and `lost_tiles`, since a dropped frame may have carried the unpaint of a crisp tile.
+//!   What the phone may never have got is given up here as well (`forget_in_flight`): when it asks for a keyframe, when it asks for the screen
+//!   again on the same connection, and when a frame has waited `LOST_AFTER` (behind the relay a phone asleep loses what was sent meanwhile
+//!   while this side's connection stays up). Otherwise those frames would fill the window for good and hold back the very keyframe that ends
+//!   the wait, and the picture, stale, would drop every touch too.
 //!   Tiles go only while the lane has room for video beside them; the cursor never waits behind video: its latest place goes in a slot the
 //!   writer takes before the media lane (`mobile::CursorSlot`). `screen.flow` also carries the bytes on the wire for the bytes of media (the link
 //!   pads every message), so the encoder is asked for what the link really carries.
@@ -73,6 +77,9 @@ pub const STALE_AFTER: Duration = Duration::from_secs(2);
 /// Room the media lane keeps for video: a tile goes only with at least this many places free.
 pub const ROOM_FOR_VIDEO: usize = 3;
 const KEY_GAP: Duration = Duration::from_secs(1);
+/// A frame unacknowledged this long never reached the phone (a phone asleep behind the relay, whose connection here stayed up): what is in
+/// flight is given up and a keyframe asked for, as when the phone itself asks for one.
+const LOST_AFTER: Duration = Duration::from_secs(10);
 /// Starting the helper and its first look can take a while on a busy machine. The app answers within its own shorter budget.
 pub const START_LIMIT: Duration = Duration::from_secs(15);
 /// New screens are refused with less memory free than this (MiB): what a stream takes on this computer, with room to spare for the rest of
@@ -445,6 +452,19 @@ impl Broker {
         }
     }
 
+    /// What the phone has not acknowledged is given up: it said it lost it (it asked for a keyframe, or for the screen again on the same
+    /// connection), or it waited `LOST_AFTER`. The helper gives it up too on the keyframe asked for next (`dropped_through` says how far).
+    /// Without it a window full of frames the phone never got would hold back even that keyframe (the byte check in `media`), for good, and
+    /// keep the picture stale, so that every touch was dropped too.
+    fn forget_in_flight(st: &mut State) {
+        if !st.sent.is_empty() {
+            st.dropped_through = st.dropped_through.max(st.last_seq);
+        }
+        st.sent.clear();
+        st.unacked = 0;
+        st.full_since = None;
+    }
+
     fn set_gone(st: &mut State) {
         st.conn = None;
         st.gone_at = Some(Instant::now());
@@ -760,6 +780,8 @@ impl Broker {
             "sc_key" => {
                 let hold = self.held_here(&phone, req)?;
                 let mut st = hold.state.lock();
+                // The phone will show nothing before the keyframe: what is on its way is of no use to it, and may never arrive.
+                Self::forget_in_flight(&mut st);
                 self.ask_key(d, &hold, &mut st);
                 Ok(None)
             }
@@ -1011,8 +1033,11 @@ impl Broker {
         }
         let params = {
             let mut st = hold.state.lock();
-            // The connection that holds it already (a hello after an unlock, on the same connection): nothing to do.
+            // The connection that holds it already (a hello after an unlock, a phone that slept and woke on the same connection): it keeps the
+            // screen, but what was sent meanwhile may never have reached it, so the picture starts again from a keyframe.
             if st.conn.as_ref().is_some_and(|l| l.conn == phone.conn) {
+                Self::forget_in_flight(&mut st);
+                self.ask_key(d, &hold, &mut st);
                 return Ok(());
             }
             let window = st.rebind;
@@ -1086,6 +1111,10 @@ async fn watch(d: Arc<Daemon>, hold: Arc<Hold>) {
         let (ending, beat) = {
             let mut st = hold.state.lock();
             st.level = level;
+            if st.sent.front().is_some_and(|(_, at, _)| now.duration_since(*at) >= LOST_AFTER) {
+                Broker::forget_in_flight(&mut st);
+                d.screen.ask_key(&d, &hold, &mut st);
+            }
             if st.gone_at.is_some_and(|at| now.duration_since(at) >= st.rebind) {
                 (Some("link_lost"), false)
             } else if now.duration_since(st.last_input) >= st.idle {
