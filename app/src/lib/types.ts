@@ -551,6 +551,10 @@ export interface AppState {
   phoneStartsSeen?: number;
   /** Tabs of sub-sessions were folded into their parent's tab (done once, when sub-sessions moved into the parent's pane). */
   subTabsFolded?: boolean;
+  /** The sidebar place (a creation time, ms) of a session that took over another's conversation (a switch between terminal and
+   *  chat): the replaced session's, so the conversation keeps its row's place. Only such sessions are listed; dropped when they
+   *  close. */
+  sessionSince?: Record<string, number>;
   /** Diff review notes by project id: only those of a daemon older than API 13 (it keeps them from there). */
   reviewNotes: Record<string, ReviewNote[]>;
   /** Prompts sent from the composer, newest first, by project id. */

@@ -25,6 +25,7 @@ import { isLimited } from "../lib/limits";
 import { commandHint } from "../lib/commands";
 import { composerRequest, toggleComposer } from "../lib/composer-state";
 import { SubSessionsBar } from "./sub-sessions-strip";
+import { pulseClass } from "../lib/reveal-pulse";
 import { openContextMenu } from "./context-menu";
 import { pathMenuItems } from "./path-menu";
 
@@ -104,6 +105,8 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
       style={{ "--host-color": hostColor(), "--pane-color": session() ? kindInfo(session()!.kind).color : undefined }} onPointerDown={focus}>
       {/* Above the pane's opaque children (::before / ::after mark broadcast and focus). */}
       <Show when={hostColor()}><div class="pane-host-stripe" /></Show>
+      {/* A moment's glow when this pane's session was just revealed (reveal-pulse.ts): where a click on a row or chip landed. */}
+      <div class={`pane-pulse${pulseClass(props.pane.sessionId)}`} aria-hidden="true" />
       <Show when={!hasHeader()}>
         <div class="pane-tools" data-hints>{tools()}</div>
       </Show>

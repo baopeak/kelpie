@@ -282,6 +282,29 @@ input, textarea, select { font: inherit; color: var(--text); }
 .session-row .state-label { font-weight: 600; }
 .session-row .state-label.waiting { color: var(--waiting); }
 .session-row .state-label.error { color: var(--danger); }
+/* The session on screen (the focused pane's): an accent wash and edge, the name in bold. A folded parent whose hidden child is on
+   screen keeps the edge only. */
+.session-row { position: relative; isolation: isolate; }
+.session-row.selected { color: var(--text); background: color-mix(in srgb, var(--accent) 15%, var(--bg-active)); box-shadow: inset 2px 0 0 var(--accent); }
+.session-row.selected:hover { background: color-mix(in srgb, var(--accent) 20%, var(--bg-active)); }
+.session-row.selected .name { font-weight: 600; }
+.session-row.holds-selected { color: var(--text); box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+/* Reveal pulse (reveal-pulse.ts): a short glow on the row and the pane a click landed on. It fades once, opacity only (no layout,
+   no repaint per frame); the a/b names alternate so a second reveal restarts it. Reduced motion: a steady mark for the moment. */
+.session-row:is(.reveal-pulse-a, .reveal-pulse-b)::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none; opacity: 0;
+  background: color-mix(in srgb, var(--accent) 22%, transparent); box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.session-row.reveal-pulse-a::after { animation: reveal-pulse-a .9s ease-out; }
+.session-row.reveal-pulse-b::after { animation: reveal-pulse-b .9s ease-out; }
+.pane-pulse { position: absolute; inset: 0; z-index: 6; border-radius: inherit; pointer-events: none; opacity: 0; box-shadow: inset 0 0 0 2px var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.pane-pulse.reveal-pulse-a { animation: reveal-pulse-a .9s ease-out; }
+.pane-pulse.reveal-pulse-b { animation: reveal-pulse-b .9s ease-out; }
+@keyframes reveal-pulse-a { 0% { opacity: 0; } 18% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes reveal-pulse-b { 0% { opacity: 0; } 18% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .session-row:is(.reveal-pulse-a, .reveal-pulse-b)::after, .pane-pulse:is(.reveal-pulse-a, .reveal-pulse-b) { animation: none; opacity: 1; }
+}
 .sidebar-footer { border-top: 1px solid var(--border); padding: 8px; display: flex; gap: 4px; }
 
 /* status dots: one shape per state — quiet dot (idle), spinning arc (working), "!" with a soft
@@ -1634,8 +1657,25 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 }
 
 /* ---------- sub-sessions ---------- */
-/* Sessions an agent opened sit under its row, behind a thin guide line (the indent builds up level by level). */
-.sub-list { margin: 0 0 2px 12px; padding-left: 8px; border-left: 1px solid var(--border); }
+/* A session that opened others, with its whole tree, is one card: a faint fill and edge set the group apart from the top-level row
+   after it; the edge takes the accent while the session on screen is one of the group. */
+.session-family { margin: 3px 0; padding-bottom: 2px; border-radius: 8px; background: color-mix(in srgb, var(--text) 3.5%, transparent); box-shadow: inset 0 0 0 1px var(--border); }
+.session-family:has(.session-row:is(.selected, .holds-selected)) { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.session-solo { display: contents; }
+/* Sessions an agent opened sit under its row on tree lines (├ └), the line starting under the parent's fold arrow; each level
+   indents the same. A node is a grid: elbow | row, then rail | its own children, so the elbow meets the middle of its row whatever
+   the row's height (one line or two, compact or not). */
+.sub-list { margin: 0 0 0 10px; }
+.sub-node .sub-list { margin-left: 7px; }
+.sub-node { --tree-line: var(--border-strong); display: grid; grid-template-columns: 12px minmax(0, 1fr); }
+.sub-node > .session-row, .sub-node > .sub-list { grid-column: 2; }
+.sub-node > .sub-list { grid-row: 2; }
+.sub-elbow { grid-column: 1; grid-row: 1; position: relative; }
+.sub-elbow::before { content: ""; position: absolute; left: 5px; top: 0; height: 50%; border-left: 1px solid var(--tree-line); }
+.sub-node:not(:last-child) > .sub-elbow::before { height: 100%; }
+.sub-elbow::after { content: ""; position: absolute; left: 5px; top: 50%; width: 9px; border-top: 1px solid var(--tree-line); }
+.sub-rail { grid-column: 1; grid-row: 2; }
+.sub-node:not(:last-child) > .sub-rail { margin-left: 5px; border-left: 1px solid var(--tree-line); }
 .sub-chev { width: 14px; height: 16px; margin-right: -6px; padding: 0; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; display: inline-grid; place-items: center; flex: none; }
 .sub-chev:hover { color: var(--text); }
 .sub-badge { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--on-status); background: var(--exited); }
@@ -1658,6 +1698,14 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .sub-chip.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--bg-elev-2)); }
 .sub-chip.active .sub-chip-name { font-weight: 600; }
 .sub-chip-depth { flex: none; color: var(--text-faint); }
+/* "Claude › child · sub-session" before the chips while a sub-session is on screen; the names above it lead back up. */
+.sub-crumbs { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 45%; flex: 0 1 auto; padding-right: 8px; border-right: 1px solid var(--border); white-space: nowrap; }
+.sub-crumb { min-width: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; padding: 0; border: 0; background: none; font: inherit; color: var(--text-dim); }
+button.sub-crumb { cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 2px; }
+button.sub-crumb:hover { color: var(--text); }
+.sub-crumb.here { color: var(--text); font-weight: 600; }
+.sub-crumb-sep { flex: none; color: var(--text-faint); }
+.sub-crumb-tag { flex: none; padding: 0 6px; border-radius: 8px; font-size: 10.5px; color: var(--text-dim); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .sub-close { margin-left: auto; flex: none; }
 /* The approval card: bottom right, over the window without covering a pane's controls. */
 .sub-cards { position: fixed; right: 16px; bottom: 36px; z-index: 119; width: min(430px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; }
@@ -1672,8 +1720,9 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .sub-cards-more:hover { color: var(--text); }
 .inbox .sub-card { margin: 4px 10px; box-shadow: none; }
 /* Nested rows give the name the room: smaller indent, no age (it is in the tooltip). */
-.sub-list { margin-left: 6px; padding-left: 5px; }
 .sub-list .session-row { gap: 5px; padding-left: 5px; padding-right: 6px; }
+/* Compact rows keep the nested indent too, so a child's fold arrow stays over its children's tree line. */
+:root[data-density="compact"] .sub-list .session-row { padding-left: 5px; padding-right: 6px; }
 .sub-list .session-row .age:not(.state-label) { display: none; }
 /* "Later" sits at the card's top right (last in the tab order, after Deny). */
 .sub-card { position: relative; }

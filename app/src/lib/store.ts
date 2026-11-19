@@ -27,6 +27,7 @@ import { confirmDialog } from "./confirm-dialog";
 import { createHandOver, type ShutdownAnswer } from "./hand-over";
 import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, familyRoot, folderName, sessionDepthTree, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
 import { remember } from "./prompt-history";
+import { pulseSession } from "./reveal-pulse";
 import { defaultSettings } from "./default-settings";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 
@@ -305,11 +306,41 @@ function createAppStore() {
     for (const s of list) map[s.id] = s;
     setSessions(reconcile(map));
     setSessionsKnown(true);
+    // Places kept for sessions the daemon no longer has go (the list is its whole list).
+    const kept = state.sessionSince;
+    if (kept && canPersist() && Object.keys(kept).some((id) => !map[id])) {
+      update((st) => {
+        for (const id of Object.keys(st.sessionSince ?? {})) if (!map[id]) delete st.sessionSince![id];
+      });
+    }
+  }
+
+  // ---------- the order of sessions ----------
+  /** Where a session sorts among its project's (and among its parent's children): its creation time, or, for one that took over
+   *  another's conversation (a switch between terminal and chat), the place of the session it replaced. Nothing else moves a
+   *  session: not its activity, its status, the panes that show it, or the sessions opened after it. */
+  const sessionSince = (s: SessionInfo) => state.sessionSince?.[s.id] ?? s.created_at;
+
+  /** Session `toId` takes over `fromId`'s conversation: it keeps `fromId`'s place. Called before `toId` is listed, so its row
+   *  never shows at the bottom first. */
+  function inheritPlace(fromId: string, toId: string) {
+    const from = sessions[fromId];
+    if (!from || fromId === toId) return;
+    const since = sessionSince(from);
+    update((st) => {
+      st.sessionSince = { ...(st.sessionSince ?? {}), [toId]: since };
+    });
+  }
+
+  /** The place kept for `id` goes (the session it was kept for was never created, or closed). */
+  function forgetPlace(id: string) {
+    if (state.sessionSince?.[id] !== undefined) update((st) => void delete st.sessionSince![id]);
   }
 
   // ---------- sub-sessions ----------
-  /** Which sessions nest under which. Read only through `parent` and the list of ids, so a status tick re-runs nothing here. */
-  const sessionTree = createMemo(() => buildSessionTree(Object.values(sessions)));
+  /** Which sessions nest under which, children in their stable order. Read only through `parent`, the ids and the order, so a
+   *  status tick re-runs nothing here. */
+  const sessionTree = createMemo(() => buildSessionTree(Object.values(sessions), sessionSince));
 
   /** Inbox entry of each open request, to mark it read when the request is gone. */
   const requestInbox = new Map<string, string>();
@@ -504,6 +535,7 @@ function createAppStore() {
           const shown = !closingFromPane.delete(s.id) && paneLocation(s.id);
           const back = shown && familyFallback(s);
           setSessions(produce((m) => delete m[s.id]));
+          forgetPlace(s.id);
           if (shown && back) updatePane(shown.projectId, shown.tabId, shown.paneId, { kind: back.chat ? "chat" : "terminal", sessionId: back.id });
           if (state.floating?.sessions.includes(s.id)) {
             update((st) => {
@@ -1362,8 +1394,39 @@ function createAppStore() {
       .map((x) => x.handle);
   });
 
-  /** Reveals a session: switches project/tab, or opens it in a new tab if not in any layout. */
-  function revealSession(sessionId: string) {
+  /** The session the keyboard is on: the one in the focused pane of the open project's tab (the sidebar marks its row). */
+  const focusedSession = createMemo(() => {
+    const pid = state.activeProject;
+    const tab = pid ? activeTab(pid) : undefined;
+    if (!tab) return null;
+    return (findPane(tab.root, tab.focus) ?? allPanes(tab.root)[0])?.sessionId ?? null;
+  });
+
+  /** The keyboard goes to `sessionId`'s input once its pane shows it: the terminal, or a chat's message field. Never from behind
+   *  a dialog or overlay. */
+  function focusSessionInput(sessionId: string) {
+    requestAnimationFrame(() => {
+      if (overlay() !== null) return;
+      const loc = paneLocation(sessionId);
+      if (!loc || loc.projectId !== state.activeProject) return;
+      const pane = document.querySelector<HTMLElement>(`.pane[data-pane="${CSS.escape(loc.paneId)}"]`);
+      if (!pane) return;
+      if (sessions[sessionId]?.chat) pane.querySelector<HTMLTextAreaElement>(".chat-composer textarea")?.focus();
+      else peekView(sessionId)?.focus();
+    });
+  }
+
+  /** What a click on a session does (its sidebar row): shows it, and the keyboard goes to it. */
+  function goToSession(sessionId: string) {
+    revealSession(sessionId, { pulse: true });
+    focusSessionInput(sessionId);
+  }
+
+  /** Reveals a session: switches project/tab, or opens it in a new tab if not in any layout. When the view moves to it (or
+   *  `pulse`, a click on it), its pane and sidebar row pulse for a moment, so the eye follows where the window went; revealing
+   *  the session already on screen (opening its composer, sending from it) plays nothing. */
+  function revealSession(sessionId: string, opts: { pulse?: boolean } = {}) {
+    if (opts.pulse || focusedSession() !== sessionId) pulseSession(sessionId);
     const loc = paneLocation(sessionId);
     recordRecent("session", sessionId, sessions[sessionId]?.project_id ?? loc?.projectId ?? state.activeProject ?? "");
     if (loc) {
@@ -1931,7 +1994,7 @@ function createAppStore() {
   return {
     state, sessions, connected, sessionsKnown, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
     init, activeProject, workspace, activeTab, addProject, removeProject, restoreProjects, renameProject, moveProject, switchProject,
-    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, openFile, closePane,
+    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, forgetPlace, openFile, closePane,
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,
