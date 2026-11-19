@@ -1036,8 +1036,10 @@ def step_mouse(rig, phone):
         phone.js("(k) => document.querySelector(`.keybar button[aria-label=\"${k}\"]`).click()", f"F{n}")
         time.sleep(0.15)
     time.sleep(0.6)
-    got = [e["key"] for e in rig.events("fkey", since)]
-    check("F1 to F12 from the key bar reach the window", got == [f"F{n}" for n in range(1, 13)], got)
+    phone.js("document.querySelector('.keybar button[aria-label=\"Escape\"]').click()")
+    sent = rig.events("fkey_sent", since)
+    got = [e["key"] for e in sent]
+    check("F1 to F12 from the key bar are pressed, each with the shared window in front", got == [f"F{n}" for n in range(1, 13)] and all(e["foreground"] for e in sent), sent)
     phone.shot("mouse-bar")
 
 

@@ -209,6 +209,10 @@ user32.CallNextHookEx.restype = ctypes.c_ssize_t
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, ctypes.c_void_p, wt.DWORD]
 user32.SetWindowsHookExW.restype = ctypes.c_void_p
 last_human = [0.0]
+user32.GetForegroundWindow.restype = ctypes.c_void_p
+# The top-level window's handle, read once Tk has made it (never from inside a hook: Tk is not called there).
+frame_hwnd = [None]
+root.after(300, lambda: frame_hwnd.__setitem__(0, int(root.wm_frame(), 16)))
 
 
 class LL(ctypes.Structure):
@@ -236,7 +240,11 @@ def mouse_hook(code, wparam, lparam):
 @HOOKPROC
 def key_hook(code, wparam, lparam):
     if code >= 0:
-        human("key", ctypes.cast(lparam, ctypes.POINTER(LL)).contents.flags & 0x10)  # LLKHF_INJECTED
+        k = ctypes.cast(lparam, ctypes.POINTER(LL)).contents
+        human("key", k.flags & 0x10)  # LLKHF_INJECTED
+        # An injected function key going down, as the system takes it (F10 opens the window's menu mode, which keeps Tk's own events from it).
+        if k.flags & 0x10 and wparam in (0x100, 0x104) and 0x70 <= k.a <= 0x7B:
+            note("fkey_sent", key=f"F{k.a - 0x6F}", foreground=user32.GetForegroundWindow() == frame_hwnd[0])
     return user32.CallNextHookEx(None, code, wparam, lparam)
 
 
