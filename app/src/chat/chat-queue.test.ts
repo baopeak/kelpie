@@ -486,22 +486,74 @@ describe("a new Claude chat's first message, before Claude has read it", () => {
     expect(ctrl.state.busy).toBe(false);
   });
 
-  it("keeps a picture's name until the echo brings the picture", () => {
+  it("shows a picture's name until the echo brings the picture itself", () => {
     const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
     feed({ type: "kelpie_sent", qid: "q1", cid: "c1", by: "desktop", name: "desktop", text: "look", images: ["a.png"] });
-    const user = () => ctrl.state.items.find((i) => i.kind === "user") as { text: string; images?: { name?: string }[]; pending?: boolean };
+    const user = () => ctrl.state.items.find((i) => i.kind === "user") as { text: string; images?: { name?: string; data?: string }[]; pending?: boolean };
     expect([user().text, user().images, user().pending]).toEqual(["look", [{ name: "a.png" }], true]);
     feed({ type: "user", uuid: "u1", isReplay: true, message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }, { type: "text", text: "look" }] } });
     expect(ctrl.state.items.filter((i) => i.kind === "user")).toHaveLength(1);
-    expect([user().images, !!user().pending]).toEqual([[{ name: "a.png" }], false]);
+    expect([user().images?.length, !!user().images?.[0].data, !!user().pending]).toEqual([1, true, false]);
   });
 
   it("is not shown twice when the log kept only part of it", () => {
     const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
-    const long = "x".repeat(64 * 1024);
-    feed(sentLine("c1", long));
+    // As the daemon cuts it: at 64 KiB, back to the start of a character, so a few bytes short of the limit.
+    const cut = "ệ".repeat(Math.floor((64 * 1024) / 3));
+    expect(new TextEncoder().encode(cut).length).toBeLessThan(64 * 1024);
+    feed(sentLine("c1", cut));
     expect(users(ctrl), "the echo shows it, whole").toHaveLength(0);
     expect(ctrl.state.busy).toBe(true);
+    feed(echo(cut + "ệ".repeat(100)));
+    expect(users(ctrl)).toHaveLength(1);
+  });
+
+  it("stays as it is when the same log line comes again after the echo", () => {
+    const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
+    feed(sentLine("c1", "hello"), echo("hello"), { type: "result", subtype: "success", uuid: "r1" });
+    feed(sentLine("c1", "hello"));
+    expect(users(ctrl).map((u) => [u.text, !!u.pending])).toEqual([["hello", false]]);
+    expect(ctrl.state.busy).toBe(false);
+  });
+
+  it("is not taken off the screen when the daemon wrote it before this window's lines came", async () => {
+    const { ctrl, asked, feed, daemonSays } = setup((c) => createClaudeAdapter(c));
+    ctrl.send("hello", true);
+    await tick();
+    daemonSays.error = "too_late";
+    ctrl.turnReady("q1", asked.enqueue[0].cid);
+    feed(sentLine(asked.enqueue[0].cid, "hello"));
+    await tick();
+    await tick();
+    expect(users(ctrl).map((u) => [u.text, u.pending])).toEqual([["hello", true]]);
+    expect(ctrl.state.busy).toBe(true);
+    expect(asked.write.filter((w) => w.lines === null), "no second answer to the offer").toHaveLength(0);
+  });
+
+  it("does not keep the chat working for a message whose echo never came, once a steered one was read", () => {
+    const { ctrl, feed } = setup((c) => createClaudeAdapter(c));
+    // A message the log has, whose echo does not match (Claude rewrote it): it waits for good.
+    feed(sentLine("c1", "never echoed"), { type: "result", subtype: "success", uuid: "r0" });
+    feed({ type: "system", subtype: "init", session_id: "S" });
+    ctrl.send("start", true);
+    feed(echo("start"));
+    ctrl.send("and this", true);
+    feed({ type: "user", uuid: "u2", isReplay: true, message: { role: "user", content: [{ type: "text", text: "and this" }] } });
+    feed({ type: "result", subtype: "success", uuid: "r1" });
+    expect(ctrl.state.busy).toBe(false);
+  });
+
+  it("labels a phone's message when a copy of the same text already waits", async () => {
+    const { ctrl, asked, feed } = setup((c) => createClaudeAdapter(c));
+    ctrl.send("yes", true);
+    await tick();
+    ctrl.turnReady("q1", asked.enqueue[0].cid);
+    feed(sentLine(asked.enqueue[0].cid, "yes"));
+    feed({ type: "kelpie_sent", qid: "q2", cid: "c2", by: "phone", name: "Pixel", text: "yes", images: [] });
+    feed({ type: "user", uuid: "u1", isReplay: true, message: { role: "user", content: [{ type: "text", text: "yes" }] } });
+    feed({ type: "user", uuid: "u2", isReplay: true, message: { role: "user", content: [{ type: "text", text: "yes" }] } });
+    const all = ctrl.state.items.filter((i) => i.kind === "user") as { from?: string }[];
+    expect(all.map((u) => u.from)).toEqual([undefined, "Pixel"]);
   });
 
   it("tells the one who sent it when its own message shows up", () => {
