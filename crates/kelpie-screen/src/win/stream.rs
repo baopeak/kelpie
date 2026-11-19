@@ -371,7 +371,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let now_ms = || started_at.elapsed().as_millis() as u64;
     let mut ctl = Controller::new(src, window, false, 0);
     ctl.set_level(opts.level, 0);
-    // Started on a loaded machine (L2, or an L3 that memory causes with enough free; the daemon refuses any other L3): the cheapest picture first.
+    // Started on a loaded machine (L2 for the CPU, lag or heat; the daemon tells the helper the level without memory): the cheapest picture first.
     if opts.level >= 2 {
         ctl.start_low();
     }

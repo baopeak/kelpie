@@ -1168,11 +1168,12 @@ fn a_screen_is_gated_by_the_memory_it_needs_not_by_a_share_of_all_memory() {
 #[tokio::test]
 async fn a_loaded_computer_starts_the_screen_low_and_an_overloaded_one_says_why() {
     let r = rig();
+    // L2 for memory alone starts the screen, at full quality: memory never lowers the picture (the helper hears L0).
     r.d.mobile.load.set_reasons_for_test(Level::L2, &["memory"]);
     r.d.mobile.load.set_sample_for_test(measured(11.0, 800, 30.0, 5.0));
     r.start().await;
     let asked = r.asked("screen.start");
-    assert_eq!(asked.last().map(|p| p["level"].clone()), Some(json!(2)), "the helper hears L2 and starts at its lowest rung: {asked:?}");
+    assert_eq!(asked.last().map(|p| p["level"].clone()), Some(json!(0)), "memory alone: the helper hears L0: {asked:?}");
     // Too little memory free for a stream: refused with the reason and the numbers, and nothing is asked of the app.
     r.d.mobile.load.set_sample_for_test(measured(6.0, 450, 30.0, 5.0));
     let refusal = r.verb("sc_start", json!({"target": "w:66:7"})).await.unwrap_err();
@@ -1186,13 +1187,13 @@ async fn a_loaded_computer_starts_the_screen_low_and_an_overloaded_one_says_why(
 }
 
 #[tokio::test]
-async fn a_large_computer_at_l3_for_memory_alone_starts_the_screen_low() {
-    // 7 % free of 16 GB is L3 for memory, with 1.1 GB free: the screen starts, and the helper hears L3, so it starts at its lowest rung under
-    // L3's cap and pauses after five minutes of it, as a stream that reaches L3 does.
+async fn a_large_computer_at_l3_for_memory_alone_starts_the_screen_at_full_quality() {
+    // 7 % free of 16 GB is L3 for memory, with 1.1 GB free: the screen starts, and the helper hears L0, since memory alone never lowers the
+    // picture (nor pauses it).
     let r = rig();
     r.d.mobile.load.set_reasons_for_test(Level::L3, &["memory"]);
     r.d.mobile.load.set_sample_for_test(measured(7.0, 1150, 30.0, 5.0));
     r.start().await;
     let asked = r.asked("screen.start");
-    assert_eq!(asked.last().map(|p| p["level"].clone()), Some(json!(3)), "{asked:?}");
+    assert_eq!(asked.last().map(|p| p["level"].clone()), Some(json!(0)), "{asked:?}");
 }

@@ -373,7 +373,7 @@ async def phones_on(s, call):
 def start(s, daemon_env=None):
     """This script's daemon (with a fake Tailscale CLI), its tauri-driver and the app; checks the app is connected to this daemon."""
     s.ts_bin, s.ts_state, s.ts_log = ps.write_fake_tailscale(s.work)
-    # The load is pinned (calm unless the script asks for another level, `KELPIE_E2E_LOAD`, such as `L2:memory`).
+    # The load is pinned (calm unless the script asks for another level, `KELPIE_E2E_LOAD`, such as `L2:cpu`).
     env = {"KELPIE_LOAD_FORCE": os.environ.get("KELPIE_E2E_LOAD", "L0:calm"), "KELPIE_E2E": "1", "KELPIE_TAILSCALE_BIN": s.ts_bin}
     env.update(daemon_env or {})
     d = ps.Daemon(s.kelpied, env=env).start()

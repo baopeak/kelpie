@@ -110,7 +110,7 @@ class Rig:
         os.environ.pop("KELPIE_E2E", None)
         os.environ.pop("KELPIE_ALLOW_REAL_DAEMON", None)
         # The daemon first, with no KELPIE_E2E (the production relay); its load is measured, as on the owner's computer.
-        self.d = ps.Daemon(self.kelpied).start()
+        self.d = ps.Daemon(self.kelpied, env={"KELPIE_LOAD_FORCE": LOAD[0]} if LOAD[0] else None).start()
         if self.d.call("daemon.info").get("test_user_presence") != "approve":
             raise SystemExit("the daemon would raise a real verification prompt: use a debug build")
         # The app (through tauri-driver) with KELPIE_E2E: agent configs read only, nothing opened in Explorer.
@@ -917,6 +917,31 @@ def step_ramp(rig, phone, secs=60):
 
 
 VIA = ["auto"]
+LOAD = [None]
+
+
+def step_memory(rig, phone, secs=15):
+    """With the daemon's load held at L2 for memory alone (`--load L2:memory`), a moving picture keeps its quality: no "computer busy" on the
+    quality line, and the window's full height (the reduced rungs scale it down). The frame rate seen is measured, not checked: in headless
+    Chrome on this computer the decoder, not the load, sets it."""
+    load = rig.d.call("mobile.load")
+    open(rig.events_path + ".anim", "w").close()
+    try:
+        time.sleep(3)
+        a = (phone.times() or {}).get("presentInterval", {}).get("n", 0)
+        time.sleep(secs)
+        b = (phone.times() or {}).get("presentInterval", {}).get("n", 0)
+    finally:
+        os.remove(rig.events_path + ".anim")
+    st = phone.state()
+    fps = round((b - a) / secs, 1)
+    metric("memory_load", {"level": load.get("level"), "reason": load.get("reason"), "quality": st["quality"], "details": st["details"], "fps_seen": fps})
+    check("the daemon is held at L2 for memory alone", load.get("level") == 2 and load.get("reason") == ["memory"], load)
+    check("...and the picture does not say the computer is busy", "computer busy" not in (st["quality"] or ""), st["quality"])
+    # The picture at the window's own height (the reduced rungs scale it down; memory alone must not).
+    lines = int((re.match(r"(\d+)p", st["quality"] or "") or [0, 0])[1])
+    check("...and is at the window's full height, not scaled down", lines >= rig.bounds()[3] - 2, (lines, rig.bounds()[3]))
+    phone.shot("memory-l2")
 def step_nudge(rig, phone, n=6):
     """Trackpad at full view: slow small slides (8 CSS px over 400 ms, under the tap's 10 px) move the cursor and click nothing; a long press
     whose finger drifts 5 px as it lands still right-clicks; a quick tap is still one click at once, and two quick taps a double click."""
@@ -962,7 +987,7 @@ def step_nudge(rig, phone, n=6):
     check("two quick taps are a double click", len(rig.events("double_any", since)) == 1, rig.events(None, since))
 
 
-STEPS = {"nudge": step_nudge, "ramp": step_ramp, "path": step_path, "still": lambda r, p: step_stats(p, "still"), "click": step_click_latency, "move": step_move_latency, "targets": step_targets,
+STEPS = {"memory": step_memory, "nudge": step_nudge, "ramp": step_ramp, "path": step_path, "still": lambda r, p: step_stats(p, "still"), "click": step_click_latency, "move": step_move_latency, "targets": step_targets,
          "gestures": step_gestures, "typing": step_typing, "zoom": step_zoom, "mode": step_mode, "rotate": step_rotate, "background": step_background,
          "freeze": step_freeze, "network": step_network, "restart": step_restart}
 
@@ -976,12 +1001,14 @@ def main():
     ap.add_argument("--video", action="store_true")
     ap.add_argument("--json", default=None)
     ap.add_argument("--bundle", default=None, help="this checkout's hosted build (app/dist-phone-hosted) served at the production origin")
+    ap.add_argument("--load", default=None, help="the daemon's load held at a level and reason (KELPIE_LOAD_FORCE), such as L2:memory")
     ap.add_argument("--via", default="auto", help="the way chosen in the picker: auto, p2p, relay_turn, relay")
     ap.add_argument("--hold", type=float, default=0, help="seconds to keep everything up at the end (exploring)")
     args = ap.parse_args()
     if os.name != "nt":
         raise SystemExit(__doc__)
     VIA[0] = args.via
+    LOAD[0] = args.load
     rig = Rig(args.scratch, args.app)
     phone = None
     try:

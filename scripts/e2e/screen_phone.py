@@ -1,7 +1,7 @@
 """The computer's screen from the real phone page: the phone app in Playwright's Chromium as an iPhone (390×844 at 3×, touch), against the real
 app, its screen helper and a daemon of this script's own (Windows). Every function of the remote screen a person reaches with their fingers.
 
-    python -X utf8 scripts/e2e/screen_phone.py <scratch-dir> <app> [--json out.json] [--load L2:memory] [--chrome]
+    python -X utf8 scripts/e2e/screen_phone.py <scratch-dir> <app> [--json out.json] [--load L2:cpu] [--chrome]
 
 <app> is a debug build of the app with its frontend embedded (`cd app && pnpm tauri build --debug --no-bundle`), with the debug kelpied (built
 after `pnpm build:phone`, which it embeds: the page tested is the daemon's own) and kelpie-screen next to it. Needs tauri-driver (PATH or
@@ -54,7 +54,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("scratch")
 ap.add_argument("app")
 ap.add_argument("--json", default=None)
-ap.add_argument("--load", default=None, help="the daemon's pinned load level and reason, such as L2:memory or L3:memory")
+ap.add_argument("--load", default=None, help="the daemon's pinned load level and reason, such as L2:cpu or L3:memory (memory alone never lowers the stream: L2:memory starts it as at L0)")
 ap.add_argument("--chrome", action="store_true", help="the installed Google Chrome instead of Playwright's Chromium")
 ARGS = ap.parse_args()
 if ARGS.load:
