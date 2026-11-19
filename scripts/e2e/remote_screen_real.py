@@ -300,10 +300,12 @@ class Phone:
         self._touch("touchStart", [(x0, y0)])
         if hold:
             time.sleep(hold)
+        # Paced by the clock (each touch is a DevTools round trip): the slide takes `ms`, not `ms` plus the round trips.
+        start = time.monotonic()
         for i in range(1, steps + 1):
             f = i / steps
             self._touch("touchMove", [(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f)])
-            time.sleep(ms / 1000 / steps)
+            time.sleep(max(0.0, start + ms / 1000 * i / steps - time.monotonic()))
         self._touch("touchEnd", [])
 
     def two(self, a0, b0, a1, b1, ms=300, steps=None, lift=True):
@@ -438,8 +440,16 @@ def step_live(rig, phone, hwnd=None):
     if not check("the picker lists the shared window", row is not None, rows):
         return False
     t0 = time.time()
-    phone.js("(id) => document.querySelector(`[data-target=\"${id}\"] button`).click()", row["id"])
-    live = phone.wait("document.querySelector('.screen-live')?.dataset.phase === 'live'", 40)
+    live = None
+    for _ in range(3):
+        phone.js("(id) => document.querySelector(`[data-target=\"${id}\"] button`)?.click()", row["id"])
+        live = phone.wait("document.querySelector('.screen-live')?.dataset.phase === 'live' || (!!document.querySelector('.takeover-pick .banner') && 'pick')", 60)
+        if live is True:
+            break
+        # Refused while the computer was busy, then "less busy now: tap See it": tapped again, as a person does (and said in the numbers).
+        metric("start_refused", phone.js("document.querySelector('.takeover-pick .banner')?.textContent"))
+        phone.wait("!!document.querySelector(`[data-target] button:not([disabled])`)", 120)
+    live = live is True
     first = until(lambda: (phone.times() or {}).get("presentInterval") is not None or (phone.times() or {}).get("decodeMs"), 30, 0.05)
     t1 = time.time()
     if not check("Face ID passes and the picture comes", bool(live and first), phone.state()):
@@ -920,7 +930,7 @@ def step_nudge(rig, phone, n=6):
     for i in range(n):
         before = physical_cursor()
         d = 8 if i % 2 == 0 else -8
-        phone.slide(c[0], c[1], c[0] + d, c[1], ms=400, steps=12)
+        phone.slide(c[0], c[1], c[0] + d, c[1], ms=360, steps=8)
         time.sleep(0.5)
         after = physical_cursor()
         moves.append(after[0] - before[0])
@@ -936,7 +946,7 @@ def step_nudge(rig, phone, n=6):
     time.sleep(0.7)
     phone._touch("touchEnd", [])
     time.sleep(0.6)
-    rights, lefts = rig.events("right_any", since), rig.events("click_any", since)
+    rights, lefts = rig.events("right", since), rig.events("click_any", since)
     phone.js("document.querySelector('.keybar button[aria-label=\"Escape\"]').click()")
     time.sleep(0.3)
     check("a long press that drifts 5 px as it lands still right-clicks", len(rights) == 1 and not lefts, (len(rights), len(lefts)))
