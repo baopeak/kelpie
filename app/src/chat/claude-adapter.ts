@@ -173,6 +173,9 @@ export function applyTaskEvent(ctx: AdapterContext, m: any) {
 /** Our optimistic copy of a message with this text, the oldest first. */
 const waitingCopy = (ctx: AdapterContext, text: string) => ctx.state.items.find((i) => i.kind === "user" && i.pending && i.text.trim() === text.trim());
 
+/** How much of a message's text the daemon's log keeps (`kelpie_sent`, crates/kelpied/src/chat.rs `SENT_TEXT_MAX`), in bytes. */
+const SENT_TEXT_MAX = 64 * 1024;
+
 /** Tagged text (`<system-reminder>`, `<command-name>`) is Claude's, not a message, unless the person
  *  just sent exactly that: then this is its echo, and the message must not wait for ever. */
 const isClaudesOwnText = (ctx: AdapterContext, text: string) => text.startsWith("<") && !waitingCopy(ctx, text);
@@ -193,7 +196,15 @@ function pushUser(ctx: AdapterContext, text: string, uuid?: string, images?: Use
   // echo's bytes are not held for a message that has them on disk. A picture sent alone echoes with
   // no text, so its copy is the oldest one waiting with none.
   const pending = waitingCopy(ctx, text);
-  if (pending) ctx.patch(pending.id, (i: any) => (i.pending = false));
+  if (pending) {
+    ctx.patch(pending.id, (i: any) => {
+      i.pending = false;
+      // A copy from the daemon's log that has only the pictures' names (a phone's view, a picture this window does not have): the
+      // echo's can be shown. One that has them, by path, keeps its own; an echo with no bytes either keeps the real names.
+      const viewable = (list?: UserImage[]) => !!list?.some((x) => x.path || x.data);
+      if (viewable(images) && !viewable(i.images)) i.images = images;
+    });
+  }
   else ctx.upsert({ kind: "user", id: uuid ?? `u-${ctx.state.items.length}`, text, ...(images ? { images } : {}) });
 }
 
@@ -248,6 +259,8 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
   let cleared = false;
   /** How many messages given to the running turn had not been read when a turn last ended (null: none given). */
   let steersUnread: number | null = null;
+  /** The copies of what was said during the turn (`steer`): the messages a `result` can leave unread. */
+  let steered = new Set<string>();
   /** The run going on was asked to stop (the CLI took our interrupt, or said the user interrupted it): its
    *  `error_during_execution` result is that stop. */
   let stopAsked = false;
@@ -282,6 +295,7 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
       partialJson = new Map();
       cleared = false;
       steersUnread = null;
+      steered = new Set();
       stopAsked = false;
     },
     start() {
@@ -431,10 +445,18 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
           }
           // A message the turn ended without reading: Claude runs it next by itself, a moment after this result. Still working
           // until then, unless it did not read one last time either: an echo that never comes must not leave it working for ever.
+          // Only what was said during the turn counts: another message that waits for an echo that never comes is no steer.
           let unread = 0;
-          if (steersUnread != null) for (const i of ctx.state.items) if (i.kind === "user" && i.pending) unread++;
+          if (steersUnread != null) {
+            for (const id of [...steered]) {
+              const copy = ctx.find(id);
+              if (copy?.kind === "user" && copy.pending) unread++;
+              else steered.delete(id);
+            }
+          }
           const runsNext = unread > 0 && (steersUnread === Infinity || unread < steersUnread!);
           steersUnread = runsNext ? unread : null;
+          if (!runsNext) steered.clear();
           // A run the person stopped ends in `error_during_execution`: that is the stop, not a failure.
           const stopped = stopAsked && m.subtype === "error_during_execution";
           stopAsked = false;
@@ -463,10 +485,29 @@ export function createClaudeAdapter(ctx: AdapterContext, opts: { onBypassRefused
       const pictures = (images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } }));
       ctx.write({ type: "user", message: { role: "user", content: [...pictures, ...(text.trim() ? [{ type: "text", text }] : [])] } });
     },
+    // A message the daemon wrote to the CLI. Claude shows it only when it reads it (its echo), which can be long after: a chat
+    // still starting runs its hooks and servers first. Meanwhile a transcript built again from the log (the window fell behind,
+    // came back to the daemon, or let the daemon write the message for it) would have no trace of it, and no sign of work: it
+    // waits here, as a message sent from this window does, and the echo takes its place. The window's own copy is already there.
+    sent({ qid, text, images, from }) {
+      // The same line again (a replay over what was shown): an echo that came already stays.
+      const shown = ctx.find(`sent-${qid}`);
+      if (shown) return true;
+      // Logged in part: its echo would not be recognised, and would show it twice. The log cuts at a character, so a cut text
+      // can fall a few bytes short of the limit.
+      const whole = new TextEncoder().encode(text).length <= SENT_TEXT_MAX - 4;
+      const added = whole && !waitingCopy(ctx, text);
+      if (added) ctx.upsert({ kind: "user", id: `sent-${qid}`, text, images, from, pending: true });
+      ctx.set("busy", true);
+      // Not added: the echo says who sent it.
+      return added || !from;
+    },
     // The CLI takes a message mid-turn, pictures and all, and reads it when the running tools finish, echoing it then (it
     // stays pending until that echo). If the run ends first (its own end, or a stop), the CLI starts another run for it at once.
     steer(text, images) {
       this.send(text, undefined, images);
+      const copy = ctx.state.items.findLast((i) => i.kind === "user" && i.pending);
+      if (copy) steered.add(copy.id);
       steersUnread = Infinity;
       return true;
     },

@@ -217,6 +217,9 @@ export interface Adapter {
   isCommand?(text: string, typed: boolean): boolean;
   /** The agent never echoes a prompt as it is sent (ACP): the transcript shows it from the daemon's `kelpie_sent` line. */
   showsSent?: boolean;
+  /** A message the daemon wrote (`kelpie_sent`), for an agent that echoes a prompt only once it reads it (Claude): the adapter
+   *  shows it as waiting until that echo. True: it took care of the sender's label too; false: the echo is to be labelled. */
+  sent?(msg: { qid: string; text: string; images?: UserImage[]; from?: string }): boolean;
   /** Notes the adapter's own state before it builds a queued message's lines; the function returned puts it back (the daemon
    *  did not take the lines). Only what the adapter keeps for itself: the controller restores items and `busy`. */
   snapshot?(): () => void;
@@ -326,6 +329,9 @@ export class ChatController {
   /** The pictures of messages this window queued, by `cid`, as the transcript keeps them: the log line that shows them can
    *  come after the daemon's word that the message left the queue, and comes again on a replay. */
   private sentPictures = new Map<string, UserImage[]>();
+  /** The `qid`s the log says the daemon wrote (`kelpie_sent`): a refusal of the lines this window built for one comes after the
+   *  daemon wrote the message itself, and must not take it off the screen. */
+  private loggedSent = new Set<string>();
   /** The `cid`s the daemon's queue listed last time. */
   private listed = new Set<string>();
   /** While the adapter builds a queued message: the lines it writes, which go to the daemon instead of the agent. */
@@ -894,6 +900,9 @@ export class ChatController {
       (e) => {
         const why = String(e);
         console.warn("the daemon did not take the message", why);
+        // Too late because the daemon wrote it already (this window answered after its wait): it is on its way, as shown. Only for
+        // an adapter that shows a logged message itself; the others still undo what building the lines did (a parked copy).
+        if (this.adapter.sent && this.loggedSent.has(qid)) return void this.mine.delete(cid);
         // `busy`: another turn started meanwhile, which is why it is busy; the rest is as if nothing had been built.
         this.rollback(added, wasBusy, restore, !/busy/.test(why));
         // Those it asks again about. Anything else would only fail again each time it is offered, and hold up what waits behind it: a
@@ -967,23 +976,23 @@ export class ChatController {
     this.upsert({ kind: "system", id: id ?? `unsent-${Date.now()}-${++this.unsent}`, text, tone: "info" });
   }
 
-  /** A message the daemon wrote (`kelpie_sent`). Agents that do not echo a prompt (ACP) have it shown from here; for the
-   *  others the echo is labelled with the sender when it comes. */
+  /** A message the daemon wrote (`kelpie_sent`). Agents that do not echo a prompt (ACP) have it shown from here; Claude shows it
+   *  as waiting until its echo; for the others the echo is labelled with the sender when it comes. */
   private noteSent(msg: any) {
     if (typeof msg.text !== "string") return;
     const name = msg.by === "desktop" ? undefined : String(msg.name ?? "") || undefined;
+    const qid = String(msg.qid);
+    this.loggedSent.add(qid);
+    if (this.loggedSent.size > 200) this.loggedSent.delete(this.loggedSent.values().next().value!);
+    // As an adapter's `send` records them: this window's own by path (another device's `cid` says nothing about those), and what
+    // it no longer has by name. A watcher shows no pictures: their names, under the text.
+    const own = msg.by === "desktop" && !this.observer ? this.sentPictures.get(String(msg.cid)) : undefined;
+    const named: UserImage[] = Array.isArray(msg.images) ? msg.images.map((n: unknown) => ({ name: String(n) })) : [];
+    const images = this.observer ? undefined : own ?? (named.length ? named : undefined);
     if (this.adapter.showsSent) {
-      const id = `sent-${String(msg.qid)}`;
-      if (this.observer) {
-        // A watcher shows no pictures: their names, under the text.
-        this.upsert({ kind: "user", id, text: withNames(msg.text, msg.images), from: name });
-      } else {
-        // As an adapter's `send` records them: this window's own by path (another device's `cid` says nothing about those), and what
-        // it no longer has by name.
-        const own = msg.by === "desktop" ? this.sentPictures.get(String(msg.cid)) : undefined;
-        const named: string[] = Array.isArray(msg.images) ? msg.images.map(String) : [];
-        this.upsert({ kind: "user", id, text: msg.text, images: own ?? (named.length ? named.map((n) => ({ name: n })) : undefined), from: name });
-      }
+      this.upsert({ kind: "user", id: `sent-${qid}`, text: this.observer ? withNames(msg.text, msg.images) : msg.text, images, from: name });
+    } else if (this.adapter.sent?.({ qid, text: msg.text, images: this.observer && named.length ? named : images, from: name })) {
+      // Shown until the agent's echo, which takes its place.
     } else if (name) {
       this.sentFrom.push({ text: msg.text, name });
       if (this.sentFrom.length > 50) this.sentFrom.shift();
@@ -1126,6 +1135,7 @@ export class ChatController {
    *  answered as itself. */
   forgetSentAnswers() {
     this.mine.clear();
+    this.loggedSent.clear();
     this.sentPictures.clear();
     this.listed.clear();
     this.unsettled.clear();
