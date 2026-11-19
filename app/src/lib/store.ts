@@ -27,6 +27,7 @@ import { confirmDialog } from "./confirm-dialog";
 import { createHandOver, type ShutdownAnswer } from "./hand-over";
 import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, familyRoot, folderName, sessionDepthTree, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
 import { remember } from "./prompt-history";
+import { pulseSession } from "./reveal-pulse";
 import { defaultSettings } from "./default-settings";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 
@@ -1362,8 +1363,38 @@ function createAppStore() {
       .map((x) => x.handle);
   });
 
-  /** Reveals a session: switches project/tab, or opens it in a new tab if not in any layout. */
+  /** The session the keyboard is on: the one in the focused pane of the open project's tab (the sidebar marks its row). */
+  const focusedSession = createMemo(() => {
+    const pid = state.activeProject;
+    const tab = pid ? activeTab(pid) : undefined;
+    if (!tab) return null;
+    return (findPane(tab.root, tab.focus) ?? allPanes(tab.root)[0])?.sessionId ?? null;
+  });
+
+  /** The keyboard goes to `sessionId`'s input once its pane shows it: the terminal, or a chat's message field. Never from behind
+   *  a dialog or overlay. */
+  function focusSessionInput(sessionId: string) {
+    requestAnimationFrame(() => {
+      if (overlay() !== null) return;
+      const loc = paneLocation(sessionId);
+      if (!loc || loc.projectId !== state.activeProject) return;
+      const pane = document.querySelector<HTMLElement>(`.pane[data-pane="${CSS.escape(loc.paneId)}"]`);
+      if (!pane) return;
+      if (sessions[sessionId]?.chat) pane.querySelector<HTMLTextAreaElement>(".chat-composer textarea")?.focus();
+      else peekView(sessionId)?.focus();
+    });
+  }
+
+  /** What a click on a session does (its sidebar row): shows it, and the keyboard goes to it. */
+  function goToSession(sessionId: string) {
+    revealSession(sessionId);
+    focusSessionInput(sessionId);
+  }
+
+  /** Reveals a session: switches project/tab, or opens it in a new tab if not in any layout. Its pane and sidebar row pulse for a
+   *  moment, so the eye follows where the window went. */
   function revealSession(sessionId: string) {
+    pulseSession(sessionId);
     const loc = paneLocation(sessionId);
     recordRecent("session", sessionId, sessions[sessionId]?.project_id ?? loc?.projectId ?? state.activeProject ?? "");
     if (loc) {
@@ -1931,7 +1962,7 @@ function createAppStore() {
   return {
     state, sessions, connected, sessionsKnown, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
     init, activeProject, workspace, activeTab, addProject, removeProject, restoreProjects, renameProject, moveProject, switchProject,
-    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, openFile, closePane,
+    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, openFile, closePane,
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,

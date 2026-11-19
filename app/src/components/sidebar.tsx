@@ -1,7 +1,7 @@
 // Project sidebar: every project with its sessions (status, task title, model, last activity),
 // branch subtitle, filter/sort, and context menus. Each row binds only to its own session's
 // fields, so status ticks from 20 agents re-render single rows, not the list.
-import { For, Show, createMemo, createResource, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createResource, createSignal, on } from "solid-js";
 import { store, sessionLabel } from "../lib/store";
 import { pickProjectFolder, chordOf, commandHint, commands } from "../lib/commands";
 import { chordLabel, isMac, relTimeShort } from "../lib/platform";
@@ -27,7 +27,8 @@ import type { Project, SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
 import { openHosts } from "./hosts-page";
 import { confirmDialog } from "../lib/confirm-dialog";
-import { childrenOfSession, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
+import { ancestorsOf, childrenOfSession, familyRoot, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
+import { pulseClass } from "../lib/reveal-pulse";
 import { reportedState, sessionState, type SessionState } from "../lib/session-state";
 import { closeFinishedSubSessions, finishedOf } from "../lib/sub-session-actions";
 
@@ -105,13 +106,18 @@ export const shortModel = (m: string | null | undefined) =>
 
 /** A project's sessions in the order their panes are seen — tab by tab, each read top to bottom
  *  and left to right — so a session switched to chat view (a new session in the same pane) keeps
- *  its place. Sessions in no pane follow, oldest first. */
+ *  its place. Sessions in no pane follow, oldest first. A sub-session family ranks as one, by the pane that shows any of it: the
+ *  family's pane switching between the parent and a child must not move the group past the rows around it. */
 function projectSessions(projectId: string): SessionInfo[] {
+  const tree = store.sessionTree();
   const rank = new Map<string, number>();
   for (const tab of store.workspace(projectId).tabs) {
-    for (const p of readingOrder(tab.root)) if (p.sessionId && !rank.has(p.sessionId)) rank.set(p.sessionId, rank.size);
+    for (const p of readingOrder(tab.root)) {
+      const root = p.sessionId && familyRoot(tree, p.sessionId);
+      if (root && !rank.has(root)) rank.set(root, rank.size);
+    }
   }
-  const at = (s: SessionInfo) => rank.get(s.id) ?? Number.MAX_SAFE_INTEGER;
+  const at = (s: SessionInfo) => rank.get(familyRoot(tree, s.id)) ?? Number.MAX_SAFE_INTEGER;
   return Object.values(store.sessions)
     .filter((s) => s.project_id === projectId)
     .sort((a, b) => at(a) - at(b) || a.created_at - b.created_at);
@@ -311,31 +317,58 @@ function SubBadge(props: { id: string }) {
   );
 }
 
-/** A session's row and, indented under it behind a thin guide line, the sessions it opened (to any depth). */
-function SessionNode(props: { s: SessionInfo }) {
+/** A session's row and, under it on tree lines, the sessions it opened (to any depth, oldest first). A session with sub-sessions
+ *  and its whole tree sit in one card (`session-family`), so the top-level row after it reads as separate. `nested`: a child's
+ *  node, laid out as tree line | row, then tree line | its own children. */
+function SessionNode(props: { s: SessionInfo; nested?: boolean }) {
   const kids = subChildren(() => props.s.id);
+  const list = () => (
+    <Show when={kids().length && !foldedParents[props.s.id]}>
+      <div class="sub-list" role="group" aria-label={t("Sub-sessions of {name}", { name: sessionLabel(props.s) })}>
+        <For each={kids()}>{(c) => <SessionNode s={c} nested />}</For>
+      </div>
+    </Show>
+  );
   return (
-    <>
-      <SessionRow s={props.s} hasKids={kids().length > 0} />
-      <Show when={kids().length && !foldedParents[props.s.id]}>
-        <div class="sub-list" role="group" aria-label={t("Sub-sessions of {name}", { name: sessionLabel(props.s) })}>
-          <For each={kids()}>{(c) => <SessionNode s={c} />}</For>
-        </div>
-      </Show>
-    </>
+    <Show when={props.nested} fallback={
+      <div class={kids().length ? "session-family" : "session-solo"}>
+        <SessionRow s={props.s} kids={kids().length} />
+        {list()}
+      </div>
+    }>
+      <div class="sub-node">
+        <span class="sub-elbow" aria-hidden="true" />
+        <SessionRow s={props.s} kids={kids().length} />
+        <span class="sub-rail" aria-hidden="true" />
+        {list()}
+      </div>
+    </Show>
   );
 }
 
-function SessionRow(props: { s: SessionInfo; hasKids?: boolean }) {
+function SessionRow(props: { s: SessionInfo; kids: number }) {
   const state = () => reportedState(props.s);
+  const hasKids = () => props.kids > 0;
+  const selected = () => store.focusedSession() === props.s.id;
+  /** Folded, with the session on screen somewhere below it: the row stands in for the hidden one. */
+  const holdsSelected = () => {
+    const sel = store.focusedSession();
+    return hasKids() && !!foldedParents[props.s.id] && !!sel && ancestorsOf(store.sessionTree(), sel).includes(props.s.id);
+  };
+  let el!: HTMLDivElement;
+  // The row of the session on screen stays in view: on a click elsewhere (a chip, the palette, a notice) the list follows.
+  createEffect(on(() => selected() || holdsSelected(), (mark) => mark && queueMicrotask(() => el?.scrollIntoView({ block: "nearest" }))));
   return (
     <div
-      class={`session-row ${state()}${props.hasKids ? " has-kids" : ""}${store.isSessionVisible(props.s.id) ? " visible" : ""}`}
-      onClick={() => store.revealSession(props.s.id)}
+      ref={el}
+      class={`session-row ${state()}${hasKids() ? " has-kids" : ""}${store.isSessionVisible(props.s.id) ? " visible" : ""}${selected() ? " selected" : ""}${holdsSelected() ? " holds-selected" : ""}${pulseClass(props.s.id)}`}
+      data-row-session={props.s.id}
+      aria-current={selected() ? "true" : undefined}
+      onClick={() => store.goToSession(props.s.id)}
       onContextMenu={(e) => openContextMenu(e, sessionMenu(props.s))}
       title={[props.s.title, props.s.model, props.s.cwd, relTimeShort(props.s.last_activity || props.s.created_at, now())].filter(Boolean).join("\n")}
     >
-      <Show when={props.hasKids}>
+      <Show when={hasKids()}>
         <button class="chev sub-chev" title={foldedParents[props.s.id] ? t("Show sub-sessions") : t("Hide sub-sessions")} aria-expanded={!foldedParents[props.s.id]}
           onClick={(e) => { e.stopPropagation(); toggleParentFold(props.s.id); }}>
           <Icon name={foldedParents[props.s.id] ? "chevronRight" : "chevronDown"} size={10} />
@@ -351,7 +384,7 @@ function SessionRow(props: { s: SessionInfo; hasKids?: boolean }) {
           <span class="model">{[props.s.model && shortModel(props.s.model), sessionAccount(props.s)?.label].filter(Boolean).join(" · ")}</span>
         </Show>
       </span>
-      <Show when={props.hasKids}><SubBadge id={props.s.id} /></Show>
+      <Show when={hasKids()}><SubBadge id={props.s.id} /></Show>
       <ContextRing s={props.s} />
       <Show when={LABEL[state()]} fallback={<span class="age">{relTimeShort(props.s.last_activity || props.s.created_at, now())}</span>}>
         {(label) => <span class={`age state-label ${state()}`}>{t(label())}</span>}

@@ -5,7 +5,8 @@ import { For, Show, createMemo } from "solid-js";
 import { store, sessionLabel } from "../lib/store";
 import { relTimeShort } from "../lib/platform";
 import { msg, t } from "../lib/i18n";
-import { familyOf, familyRoot, type FamilyMember } from "../lib/sub-sessions";
+import { ancestorsOf, familyOf, familyRoot, type FamilyMember } from "../lib/sub-sessions";
+import { pulseSession } from "../lib/reveal-pulse";
 import { closeFinishedSubSessions, finishedOf } from "../lib/sub-session-actions";
 import { KindGlyph } from "./icons";
 import { StatusDot } from "./sidebar";
@@ -70,7 +71,14 @@ export function SubSessionsBar(props: { sessionId: string; projectId: string; ta
     return here && !first.includes(here) ? [...first.slice(0, MAX_CHIPS - 1), here] : first;
   });
   const rest = () => family().filter((m) => !shown().includes(m));
-  const pick = (id: string) => store.showInPane(props.projectId, props.tabId, props.paneId, id);
+  /** Where the session on screen sits when it is a sub-session: the sessions above it, top first. */
+  const above = createMemo(() => ancestorsOf(store.sessionTree(), props.sessionId).reverse().map((id) => store.sessions[id]).filter((s): s is SessionInfo => !!s));
+  const here = () => store.sessions[props.sessionId];
+  const pick = (id: string) => {
+    store.showInPane(props.projectId, props.tabId, props.paneId, id);
+    pulseSession(id);
+    store.focusSessionInput(id);
+  };
   const closable = () => {
     const r = root();
     return r ? finishedOf(r, true) : [];
@@ -87,6 +95,21 @@ export function SubSessionsBar(props: { sessionId: string; projectId: string; ta
   return (
     <Show when={family().length > 1}>
       <div class="sub-strip" role="group" aria-label={t("Sub-sessions")} onContextMenu={menu}>
+        {/* A sub-session on screen says so, with the way back up: "Claude › child · sub-session". */}
+        <Show when={above().length && here()}>
+          <nav class="sub-crumbs" aria-label={t("Where this sub-session sits")}>
+            <For each={above()}>
+              {(s) => (
+                <>
+                  <button class="sub-crumb" title={t("Back to {name}", { name: sessionLabel(s) })} onClick={() => pick(s.id)}>{sessionLabel(s)}</button>
+                  <span class="sub-crumb-sep" aria-hidden="true">›</span>
+                </>
+              )}
+            </For>
+            <span class="sub-crumb here" aria-current="page">{sessionLabel(here()!)}</span>
+            <span class="sub-crumb-tag">{t("sub-session")}</span>
+          </nav>
+        </Show>
         <div class="sub-chips" role="tablist">
           <For each={shown()}>{(m) => <Chip m={m} active={m.s.id === props.sessionId} onPick={() => pick(m.s.id)} />}</For>
           <Show when={rest().length}>

@@ -835,12 +835,19 @@ a notification when the window is not focused. *Later* hides a card; `Ctrl+Shift
 brings the first open request back and focuses it (the key is Kelpie's only while a request is
 open). A request not answered in 5 minutes is refused, and one withdrawn when its agent gave up.
 
-**The tree.** A child sits under its parent in the sidebar (if both are in the same project); the
-parent row has a fold arrow and a badge coloured by the worst state below it (needs you, failed,
-working, finished, idle). A family of sessions lives in the tab of the session at the top: under
-its header a strip of sub-tabs lists that session first, then every session below it (a grandchild
-marked `›`) with their last report. Clicking a chip, or a child's row in the sidebar, shows that
-session in the same pane, and the tab reads *parent › child*; `+N` shows the rest. No tab opens per
+**The tree.** A child sits under its parent in the sidebar (if both are in the same project), on
+tree lines, oldest first; the parent and everything below it share one faint card, so the next
+top-level session reads as separate, and the group keeps its place whichever of its sessions is on
+screen. The parent row has a fold arrow and a badge with the number of sessions below it, coloured
+by the worst state among them (needs you, failed, working, finished, idle); folded, the parent is
+marked while one of its hidden children is on screen. The session on screen has its row marked
+(accent wash and edge, name in bold) and kept in view. A family of sessions lives in the tab of the
+session at the top: under its header a strip of sub-tabs lists that session first, then every
+session below it (a grandchild marked `›`) with their last report. Clicking a chip, or a child's
+row in the sidebar, shows that session in the same pane, and the tab reads *parent › child*; the
+strip then starts with *parent › child · sub-session*, where the parent's name leads back to it.
+`+N` shows the rest. Where a click lands, the pane and the row glow for a moment (a steady mark with
+reduced motion) and the keyboard goes to that session's terminal or message field. No tab opens per
 child. The pane's close button on a child stops it and shows the session above it again; closing
 the tab closes the tab. Tabs of children opened by an older version are folded into the parent's
 tab once. *Close finished* on the strip, or in the right-click menu of the strip or the parent's

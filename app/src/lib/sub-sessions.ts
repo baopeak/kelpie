@@ -72,6 +72,13 @@ export function sessionDepthTree(tree: SessionTree, id: string): number {
   return depth;
 }
 
+/** The sessions above `id`, nearest first (empty when it is not nested). */
+export function ancestorsOf(tree: SessionTree, id: string): string[] {
+  const out: string[] = [];
+  for (let up = tree.nested.get(id), guard = 0; up && guard < 10_000; up = tree.nested.get(up), guard++) out.push(up);
+  return out;
+}
+
 /** The top of the tree `id` is in (`id` itself when it is not nested): the session whose tab shows the whole family. */
 export function familyRoot(tree: SessionTree, id: string): string {
   let at = id;

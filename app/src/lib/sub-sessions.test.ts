@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ancestorsOf,
   buildSessionTree,
   childrenOfSession,
   dispatchRequest,
@@ -95,6 +96,13 @@ describe("a family of sessions in one tab", () => {
     const tree = buildSessionTree([session("orphan", { parent: "closed" }), session("kid", { parent: "orphan" })]);
     expect(familyRoot(tree, "kid")).toBe("orphan");
     expect(familyRoot(tree, "orphan")).toBe("orphan");
+  });
+
+  it("lists the sessions above one, nearest first, for the breadcrumb and a folded parent's mark", () => {
+    const tree = buildSessionTree([session("root"), session("b", { parent: "root" }), session("leaf", { parent: "b" }), session("orphan", { parent: "closed" })]);
+    expect(ancestorsOf(tree, "leaf")).toEqual(["b", "root"]);
+    expect(ancestorsOf(tree, "root")).toEqual([]);
+    expect(ancestorsOf(tree, "orphan")).toEqual([]);
   });
 });
 
