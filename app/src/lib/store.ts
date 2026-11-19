@@ -306,11 +306,36 @@ function createAppStore() {
     for (const s of list) map[s.id] = s;
     setSessions(reconcile(map));
     setSessionsKnown(true);
+    // Places kept for sessions the daemon no longer has go (the list is its whole list).
+    const kept = state.sessionSince;
+    if (kept && canPersist() && Object.keys(kept).some((id) => !map[id])) {
+      update((st) => {
+        for (const id of Object.keys(st.sessionSince ?? {})) if (!map[id]) delete st.sessionSince![id];
+      });
+    }
+  }
+
+  // ---------- the order of sessions ----------
+  /** Where a session sorts among its project's (and among its parent's children): its creation time, or, for one that took over
+   *  another's conversation (a switch between terminal and chat), the place of the session it replaced. Nothing else moves a
+   *  session: not its activity, its status, the panes that show it, or the sessions opened after it. */
+  const sessionSince = (s: SessionInfo) => state.sessionSince?.[s.id] ?? s.created_at;
+
+  /** Session `toId` takes over `fromId`'s conversation: it keeps `fromId`'s place. Called before `toId` is listed, so its row
+   *  never shows at the bottom first. */
+  function inheritPlace(fromId: string, toId: string) {
+    const from = sessions[fromId];
+    if (!from || fromId === toId) return;
+    const since = sessionSince(from);
+    update((st) => {
+      st.sessionSince = { ...(st.sessionSince ?? {}), [toId]: since };
+    });
   }
 
   // ---------- sub-sessions ----------
-  /** Which sessions nest under which. Read only through `parent` and the list of ids, so a status tick re-runs nothing here. */
-  const sessionTree = createMemo(() => buildSessionTree(Object.values(sessions)));
+  /** Which sessions nest under which, children in their stable order. Read only through `parent`, the ids and the order, so a
+   *  status tick re-runs nothing here. */
+  const sessionTree = createMemo(() => buildSessionTree(Object.values(sessions), sessionSince));
 
   /** Inbox entry of each open request, to mark it read when the request is gone. */
   const requestInbox = new Map<string, string>();
@@ -505,6 +530,7 @@ function createAppStore() {
           const shown = !closingFromPane.delete(s.id) && paneLocation(s.id);
           const back = shown && familyFallback(s);
           setSessions(produce((m) => delete m[s.id]));
+          if (state.sessionSince?.[s.id] !== undefined) update((st) => void delete st.sessionSince![s.id]);
           if (shown && back) updatePane(shown.projectId, shown.tabId, shown.paneId, { kind: back.chat ? "chat" : "terminal", sessionId: back.id });
           if (state.floating?.sessions.includes(s.id)) {
             update((st) => {
@@ -1962,7 +1988,7 @@ function createAppStore() {
   return {
     state, sessions, connected, sessionsKnown, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
     init, activeProject, workspace, activeTab, addProject, removeProject, restoreProjects, renameProject, moveProject, switchProject,
-    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, openFile, closePane,
+    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, openFile, closePane,
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,

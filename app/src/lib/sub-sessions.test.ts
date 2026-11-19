@@ -98,6 +98,15 @@ describe("a family of sessions in one tab", () => {
     expect(familyRoot(tree, "orphan")).toBe("orphan");
   });
 
+  it("orders children by the place given, so a conversation switched to chat keeps its place among its siblings", () => {
+    // "b2" replaced "b" (created later, so after "c" by its own time), but keeps b's place.
+    const list = [session("root"), session("a", { parent: "root" }), session("c", { parent: "root" }), session("b2", { parent: "root" })];
+    const since = (s: SessionInfo) => (s.id === "b2" ? 1.5 : s.created_at);
+    const placed = list.map((s, i) => ({ ...s, created_at: i }));
+    expect(ids(childrenOfSession(buildSessionTree(placed), "root"))).toEqual(["a", "c", "b2"]);
+    expect(ids(childrenOfSession(buildSessionTree(placed, since), "root"))).toEqual(["a", "b2", "c"]);
+  });
+
   it("lists the sessions above one, nearest first, for the breadcrumb and a folded parent's mark", () => {
     const tree = buildSessionTree([session("root"), session("b", { parent: "root" }), session("leaf", { parent: "b" }), session("orphan", { parent: "closed" })]);
     expect(ancestorsOf(tree, "leaf")).toEqual(["b", "root"]);

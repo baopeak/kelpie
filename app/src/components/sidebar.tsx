@@ -13,7 +13,7 @@ import { daemon } from "../lib/ipc";
 import { Icon, KindGlyph } from "./icons";
 import { ContextRing } from "./context-ring";
 import { BrandMark, BrandWordmark, KipCompanion, kipShown } from "./brand";
-import { findPane, readingOrder } from "../lib/layout";
+import { findPane } from "../lib/layout";
 import { sessionAccount } from "../lib/accounts";
 import { hostLabel } from "../lib/remote";
 import { canGoBack, canGoForward, navBack, navForward } from "../lib/nav-history";
@@ -27,7 +27,7 @@ import type { Project, SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
 import { openHosts } from "./hosts-page";
 import { confirmDialog } from "../lib/confirm-dialog";
-import { ancestorsOf, childrenOfSession, familyRoot, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
+import { ancestorsOf, childrenOfSession, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
 import { pulseClass } from "../lib/reveal-pulse";
 import { reportedState, sessionState, type SessionState } from "../lib/session-state";
 import { closeFinishedSubSessions, finishedOf } from "../lib/sub-session-actions";
@@ -104,23 +104,14 @@ setInterval(() => setNow(Date.now()), 30_000);
 export const shortModel = (m: string | null | undefined) =>
   m ? m.replace(/^(claude|anthropic)[-/]/i, "").replace(/^openai[-/]/i, "").replace(/\[.*\]$/, "") : "";
 
-/** A project's sessions in the order their panes are seen — tab by tab, each read top to bottom
- *  and left to right — so a session switched to chat view (a new session in the same pane) keeps
- *  its place. Sessions in no pane follow, oldest first. A sub-session family ranks as one, by the pane that shows any of it: the
- *  family's pane switching between the parent and a child must not move the group past the rows around it. */
+/** A project's sessions in a stable order: oldest first, a session switched between terminal and chat (a new session that took
+ *  over the conversation) in the place of the one it replaced (`store.sessionSince`). Nothing a person does elsewhere moves a
+ *  row: not activity or status, not opening, showing or closing a pane, not a family's pane switching between parent and child
+ *  (rows used to follow pane order, so each of those reshuffled the list). */
 function projectSessions(projectId: string): SessionInfo[] {
-  const tree = store.sessionTree();
-  const rank = new Map<string, number>();
-  for (const tab of store.workspace(projectId).tabs) {
-    for (const p of readingOrder(tab.root)) {
-      const root = p.sessionId && familyRoot(tree, p.sessionId);
-      if (root && !rank.has(root)) rank.set(root, rank.size);
-    }
-  }
-  const at = (s: SessionInfo) => rank.get(familyRoot(tree, s.id)) ?? Number.MAX_SAFE_INTEGER;
   return Object.values(store.sessions)
     .filter((s) => s.project_id === projectId)
-    .sort((a, b) => at(a) - at(b) || a.created_at - b.created_at);
+    .sort((a, b) => store.sessionSince(a) - store.sessionSince(b) || a.handle - b.handle);
 }
 
 /** A session that renders under its parent's row instead of in its project's list. A parent shown nowhere in the sidebar (the
@@ -596,7 +587,7 @@ export function Sidebar() {
   const orphans = createMemo<SessionInfo[]>((prev) => {
     const known = new Set(store.state.projects.map((p) => p.id));
     const floating = new Set(store.state.floating?.sessions ?? []);
-    const list = Object.values(store.sessions).filter((s) => (!s.project_id || !known.has(s.project_id)) && !floating.has(s.id) && !isNested(s)).sort((a, b) => a.created_at - b.created_at);
+    const list = Object.values(store.sessions).filter((s) => (!s.project_id || !known.has(s.project_id)) && !floating.has(s.id) && !isNested(s)).sort((a, b) => store.sessionSince(a) - store.sessionSince(b) || a.handle - b.handle);
     return sameList(prev, list);
   });
   const cycleFilter = () => {

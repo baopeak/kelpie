@@ -301,6 +301,73 @@ def scenario(run, d):
     w.js("const b = document.querySelector('.project[data-project=\"' + arguments[0] + '\"]').closest('.project-block'); b.querySelector('.session-row .sub-chev').click()", pid)
     check("unfolded: the children come back, in order", until(lambda: order() == want_order, 5), order())
 
+    # Nothing a session does moves a row: activity, status, a report, a new sub-session, a tab dragged, a tab opened and closed.
+    # The order is sampled all along; every sample must be the same.
+    samples = []
+
+    def sample():
+        samples.append(order())
+
+    def status_of(sid):
+        return next((s["status"] for s in d.call("session.list") if s["id"] == sid), None)
+
+    def hook(sid, event):
+        d.call("hook.report", {"session_id": sid, "agent": "claude", "payload": {"hook_event_name": event}})
+
+    click_element(row_element(one["id"]))  # a child on screen: the case that used to move the group
+    until(lambda: view()["session"] == one["id"], 10)
+    before_activity = {s["id"]: s.get("last_activity") or 0 for s in d.call("session.list")}
+    statuses = set()
+    for i in range(8):
+        for sid in (other["id"], two["id"]):
+            h = next(s["handle"] for s in d.call("session.list") if s["id"] == sid)
+            d.call("session.input", {"handle": h, "data": f"activity {i}\n"})
+        hook(other["id"] if i % 2 else two["id"], "UserPromptSubmit" if i % 4 < 2 else "Stop")
+        statuses.add(status_of(other["id"]))
+        statuses.add(status_of(two["id"]))
+        sample()
+        time.sleep(0.25)
+    run.shot(f"{PREFIX}-09-during-activity")
+    after_activity = {s["id"]: s.get("last_activity") or 0 for s in d.call("session.list")}
+    check("set-up: the sessions really had activity (last activity moved on, status changed)",
+          after_activity.get(other["id"], 0) > before_activity.get(other["id"], 0) and "working" in statuses, {"statuses": sorted(s for s in statuses if s)})
+    session_conn(two["id"]).call("sub.report", {"status": "needs_user", "summary": "a question for you"})
+    for _ in range(6):
+        sample()
+        time.sleep(0.25)
+    three = pc.call("sub.spawn", {"agent": "fake", "task": "three", "name": "third-child"})
+    names[three["id"]] = "third-child"
+    _which = which
+
+    def which(r):  # noqa: F811 - the third child joins the rows
+        return three["id"] if r["name"] == "third-child" else _which(r)
+    want_more = ["Claude (parent)", "chat-first-message-lost", "sidebar-clarity", "third-child", "Claude (other)"]
+    check("a new sub-session comes last under its parent; nothing else moves", until(lambda: order() == want_more, 15), order())
+    # The other session's tab dragged before the family's tab (as a drag on the tab bar does).
+    w.js(f"const ws = {S}.workspace(arguments[0]); const t = ws.tabs.find(t => JSON.stringify(t.root).includes(arguments[1])); {S}.moveTab(arguments[0], t.id, 0)", pid, other["id"])
+    for _ in range(4):
+        sample()
+        time.sleep(0.25)
+    # A new top-level session opened in a tab, then its tab closed.
+    late = d.call("session.create", {"kind": "fake", "cwd": WORK, "name": "late", "project_id": pid})
+    names[late["id"]] = "late"
+    __which = which
+
+    def which(r):  # noqa: F811
+        return late["id"] if r["name"] == "late" else __which(r)
+    w.js(f"{S}.revealSession(arguments[0])", late["id"])
+    check("a new top-level session comes last", until(lambda: order() == want_more + ["late"], 15), order())
+    loc = w.js(f"return {S}.paneLocation(arguments[0])", late["id"])
+    w.js_async(f"const done = arguments[arguments.length-1]; {S}.closePane(arguments[0], arguments[1], arguments[2]).then(() => done(true), e => done(String(e)))", loc["projectId"], loc["tabId"], loc["paneId"])
+    until(lambda: "late" not in order(), 15)
+    for _ in range(4):
+        sample()
+        time.sleep(0.25)
+    run.shot(f"{PREFIX}-10-after-activity")
+    moved = [s for s in samples if [x for x in s if x not in ("third-child", "late")] != want_order]
+    check("activity, status changes, a report, a new sub-session, a dragged tab and a tab opened and closed moved no row",
+          not moved and order() == want_more, moved[:3] or order())
+
 
 def main():
     if port_open(1427):

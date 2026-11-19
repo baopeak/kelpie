@@ -32,6 +32,8 @@ export const providerReply = (preq: number, result: unknown, error: string | nul
 export const listSessions = () => daemon<SessionInfo[]>("session.list");
 
 export interface CreateSession {
+  /** The new session's id, when the caller needs it before the session exists (the daemon picks one otherwise). */
+  id?: string;
   kind: string;
   cwd: string;
   project_id?: string;

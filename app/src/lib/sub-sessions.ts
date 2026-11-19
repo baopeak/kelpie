@@ -26,7 +26,7 @@ export interface SessionTree {
 /** Which sessions nest under which. A session whose parent is gone (closed, not listed) stays where it was; so does one whose
  *  parent chain loops back on itself, or points at itself: the daemon never makes one, but a damaged file or a future version
  *  must not make a session disappear from the sidebar. */
-export function buildSessionTree(sessions: readonly SessionInfo[]): SessionTree {
+export function buildSessionTree(sessions: readonly SessionInfo[], since: (s: SessionInfo) => number = (s) => s.created_at): SessionTree {
   const byId = new Map<string, SessionInfo>();
   for (const s of sessions) byId.set(s.id, s);
   const nested = new Map<string, string>();
@@ -56,7 +56,7 @@ export function buildSessionTree(sessions: readonly SessionInfo[]): SessionTree 
     if (list) list.push(s);
     else children.set(parent, [s]);
   }
-  for (const list of children.values()) list.sort((a, b) => a.created_at - b.created_at || a.handle - b.handle);
+  for (const list of children.values()) list.sort((a, b) => since(a) - since(b) || a.handle - b.handle);
   return { nested, children };
 }
 

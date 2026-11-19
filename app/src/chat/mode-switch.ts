@@ -201,8 +201,11 @@ async function doSwitchToChat(project: Project, pane: Pane) {
   try {
     // Read after the TUI stopped: a mode switched just before is in the transcript by now.
     const settings = s.kind === "claude" ? await claudeSettings(s, conv) : {};
+    // The new session keeps the replaced one's place in the sidebar from the moment it is listed (its id is known before).
+    const id = crypto.randomUUID();
+    store.inheritPlace(s.id, id);
     const info = await createSession({
-      kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? project.id, name: s.name ?? undefined,
+      id, kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? project.id, name: s.name ?? undefined,
       // Codex without a known thread id resumes the newest thread of this folder.
       agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
       chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
@@ -264,7 +267,9 @@ async function doSwitchToTerminal(project: Project, pane: Pane, command?: string
     // Only agents whose terminal UI is known to resume an ACP / chat conversation by its id get
     // it; for the others the id may mean nothing to the CLI, so their terminal starts fresh.
     const resumes = CORE_AGENTS.includes(c.kind);
-    const info = await createSession({ kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: resumes ? conv ?? undefined : undefined, args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32, prompt: command, lineage_from: c.id });
+    const id = crypto.randomUUID();
+    store.inheritPlace(c.id, id);
+    const info = await createSession({ id, kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: resumes ? conv ?? undefined : undefined, args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32, prompt: command, lineage_from: c.id });
     store.setSessions(info.id, info);
     // Where the session is now: the pane may show another sub-session since (a chip clicked while the agent stopped).
     const loc = store.paneLocation(c.id);
@@ -291,8 +296,10 @@ async function resumeChat(s: SessionInfo) {
 /** A new chat front-end for `s`'s conversation `conv` (a new conversation when there is none yet), in its pane, on the
  *  same account and environment. The old process must have stopped. */
 async function replaceChat(s: SessionInfo, conv: string | null, settings: AgentSettings) {
+  const id = crypto.randomUUID();
+  store.inheritPlace(s.id, id);
   const info = await createSession({
-    kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? undefined, name: s.name ?? undefined,
+    id, kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? undefined, name: s.name ?? undefined,
     agent_session_id: conv ?? (s.kind === "codex" ? "latest" : undefined),
     chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
     env: ownEnv(s) ?? store.profileLaunch(s.kind).env,
