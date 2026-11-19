@@ -396,7 +396,7 @@ export type ScOp =
 export type Mod = "ctrl" | "shift" | "alt" | "meta";
 
 /** The key bar: what a dialog, an IDE or a sign-in needs, the Windows key last. Letters and digits are typed as text, or sent as keys with a modifier held. */
-export const KEYS = ["Escape", "Tab", "Enter", "Backspace", "Delete", "ArrowLeft", "ArrowUp", "ArrowDown", "ArrowRight", "Home", "End", "PageUp", "PageDown", "F5", "ContextMenu", "Meta"] as const;
+export const KEYS = ["Escape", "Tab", "Enter", "Backspace", "Delete", "ArrowLeft", "ArrowUp", "ArrowDown", "ArrowRight", "Home", "End", "PageUp", "PageDown", "ContextMenu", "Meta", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"] as const;
 /** Ctrl, Shift, Alt and the Windows key (`meta`): tapped, a modifier is held for the next key. The Windows key alone is `Meta` (Start). */
 export const MODS: Mod[] = ["ctrl", "shift", "alt", "meta"];
 
@@ -684,6 +684,14 @@ export class Gestures {
     if (this.mode !== "trackpad") return null;
     const at = cursorIntoView(f.el, f.srcW, f.srcH, f.view, this.cursor, followMargin(f.el));
     return at.x !== this.cursor.x || at.y !== this.cursor.y ? at : null;
+  }
+
+  /** Before an on-screen mouse button acts at the cursor: the cursor brought back into view when it is out of sight (and nothing else done),
+   *  or null when it is in view and the button may act there. */
+  bringBack(f: Frame): GestureOut | null {
+    // Whatever the mode: the buttons always act at the cursor, so a cursor out of sight is brought back in Direct touch too.
+    const at = cursorIntoView(f.el, f.srcW, f.srcH, f.view, this.cursor, followMargin(f.el));
+    return at.x !== this.cursor.x || at.y !== this.cursor.y ? this.broughtIn(at) : null;
   }
 
   /** The cursor brought back into view (`bringIn`): a move there, and no click. */

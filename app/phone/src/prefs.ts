@@ -39,6 +39,8 @@ export function flag(key: string, fallback: boolean): Pref<boolean> {
 
 /** The computer's screen showed its gestures once (a first screen opens with them; the ? button shows them again). */
 export const screenGesturesSeen = flag("kelpie-screen-gestures-seen", false);
+/** The computer's screen shows the on-screen mouse buttons under the picture. */
+export const screenMouseBar = flag("kelpie-screen-mouse-bar", false);
 
 /** How long the app may stay out of sight before coming back asks for the passkey again, in seconds. 0 is "Immediately". */
 export const LOCK_GRACE_CHOICES = [0, 60, 300, 900] as const;

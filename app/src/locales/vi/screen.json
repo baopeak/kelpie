@@ -104,5 +104,14 @@
   "Trying again in {n} s.": "Điện thoại sẽ thử lại sau {n} giây.",
   "Stop trying": "Dừng thử lại",
   "Still busy. Tap See it to try again.": "Máy tính vẫn còn bận. Bạn nhấn Xem để thử lại.",
-  "The computer is less busy now. Tap See it to start.": "Máy tính đã bớt bận. Bạn nhấn Xem để bắt đầu."
+  "The computer is less busy now. Tap See it to start.": "Máy tính đã bớt bận. Bạn nhấn Xem để bắt đầu.",
+  "Mouse": "Chuột",
+  "Mouse buttons": "Các nút chuột",
+  "Left": "Trái",
+  "Middle": "Giữa",
+  "Right": "Phải",
+  "Scroll up": "Cuộn lên",
+  "Scroll down": "Cuộn xuống",
+  "Hold": "Giữ",
+  "Release": "Thả"
 }
