@@ -192,7 +192,7 @@ impl Sample {
     /// and heat ask for L2 at most and battery saver for L1. A screen may start low at an L3 that memory alone causes (`screen::admit`):
     /// on a large computer under 8 % free can be gigabytes. The reasons list says which reasons ask, not for which level.
     pub fn asks_l3_without_memory(&self) -> bool {
-        let mut rest = self.without_memory();
+        let rest = self.without_memory();
         // A pegged CPU asks for L2 at most, so its three-sample count does not matter here.
         rest.wants(true).0 == Level::L3
     }
