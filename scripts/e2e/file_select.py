@@ -14,7 +14,8 @@ Checks:
 2. a drag that starts inside the text already selected selects anew from there (before the fix the browser began dragging the selected
    text away instead, and cancelled the press after a few pixels);
 3. the same after Ctrl+A (everything selected, so every press is inside it);
-4. the same after a click elsewhere in the window took the focus from the editor.
+4. a drag over a ten-line paragraph, from inside a selection in it, selects all ten lines;
+5. the same as 2 after a click on a bare part of the sidebar took the focus from the editor (the editor still shown).
 """
 import os
 import sys
@@ -35,6 +36,17 @@ LINES = [
     "}",
     "",
     "export const gamma = alpha(20);",
+    "",
+    "// A paragraph of ten lines, as a person reads a long comment:",
+    "// the first line says what the module is for,",
+    "// the second why it exists at all,",
+    "// the third what it leaves to its callers,",
+    "// the fourth which errors it reports,",
+    "// the fifth which it only logs,",
+    "// the sixth what it costs to run,",
+    "// the seventh where its tests live,",
+    "// the eighth who to ask about it,",
+    "// and the last that this is the end of it.",
 ]
 
 # What the page put on the clipboard at its last copy (CodeMirror fills the event's data itself), or what was selected then.
@@ -147,12 +159,29 @@ def scenario(run):
     got = copied(d)
     run.check("after Ctrl+A a drag still selects (lines 2 and 3 only)", got == text(2, 3) and not cancelled, (repr(got[:100]), cancelled))
 
-    # 4. The focus elsewhere in the window, the selection still drawn: a drag inside it gives the editor the focus and selects anew.
-    away = d.js("const t = document.querySelector('.sidebar, aside, nav'); if (!t) return null; const r = t.getBoundingClientRect(); return [r.left + 20, r.bottom - 30];")
+    # 4. A paragraph: part of it selected, then a drag from inside that part over all ten lines selects them all.
+    drag_lines(d, 9, 12)
+    cancelled = drag_lines(d, 9, 18)
+    got = copied(d)
+    run.check("a drag over a ten-line paragraph, from inside a selection in it, selects all ten lines", got == text(9, 18) and not cancelled, (repr(got[:60]), len(got.splitlines()), cancelled))
+    drag_lines(d, 2, 3)
+
+    # 5. The focus elsewhere in the window, the selection still drawn: a drag inside it gives the editor the focus and selects anew.
+    # The click lands on a bare part of the sidebar (no button or link there, so the window stays as it is).
+    away = d.js("""
+      const t = document.querySelector('.sidebar, aside, nav'); if (!t) return null;
+      const r = t.getBoundingClientRect();
+      for (let y = r.bottom - 60; y > r.top + 40; y -= 12) for (let x = r.left + 8; x < r.right - 8; x += 12) {
+        const el = document.elementFromPoint(x, y);
+        if (el && t.contains(el) && !el.closest('button, a, input, select, textarea, [role], [tabindex], [draggable=true], [data-project]')) return [x, y];
+      }
+      return null;
+    """)
+    run.check("a bare spot of the sidebar is there to click", bool(away))
     if away:
         d.pointer([("move", away[0], away[1]), ("down",), ("up",)])
     time.sleep(0.4)
-    run.check("the focus left the editor", not d.js("return !!document.querySelector('.cm-editor.cm-focused')"))
+    run.check("the focus left the editor, which is still shown", not d.js("return !!document.querySelector('.cm-editor.cm-focused')") and d.js("return !!document.querySelector('.cm-content')"))
     cancelled = drag_lines(d, 2, 4)
     got = copied(d)
     run.check("…and a drag inside the old selection gives it the focus and selects anew", got == text(2, 4) and not cancelled, (repr(got[:100]), cancelled))
