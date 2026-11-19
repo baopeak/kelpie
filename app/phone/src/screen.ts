@@ -1498,6 +1498,11 @@ export class ScreenSession {
   /** A media message, from the link or peer to peer: whether it goes to the view. A video frame older than one already taken does not (in a switch
    *  the old way's last frames can come after the new way's first, which is a keyframe). */
   incoming(bytes: Uint8Array): boolean {
+    // Only a screen starting or shown takes media. A closed one's last frames still come (a page that slept reads all that was sent
+    // meanwhile, after it closed the screen): taken, they would put the order past the next screen's frames, which count from 0
+    // again, and that screen would show nothing and ask for keyframes for good.
+    const phase = this.state?.phase;
+    if (phase !== "starting" && phase !== "live" && phase !== "frozen") return false;
     const video = bytes[1] === KIND_VIDEO;
     if (video) {
       const m = parseMedia(bytes);

@@ -1490,6 +1490,12 @@ describe("the screen peer to peer", () => {
     expect(r.s.incoming(video(4)), "the link's last frame after the peer's keyframe").toBe(false);
     expect(r.s.incoming(video(6))).toBe(true);
     expect(r.s.incoming(new Uint8Array([0x01, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0])), "a cursor always goes").toBe(true);
+    // Closed, its last frames still come (a page that slept reads them late): they go nowhere, and the next screen counts from 0 again.
+    r.s.close();
+    expect(r.s.incoming(video(900))).toBe(false);
+    await r.s.openPicker();
+    await r.s.pick("w:1:2");
+    expect(r.s.incoming(video(1)), "the next screen's first frame").toBe(true);
   });
 
   it("no peer without WebRTC in this browser, and the row says why", async () => {
