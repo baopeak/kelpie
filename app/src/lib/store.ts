@@ -332,6 +332,11 @@ function createAppStore() {
     });
   }
 
+  /** The place kept for `id` goes (the session it was kept for was never created, or closed). */
+  function forgetPlace(id: string) {
+    if (state.sessionSince?.[id] !== undefined) update((st) => void delete st.sessionSince![id]);
+  }
+
   // ---------- sub-sessions ----------
   /** Which sessions nest under which, children in their stable order. Read only through `parent`, the ids and the order, so a
    *  status tick re-runs nothing here. */
@@ -530,7 +535,7 @@ function createAppStore() {
           const shown = !closingFromPane.delete(s.id) && paneLocation(s.id);
           const back = shown && familyFallback(s);
           setSessions(produce((m) => delete m[s.id]));
-          if (state.sessionSince?.[s.id] !== undefined) update((st) => void delete st.sessionSince![s.id]);
+          forgetPlace(s.id);
           if (shown && back) updatePane(shown.projectId, shown.tabId, shown.paneId, { kind: back.chat ? "chat" : "terminal", sessionId: back.id });
           if (state.floating?.sessions.includes(s.id)) {
             update((st) => {
@@ -1413,14 +1418,15 @@ function createAppStore() {
 
   /** What a click on a session does (its sidebar row): shows it, and the keyboard goes to it. */
   function goToSession(sessionId: string) {
-    revealSession(sessionId);
+    revealSession(sessionId, { pulse: true });
     focusSessionInput(sessionId);
   }
 
-  /** Reveals a session: switches project/tab, or opens it in a new tab if not in any layout. Its pane and sidebar row pulse for a
-   *  moment, so the eye follows where the window went. */
-  function revealSession(sessionId: string) {
-    pulseSession(sessionId);
+  /** Reveals a session: switches project/tab, or opens it in a new tab if not in any layout. When the view moves to it (or
+   *  `pulse`, a click on it), its pane and sidebar row pulse for a moment, so the eye follows where the window went; revealing
+   *  the session already on screen (opening its composer, sending from it) plays nothing. */
+  function revealSession(sessionId: string, opts: { pulse?: boolean } = {}) {
+    if (opts.pulse || focusedSession() !== sessionId) pulseSession(sessionId);
     const loc = paneLocation(sessionId);
     recordRecent("session", sessionId, sessions[sessionId]?.project_id ?? loc?.projectId ?? state.activeProject ?? "");
     if (loc) {
@@ -1988,7 +1994,7 @@ function createAppStore() {
   return {
     state, sessions, connected, sessionsKnown, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
     init, activeProject, workspace, activeTab, addProject, removeProject, restoreProjects, renameProject, moveProject, switchProject,
-    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, openFile, closePane,
+    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, forgetPlace, openFile, closePane,
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,

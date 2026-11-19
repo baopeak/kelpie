@@ -1721,6 +1721,8 @@ button.sub-crumb:hover { color: var(--text); }
 .inbox .sub-card { margin: 4px 10px; box-shadow: none; }
 /* Nested rows give the name the room: smaller indent, no age (it is in the tooltip). */
 .sub-list .session-row { gap: 5px; padding-left: 5px; padding-right: 6px; }
+/* Compact rows keep the nested indent too, so a child's fold arrow stays over its children's tree line. */
+:root[data-density="compact"] .sub-list .session-row { padding-left: 5px; padding-right: 6px; }
 .sub-list .session-row .age:not(.state-label) { display: none; }
 /* "Later" sits at the card's top right (last in the tab order, after Deny). */
 .sub-card { position: relative; }

@@ -198,11 +198,11 @@ async function doSwitchToChat(project: Project, pane: Pane) {
     store.notify(t("The terminal session did not stop; not starting a second writer."));
     return;
   }
+  // The new session keeps the replaced one's place in the sidebar from the moment it is listed (its id is known before).
+  const id = newSessionId();
   try {
     // Read after the TUI stopped: a mode switched just before is in the transcript by now.
     const settings = s.kind === "claude" ? await claudeSettings(s, conv) : {};
-    // The new session keeps the replaced one's place in the sidebar from the moment it is listed (its id is known before).
-    const id = crypto.randomUUID();
     store.inheritPlace(s.id, id);
     const info = await createSession({
       id, kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? project.id, name: s.name ?? undefined,
@@ -220,6 +220,7 @@ async function doSwitchToChat(project: Project, pane: Pane) {
     disposeView(s.id);
     await daemon("session.close", { handle: s.handle }).catch(() => {});
   } catch (e) {
+    store.forgetPlace(id);
     await markSwitching(s, false);
     store.notify(t("Chat mode failed: {error}", { error: String(e) }));
   }
@@ -258,6 +259,7 @@ async function doSwitchToTerminal(project: Project, pane: Pane, command?: string
     store.notify(t("The chat process did not stop; not starting a second writer."));
     return;
   }
+  const id = newSessionId();
   try {
     // The terminal front-end gets the profile's flags back (chat argv used its own form), with
     // what chat view's pickers are set to in place of the profile's own model / effort / mode.
@@ -267,7 +269,6 @@ async function doSwitchToTerminal(project: Project, pane: Pane, command?: string
     // Only agents whose terminal UI is known to resume an ACP / chat conversation by its id get
     // it; for the others the id may mean nothing to the CLI, so their terminal starts fresh.
     const resumes = CORE_AGENTS.includes(c.kind);
-    const id = crypto.randomUUID();
     store.inheritPlace(c.id, id);
     const info = await createSession({ id, kind: c.kind, cwd: c.cwd, project_id: c.project_id ?? project.id, name: c.name ?? undefined, agent_session_id: resumes ? conv ?? undefined : undefined, args, env: ownEnv(c) ?? launch.env, cols: 120, rows: 32, prompt: command, lineage_from: c.id });
     store.setSessions(info.id, info);
@@ -277,9 +278,16 @@ async function doSwitchToTerminal(project: Project, pane: Pane, command?: string
     disposeController(c.id);
     await daemon("session.close", { handle: c.handle }).catch(() => {});
   } catch (e) {
+    store.forgetPlace(id);
     await markSwitching(c, false);
     store.notify(t("Terminal mode failed: {error}", { error: String(e) }));
   }
+}
+
+/** An id for a session that replaces another, known before the daemon creates it (where `crypto.randomUUID` is missing, a
+ *  time-and-random one). */
+function newSessionId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /** A chat session stopped by a daemon restart (or hibernation): a new chat front-end resuming
@@ -296,7 +304,7 @@ async function resumeChat(s: SessionInfo) {
 /** A new chat front-end for `s`'s conversation `conv` (a new conversation when there is none yet), in its pane, on the
  *  same account and environment. The old process must have stopped. */
 async function replaceChat(s: SessionInfo, conv: string | null, settings: AgentSettings) {
-  const id = crypto.randomUUID();
+  const id = newSessionId();
   store.inheritPlace(s.id, id);
   const info = await createSession({
     id, kind: s.kind, cwd: s.cwd, project_id: s.project_id ?? undefined, name: s.name ?? undefined,
@@ -304,6 +312,9 @@ async function replaceChat(s: SessionInfo, conv: string | null, settings: AgentS
     chat_argv: chatArgv(s.kind, s.kind === "claude" ? conv : null, settings),
     env: ownEnv(s) ?? store.profileLaunch(s.kind).env,
     lineage_from: s.id,
+  }).catch((e) => {
+    store.forgetPlace(id);
+    throw e;
   });
   store.setSessions(info.id, info);
   const loc = store.paneLocation(s.id);

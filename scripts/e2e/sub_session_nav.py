@@ -184,6 +184,34 @@ return {
 """
 
 
+# Records every pulse as it starts (`row:<session>` / `pane:<session>`), so a check does not depend on polling inside the 0.9 s it
+# lasts. Armed (emptied) before each click.
+PULSE_WATCH_JS = """
+window.__pulses = [];
+if (!window.__pulseObserver) {
+  const note = (el) => {
+    if (!(el instanceof Element) || !/reveal-pulse-[ab]/.test(el.getAttribute('class') || '')) return;
+    if (el.dataset.rowSession) window.__pulses.push('row:' + el.dataset.rowSession);
+    else if (el.classList.contains('pane-pulse')) {
+      const t = el.closest('.pane') && el.closest('.pane').querySelector('.term-wrap');
+      window.__pulses.push('pane:' + (t ? t.dataset.session : ''));
+    }
+  };
+  window.__pulseObserver = new MutationObserver((ms) => {
+    for (const m of ms) {
+      if (m.type === 'attributes') note(m.target);
+      for (const added of m.addedNodes) {
+        if (!(added instanceof Element)) continue;
+        note(added);
+        added.querySelectorAll('[class*="reveal-pulse-"]').forEach(note);
+      }
+    }
+  });
+  window.__pulseObserver.observe(document.body, {subtree: true, childList: true, attributes: true, attributeFilter: ['class']});
+}
+"""
+
+
 def scenario(run, d):
     w = run.d
     w.set_window_size(1280, 800)
@@ -234,19 +262,12 @@ def scenario(run, d):
         return w.js(f"const b = document.querySelector('.project[data-project=\"' + arguments[0] + '\"]').closest('.project-block'); return [...b.querySelectorAll('.session-list .session-row')][arguments[1]];", pid, i)
 
     def click_element(el):
+        w.js(PULSE_WATCH_JS)
         w._req("POST", w.s(f"/element/{next(iter(el.values()))}/click"), {})
 
     def landed(sid, label, tab_title, chip, crumbs):
         """After a click on `sid`: what a person sees."""
-        pulse_seen = {"row": False, "pane": False}
-
-        def seen():
-            v, rs = view(), rows()
-            row = next((r for r in rs if which(r) == sid), None)
-            pulse_seen["row"] |= bool(row and row["pulse"])
-            pulse_seen["pane"] |= v["pulse"]
-            return v["session"] == sid and v
-        v = until(seen, 10, 0.05)
+        v = until(lambda: view()["session"] == sid and view(), 10, 0.05)
         shot = f"{PREFIX}-{label}"
         run.shot(shot)
         v = v or view()
@@ -264,7 +285,8 @@ def scenario(run, d):
         sel = [names.get(which(r)) for r in rs if r["selected"]]
         check(f"{label}: its row, and only its row, is marked selected", sel == [names[sid]], sel)
         check(f"{label}: its row is in view", any(which(r) == sid and r["inView"] for r in rs), rs)
-        check(f"{label}: its row and its pane pulsed", pulse_seen["row"] and pulse_seen["pane"], pulse_seen)
+        pulses = until(lambda: (lambda p: f"row:{sid}" in p and f"pane:{sid}" in p and p)(w.js("return window.__pulses || []")), 3, 0.1) or w.js("return window.__pulses || []")
+        check(f"{label}: its row and its pane pulsed", f"row:{sid}" in pulses and f"pane:{sid}" in pulses, pulses)
         check(f"{label}: the keyboard is in its terminal", until(lambda: view()["keyboard"], 3, 0.1), view())
         check(f"{label}: the sidebar kept its order", order() == want_order, order())
 
@@ -357,16 +379,23 @@ def scenario(run, d):
         return late["id"] if r["name"] == "late" else __which(r)
     w.js(f"{S}.revealSession(arguments[0])", late["id"])
     check("a new top-level session comes last", until(lambda: order() == want_more + ["late"], 15), order())
+    # Its tab closed while the session keeps running (kill = false): the session used to fall to the bottom of the list.
     loc = w.js(f"return {S}.paneLocation(arguments[0])", late["id"])
-    w.js_async(f"const done = arguments[arguments.length-1]; {S}.closePane(arguments[0], arguments[1], arguments[2]).then(() => done(true), e => done(String(e)))", loc["projectId"], loc["tabId"], loc["paneId"])
-    until(lambda: "late" not in order(), 15)
+    w.js_async(f"const done = arguments[arguments.length-1]; {S}.closePane(arguments[0], arguments[1], arguments[2], false).then(() => done(true), e => done(String(e)))", loc["projectId"], loc["tabId"], loc["paneId"])
+    until(lambda: not w.js(f"return {S}.paneLocation(arguments[0])", late["id"]), 15)
+    check("set-up: the late session's tab is closed and the session still runs",
+          not w.js(f"return {S}.paneLocation(arguments[0])", late["id"]) and any(x["id"] == late["id"] and x.get("alive") for x in d.call("session.list")), order())
+    # And the other session's tab closed the same way: it had a tab from the start, so the old pane order ranked it high.
+    oloc = w.js(f"return {S}.paneLocation(arguments[0])", other["id"])
+    w.js_async(f"const done = arguments[arguments.length-1]; {S}.closePane(arguments[0], arguments[1], arguments[2], false).then(() => done(true), e => done(String(e)))", oloc["projectId"], oloc["tabId"], oloc["paneId"])
+    until(lambda: not w.js(f"return {S}.paneLocation(arguments[0])", other["id"]), 15)
     for _ in range(4):
         sample()
         time.sleep(0.25)
     run.shot(f"{PREFIX}-10-after-activity")
     moved = [s for s in samples if [x for x in s if x not in ("third-child", "late")] != want_order]
-    check("activity, status changes, a report, a new sub-session, a dragged tab and a tab opened and closed moved no row",
-          not moved and order() == want_more, moved[:3] or order())
+    check("activity, status changes, a report, a new sub-session, a dragged tab and tabs opened and closed moved no row",
+          not moved and order() == want_more + ["late"], moved[:3] or order())
 
 
 def main():
