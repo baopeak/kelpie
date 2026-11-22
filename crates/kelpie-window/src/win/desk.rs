@@ -13,10 +13,12 @@ use windows::Win32::System::StationsAndDesktops::{
     CreateDesktopW, SetThreadDesktop, DESKTOP_CONTROL_FLAGS,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
 };
 
 pub const NAME: &str = "kelpie-agent";
+/// `SW_SHOWNOACTIVATE`: the program's first window shows without taking the focus from the person (a program may still take it).
+const SHOW_NO_ACTIVATE: u16 = 4;
 /// `GENERIC_ALL`.
 const ALL_ACCESS: u32 = 0x1000_0000;
 
@@ -54,17 +56,29 @@ pub fn rejoin() {
     }
 }
 
-/// Start a program on the agent's desktop. `command_line` is the whole line, quoted (`scope::command_line`). What comes back is the
+/// Start a program: on the agent's desktop (`hidden`), or on the person's with its first window shown and not activated.
+/// `command_line` is the whole line, quoted (`scope::command_line`).
+///
+/// The program gets none of this helper's handles. With them it would hold the pipe this helper's output goes to: a caller that reads
+/// that output to its end (an agent's tool call does) would then wait for as long as the program runs (seen in CI: a check that read
+/// `launch` through a pipe never came back).
+///
+/// What comes back is the
 /// process id and its creation time, read while the process's handle is still open: read after, a program that ended at once could have
 /// left its id to another process, which would then be taken for it.
-pub fn start(command_line: &str) -> Result<(u32, u64), String> {
+pub fn start(command_line: &str, hidden: bool) -> Result<(u32, u64), String> {
     let mut line = wide(command_line);
     let mut desktop = wide(NAME);
-    let info = STARTUPINFOW {
+    let mut info = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-        lpDesktop: PWSTR(desktop.as_mut_ptr()),
         ..Default::default()
     };
+    if hidden {
+        info.lpDesktop = PWSTR(desktop.as_mut_ptr());
+    } else {
+        info.dwFlags = STARTF_USESHOWWINDOW;
+        info.wShowWindow = SHOW_NO_ACTIVATE;
+    }
     let mut made = PROCESS_INFORMATION::default();
     unsafe {
         CreateProcessW(

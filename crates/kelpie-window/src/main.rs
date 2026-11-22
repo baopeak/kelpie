@@ -34,9 +34,7 @@ fn main() {
 
 #[cfg(windows)]
 mod cli {
-    use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
-    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     use kelpie_screen::targets::{TargetId, WindowInfo};
@@ -47,15 +45,13 @@ mod cli {
     };
     use kelpie_window::tree::{content_pending, outline, parse_id, prune, Action, MAX_NODES};
     use kelpie_window::win::desk;
-    use kelpie_window::win::procs::{created, processes};
+    use kelpie_window::win::procs::processes;
     use kelpie_window::win::shot;
     use kelpie_window::win::uia::Uia;
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 
     const USAGE: &str = "usage: kelpie-window launch <program> [arguments…] | list | tree <target> [--max N] [--rects] | act <target> <id> <action> [text] | shot <target> <file.png> | close <target>\n";
-    /// `SW_SHOWNOACTIVATE`: the program's first window shows without taking the focus from the person.
-    const SHOW_NO_ACTIVATE: u16 = 4;
     /// How long `launch` waits for the program's first window before it answers without one.
     const WINDOW_WAIT: Duration = Duration::from_secs(15);
     /// How many more times, and how far apart, a window is read while its page is not in the tree yet.
@@ -267,25 +263,11 @@ mod cli {
             return Err(why.into());
         }
         // The creation time is read while the process's handle is open, so that it and the id name the same process.
-        let (pid, made) = if hidden {
-            // The program inherits this process's environment; no other thread of this process runs yet.
-            unsafe { std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &web_args) };
-            desk::start(&command_line(program, &args[1..]))
-                .map_err(|e| format!("{program}: {e}"))?
-        } else {
-            let mut cmd = Command::new(program);
-            cmd.args(&args[1..])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .show_window(SHOW_NO_ACTIVATE)
-                .env("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &web_args);
-            // The child is not waited for: it lives on after this command.
-            let child = cmd
-                .spawn()
-                .map_err(|e| format!("{program} could not be started: {e}"))?;
-            (child.id(), created(child.id()))
-        };
+        // The program inherits this process's environment; no other thread of this process runs yet. It is not waited for: it lives on
+        // after this command.
+        unsafe { std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &web_args) };
+        let (pid, made) = desk::start(&command_line(program, &args[1..]), hidden)
+            .map_err(|e| format!("{program}: {e}"))?;
         if made == 0 {
             return Err(format!("{program} ended as soon as it started"));
         }
