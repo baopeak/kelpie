@@ -121,6 +121,27 @@ jobs:
           dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" \
             python scripts/e2e/boot_smoke.py smoke target/release/kelpie \
               --out smoke/linux-smoke.json "${baseline[@]}"
+      # Not gating yet: it shows how often a boot check through the window helper passes on this runner, where a WebDriver session
+      # with the app could not be opened (0 of 10 boot smokes in the trial of 2026-11-22).
+      - name: Windows boot check through the window helper (isolated daemon, release app)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p kelpie-window
+          mkdir -p window-boot
+          python scripts/e2e/window_boot.py window-boot target/release/kelpie.exe target/release/kelpie-window.exe --out window-boot/window-boot.json
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: windows-window-boot
+          path: |
+            window-boot/*.json
+            window-boot/*.png
+          if-no-files-found: ignore
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         with:
           name: kelpie-${{ matrix.os }}
