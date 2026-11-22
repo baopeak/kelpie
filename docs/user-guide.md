@@ -578,6 +578,23 @@ can add a short chime. The same notification shows at most once a minute. The ca
 the bell mutes desktop notifications (it reads *muted* in amber) and turns them on again; the
 list keeps everything either way.
 
+#### Checks still owed
+
+Some checks an agent cannot make itself: trying the change in the real app, on a real phone, on a
+clean machine, after a day of use, or only you can say it is right. An agent that reports with
+`kelpie_report` (or `kelpied sub report`) can name up to four of them as it reports; it never closes
+one. Each is recorded for the agent's project and shows in the bell's list as a group **Checks
+still owed · *project***, oldest first: the kind (Real app, Phone, Clean machine, Over time, Owner's
+check), what is owed, what closes it, who opened it and how long ago. These entries raise no
+notification and are not counted in *Unread*, because no agent is waiting on you.
+
+To close one, click **Close**, type the evidence (a path, a link, or your word) and press Enter. An
+entry stays until you close it with evidence. In a command the form is `kelpied sub report
+--owes phone:open the link on the phone:a photo of the screen done "fixed the link"`, repeated for
+each check; *what* has no colon, and the part after the second colon (how it closes) may have
+colons, such as a link. A check that does not fit (an unknown kind, no way to close it) is refused
+with the reason, and the report itself still goes through.
+
 #### On your phone, with the window closed
 
 Settings → Notifications → *Off this computer* sends the same events from the session daemon,

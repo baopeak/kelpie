@@ -1156,6 +1156,12 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .inbox-body { color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .inbox .age { font-size: 11px; color: var(--text-faint); }
 .inbox .group-label { padding: 6px 12px 2px; }
+/* A check still owed: its sentences are read whole, so they wrap instead of being cut. */
+.inbox-item.owed { cursor: default; }
+.inbox-item.owed:hover { background: none; }
+.inbox-item.owed .inbox-title, .inbox-item.owed .inbox-body { white-space: normal; overflow-wrap: anywhere; }
+.inbox-item.owed .inbox-body.error { color: var(--danger); }
+.inbox-item.owed .owed-actions { display: flex; gap: 10px; }
 
 /* Settings: agents, automations */
 .agent-list { display: flex; flex-direction: column; gap: 6px; width: 100%; }

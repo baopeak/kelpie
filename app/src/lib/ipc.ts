@@ -18,6 +18,12 @@ export const mobileSecure = <T = unknown>(method: "mobile.approve" | "mobile.set
 export const subAnswer = (id: string, decision: "once" | "session" | "always" | "deny") => daemon<unknown>("sub.answer", { id, decision });
 /** Requests still waiting for the user (the daemon keeps them for 5 minutes). */
 export const subPending = () => daemon<unknown[]>("sub.pending");
+/** The record of checks a change still owes (API 47): every project's entries, open ones first. */
+export const owedList = (project?: string) => daemon<unknown[]>("owed.list", project ? { project } : {});
+/** Records a check someone still has to make; `closes_by` says what proves it. */
+export const owedOpen = (entry: { project: string; kind: string; what: string; closes_by: string; pr?: number }) => daemon<unknown>("owed.open", entry);
+/** Closes a check. The daemon refuses an empty `evidence` (a path, a link, the owner's word). */
+export const owedClose = (id: string, evidence: string) => daemon<unknown>("owed.close", { id, evidence });
 /** The daemon's policy. The sub-session part: `sub_sessions` off|ask|allow, `sub_max` (0: automatic), read-only `sub_auto_max`. The browser-pane
  *  part: `browser_agents` off|read|act, `browser_eval`, `browser_sites` (origins). */
 export const policyGet = () => daemon<unknown>("daemon.policy");

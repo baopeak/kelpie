@@ -10,6 +10,7 @@ import { waitedFor, waitingSessions } from "../lib/attention";
 import { t } from "../lib/i18n";
 import { subRequests } from "../lib/sub-sessions";
 import { SubRequestCard } from "./sub-request-card";
+import { OwedGroups } from "./owed-group";
 
 const ICON: Record<InboxItem["kind"], string> = { finished: "check", waiting: "bell", automation: "clock", worktree: "branch", error: "close", cost: "alert", phone: "terminal" };
 
@@ -50,6 +51,7 @@ export function InboxPanel(props: { onClose: () => void }) {
           <div class="group-label">{t("Sub-session requests")}</div>
           <For each={subRequests()}>{(r) => <SubRequestCard request={r} inbox />}</For>
         </Show>
+        <OwedGroups />
         <Show when={waiting().length}>
           <div class="group-label">{t("Needs you")}</div>
           <For each={waiting()}>

@@ -306,6 +306,20 @@ async fn report_checks_the_status_and_says_who_was_told() {
 }
 
 #[tokio::test]
+async fn report_passes_the_checks_it_owes_and_says_which_were_refused() {
+    let owes = json!([{"kind": "phone", "what": "open the link on a phone", "closes_by": "a photo"}, {"kind": "later", "what": "w", "closes_by": "c"}]);
+    let fake = Fake::new("c").reply("sub.report", json!({"delivered_to": null, "owes": {"opened": [{"id": "o1"}], "refused": ["owes[1]: kind must be one of real_app, phone, clean_machine, soak, owner"]}}));
+    let out = run_tool(&mut fake.clone(), "kelpie_report", &json!({"status": "done", "summary": "ok", "owes": owes})).await;
+    assert!(!out.is_error, "{}", out.text);
+    assert!(out.text.contains("Recorded 1 check(s) still owed") && out.text.contains("Not recorded: owes[1]: kind must be one of"), "{}", out.text);
+    assert_eq!(fake.calls_of("sub.report")[0]["owes"], owes);
+    // Without `owes` the daemon is not sent the key.
+    let plain = Fake::new("c").reply("sub.report", json!({"delivered_to": null}));
+    run_tool(&mut plain.clone(), "kelpie_report", &json!({"status": "done", "summary": "ok"})).await;
+    assert!(plain.calls_of("sub.report")[0].get("owes").is_none());
+}
+
+#[tokio::test]
 async fn close_and_inbox() {
     let fake = Fake::new("p").reply("sub.close", json!(true));
     let out = run_tool(&mut fake.clone(), "kelpie_close", &json!({"session": "3"})).await;
