@@ -45,7 +45,7 @@ mod cli {
     use kelpie_window::scope::{
         alive, command_line, kelpie_refusal, owner, remember, scope_name, Launched, Proc,
     };
-    use kelpie_window::tree::{outline, parse_id, prune, Action, MAX_NODES};
+    use kelpie_window::tree::{content_pending, outline, parse_id, prune, Action, MAX_NODES};
     use kelpie_window::win::desk;
     use kelpie_window::win::procs::{created, processes};
     use kelpie_window::win::shot;
@@ -58,6 +58,11 @@ mod cli {
     const SHOW_NO_ACTIVATE: u16 = 4;
     /// How long `launch` waits for the program's first window before it answers without one.
     const WINDOW_WAIT: Duration = Duration::from_secs(15);
+    /// How many more times, and how far apart, a window is read while its page is not in the tree yet.
+    const PAGE_READS: usize = 4;
+    const PAGE_WAIT: Duration = Duration::from_millis(700);
+    /// The smallest window listed.
+    const MIN_SIDE: i32 = 24;
     const ACCESSIBLE: &str = "--force-renderer-accessibility";
     const NOT_YOURS: &str = "not a window of a program you started: start the app with `kelpie-window launch`, then `kelpie-window list`";
 
@@ -103,7 +108,8 @@ mod cli {
     /// A window a person or an agent could use: shown, with a size. Dialogs (owned windows) are included: an app's questions are asked
     /// in them.
     fn usable(w: &WindowInfo) -> bool {
-        w.visible && !w.cloaked && (w.minimized || (w.rect.w > 1 && w.rect.h > 1))
+        // An app's helper windows (a 16x16 one behind a tray icon) are not something to use.
+        w.visible && !w.cloaked && (w.minimized || (w.rect.w >= MIN_SIDE && w.rect.h >= MIN_SIDE))
     }
 
     fn in_reach(launched: &[Launched], procs: &[Proc]) -> Vec<(WindowInfo, Launched)> {
@@ -192,7 +198,17 @@ mod cli {
                     }
                 }
                 let origin = shot::frame(h).map(|f| (f.x, f.y)).unwrap_or_default();
-                let nodes = prune(Uia::new()?.nodes(h, origin)?);
+                let uia = Uia::new()?;
+                let mut nodes = uia.nodes(h, origin)?;
+                // A web view builds its page's tree once it has been asked: ask again while a large container is still empty.
+                for _ in 0..PAGE_READS {
+                    if !content_pending(&nodes) {
+                        break;
+                    }
+                    std::thread::sleep(PAGE_WAIT);
+                    nodes = uia.nodes(h, origin)?;
+                }
+                let nodes = prune(nodes);
                 Ok(outline(&nodes, max, rects))
             }
             Some("act") => {

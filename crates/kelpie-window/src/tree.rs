@@ -146,6 +146,22 @@ pub fn prune(nodes: Vec<Node>) -> Vec<Node> {
     out
 }
 
+/// Whether a large part of the window is a container with nothing in it yet. A web view builds its page's tree only once something
+/// has asked for it (seen on a Tauri window: the first read gave the frame and an empty "Web content" pane, the second the page), so a
+/// read that looks like this is taken again a moment later. `nodes` are as read, before pruning; the first is the window.
+pub fn content_pending(nodes: &[Node]) -> bool {
+    let Some([_, _, w, h]) = nodes.first().and_then(|n| n.at) else {
+        return false;
+    };
+    let window = i64::from(w) * i64::from(h);
+    nodes.iter().enumerate().skip(1).any(|(i, n)| {
+        let leaf = nodes.get(i + 1).is_none_or(|next| next.depth <= n.depth);
+        let large =
+            n.at.is_some_and(|[_, _, w, h]| i64::from(w) * i64::from(h) * 4 >= window);
+        leaf && large && matches!(n.role, "pane" | "document")
+    })
+}
+
 pub fn id_text(id: &[i32]) -> String {
     id.iter().map(i32::to_string).collect::<Vec<_>>().join(".")
 }
@@ -312,6 +328,54 @@ mod tests {
             kept.iter().map(|n| (n.depth, n.role)).collect::<Vec<_>>(),
             vec![(0, "pane"), (1, "button")]
         );
+    }
+
+    #[test]
+    fn an_empty_container_over_much_of_the_window_means_the_page_is_not_there_yet() {
+        let at = |mut n: Node, at: [i32; 4]| {
+            n.at = Some(at);
+            n
+        };
+        let window = at(node(0, "window", "App", &[]), [0, 0, 1000, 800]);
+        let frame = at(node(1, "titlebar", "", &[]), [0, 0, 1000, 30]);
+        let empty = at(
+            node(1, "pane", "App - Web content", &[]),
+            [0, 30, 1000, 770],
+        );
+        assert!(content_pending(&[
+            window.clone(),
+            frame.clone(),
+            empty.clone()
+        ]));
+        assert!(content_pending(&[
+            window.clone(),
+            empty.clone(),
+            frame.clone()
+        ]));
+        // The page is there: the pane has something in it.
+        let page = at(node(2, "document", "App", &[]), [0, 30, 1000, 770]);
+        let button = at(node(3, "button", "Go", &["invoke"]), [10, 40, 80, 24]);
+        assert!(!content_pending(&[
+            window.clone(),
+            empty.clone(),
+            page.clone(),
+            button
+        ]));
+        // A page with nothing in it is still asked for again; a small empty pane is not, nor a native app's edit field.
+        assert!(content_pending(&[window.clone(), empty, page]));
+        assert!(!content_pending(&[
+            window.clone(),
+            at(node(1, "pane", "", &[]), [0, 770, 1000, 30])
+        ]));
+        assert!(!content_pending(&[
+            window.clone(),
+            at(node(1, "edit", "Text Editor", &["set"]), [0, 30, 1000, 770])
+        ]));
+        assert!(!content_pending(&[
+            node(0, "window", "App", &[]),
+            node(1, "pane", "", &[])
+        ]));
+        assert!(!content_pending(&[]));
     }
 
     #[test]
