@@ -1,0 +1,47 @@
+[package]
+name = "kelpie-window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kelpie's window helper: an agent reads and operates the windows of an app it started, without the person's mouse or focus (Windows)"
+
+# The pure parts (the outline an agent reads, node ids, actions, which windows are in reach) build everywhere. The helper itself
+# (`helper`) adds UI Automation, the window picture and the process list on Windows, and reuses the screen helper's window list.
+[lib]
+name = "kelpie_window"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kelpie-window"
+path = "src/main.rs"
+required-features = ["helper"]
+
+[features]
+default = ["helper"]
+helper = ["dep:png", "dep:windows", "kelpie-screen/helper"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+kelpie-screen = { path = "../kelpie-screen", default-features = false }
+png = { version = "0.17", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# The screen helper's version.
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    # `PrintWindow` lives here.
+    "Win32_Storage_Xps",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    # `SafeArray*` (a runtime id is one) and the `VARIANT` a cached property comes back as.
+    "Win32_System_Ole",
+    # `CreateProcessW` and `CreateDesktopW` name security attributes in their signatures.
+    "Win32_Security",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }

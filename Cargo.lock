@@ -3068,6 +3068,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kelpie-window"
+version = "0.1.24"
+dependencies = [
+ "kelpie-screen",
+ "png 0.17.16",
+ "serde",
+ "serde_json",
+ "windows",
+]
+
+[[package]]
 name = "kelpied"
 version = "0.1.24"
 dependencies = [
