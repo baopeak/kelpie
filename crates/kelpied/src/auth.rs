@@ -129,12 +129,12 @@ pub fn authenticate(d: &Daemon, params: &Value) -> Result<Role> {
 const SCRIPTING: &[&str] = &[
     "daemon.info", "agent.presets", "session.list", "session.read", "session.input", "session.create",
     "meta.list", "meta.get", "meta.set", "run.list", "run.get", "run.create", "run.retry",
-    "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "note.add", "note.list",
+    "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "note.add", "note.list", "owed.open", "owed.list",
     "sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close", "page.open", "browser.call", "browser.policy",
 ];
 /// Methods a restricted session's programs may call, on their own session only. `page.open` shows a page in the session's own project;
 /// `browser.call` uses the panes the window lets this session use, under the same policy as any other session.
-const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list", "sub.report", "sub.inbox", "page.open", "browser.call", "browser.policy"];
+const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list", "owed.open", "owed.list", "sub.report", "sub.inbox", "page.open", "browser.call", "browser.policy"];
 /// Methods of a session whose token went missing.
 const CLAIMED: &[&str] = &["daemon.info", "hook.report"];
 
@@ -186,7 +186,7 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
     // `sub.*` speak for the caller's own session too: a program cannot report as, read the mail of, close
     // the sub-sessions of, or message as another session. `sub.answer` and `sub.pending` are the user's. A page is opened in the
     // caller's own project, and browser panes are used as the caller.
-    if matches!(method, "hook.report" | "run.report" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open" | "browser.call") {
+    if matches!(method, "hook.report" | "run.report" | "owed.open" | "owed.list" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open" | "browser.call") {
         if let Some(obj) = params.as_object_mut() {
             obj.insert("session_id".into(), Value::String(id.clone()));
             // Whether the caller proved it is that session (a claimed id proves nothing).
@@ -477,7 +477,7 @@ mod tests {
         let user = Role::User;
         let s = Role::Session("s".into());
         let claimed = Role::Claimed("s".into());
-        let admin = ["chat.send", "chat.write_turn", "chat.queue_op", "chat.close_stdin", "agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children", "sub.answer", "sub.pending", "sftp.list", "sftp.stat", "sftp.stat_many", "sftp.realpath", "sftp.mkdir", "sftp.create", "sftp.rename", "sftp.chmod", "local.list", "local.home", "xfer.start", "xfer.list", "xfer.control", "xfer.answer", "xfer.clear_finished"];
+        let admin = ["chat.send", "chat.write_turn", "chat.queue_op", "chat.close_stdin", "agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children", "owed.close", "sub.answer", "sub.pending", "sftp.list", "sftp.stat", "sftp.stat_many", "sftp.realpath", "sftp.mkdir", "sftp.create", "sftp.rename", "sftp.chmod", "local.list", "local.home", "xfer.start", "xfer.list", "xfer.control", "xfer.answer", "xfer.clear_finished"];
         // Phone-access decisions: the verified app only, never the bare user token or a session.
         for m in APP_ONLY {
             assert!(allowed(&Role::App, false, m), "app: {m}");
@@ -510,6 +510,17 @@ mod tests {
         }
         assert!(!allowed(&s, false, "session.create"));
         assert!(!allowed(&s, false, "run.create"));
+        // Checks owed: the user and the app call all three. A session that proved itself lists and opens (the daemon holds it to its own
+        // project), restricted ones too, and never closes: an agent does not close what it owes.
+        for m in ["owed.list", "owed.open", "owed.close"] {
+            assert!(allowed(&user, false, m) && allowed(&Role::App, false, m), "user: {m}");
+            assert!(user_may(&user, m).is_ok(), "user: {m}");
+            assert!(!allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");
+        }
+        for m in ["owed.list", "owed.open"] {
+            assert!(allowed(&s, true, m) && allowed(&s, false, m), "session: {m}");
+        }
+        assert!(!allowed(&s, true, "owed.close") && !allowed(&s, false, "owed.close"));
         // Sub-sessions: a session that may script others opens, messages, reports, reads its mail and closes its own;
         // one that may not (or was started restricted) can still report to its parent and read its own mail.
         for m in ["sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close"] {

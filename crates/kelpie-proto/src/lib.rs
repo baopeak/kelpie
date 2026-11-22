@@ -109,7 +109,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// starts at L2 with the helper at its lowest rung; the refusal carries `reason` (`memory`, `cpu`, `lag`, `thermal` or `load`) and `busy {level,
 /// reasons, reason, memory_free, memory_free_mb, min_free_mb, cpu, lag_ms}`, and `mobile.load` says `memory_free_mb`. An older daemon refuses at L2
 /// with neither, so the phone shows its words and tries again all the same.
-pub const API_LEVEL: u32 = 46;
+/// 47: the record of real-world checks a change still owes: `owed.list {project?}`, `owed.open {project, pr?, commit?, kind, what, closes_by}` and
+/// `owed.close {id, evidence}` (the user's; a session lists and opens its own project's and never closes), the `owed.changed {project, owed}`
+/// event, and an optional `owes` list on `sub.report` and `run.report`, answered as `owes: {opened, refused}`. An older daemon has none of
+/// them, so a client offers the record only at 47.
+pub const API_LEVEL: u32 = 47;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.
