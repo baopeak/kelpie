@@ -464,5 +464,16 @@
   "Agents of this project may use this page. Click to stop sharing it.": "Các agent của dự án này được phép dùng trang này. Bạn hãy bấm vào đây để ngừng chia sẻ trang.",
   "{name} is using this page": "{name} đang dùng trang này",
   "{session} is using the browser tab {title}": "{session} đang dùng tab trình duyệt {title}",
-  "A page you shared with agents went to another site, so agents can no longer use it. Share it again to let them.": "Một trang bạn chia sẻ với agent đã chuyển sang trang web khác, nên agent không dùng được trang đó nữa. Bạn hãy chia sẻ lại nếu muốn agent tiếp tục dùng."
+  "A page you shared with agents went to another site, so agents can no longer use it. Share it again to let them.": "Một trang bạn chia sẻ với agent đã chuyển sang trang web khác, nên agent không dùng được trang đó nữa. Bạn hãy chia sẻ lại nếu muốn agent tiếp tục dùng.",
+  "can merge": "gộp được",
+  "cannot merge: {reason}": "chưa gộp được: {reason}",
+  "checks failing ({what})": "kiểm tra thất bại ({what})",
+  "checks still running": "kiểm tra đang chạy",
+  "it is a draft": "đang là bản nháp",
+  "conflicts with {base}": "xung đột với {base}",
+  "GitHub blocks it ({state})": "GitHub đang chặn ({state})",
+  "a change to {path} needs a look": "thay đổi ở {path} cần được xem",
+  "it is not open": "pull request không còn mở",
+  "GitHub has not said yet": "GitHub chưa trả lời",
+  "{name} passed only on run {n}": "{name} chỉ đạt ở lần chạy thứ {n}"
 }

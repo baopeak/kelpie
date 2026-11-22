@@ -4,6 +4,8 @@
 import { createRoot } from "solid-js";
 import { createStore } from "solid-js/store";
 import { ghPrStatus, type PullRequest } from "./ipc";
+import { mergeLine, prRead } from "./merge-line";
+import { t } from "./i18n";
 import { gitlabMrStatus, gitlabProject, type MergeRequest } from "./integrations";
 import { automationEvents } from "./automation-events";
 
@@ -86,5 +88,28 @@ function createPrStore() {
 }
 
 export const pullRequests = createRoot(createPrStore);
+
+/** Whether the pull request can be merged, as a chip; null where that is not known (see `prRead`). */
+export function mergeChip(pr: PullRequest): { text: string; cls: "checks-passing" | "checks-pending" | "checks-failing"; title: string } | null {
+  const read = prRead(pr);
+  if (!read || pr.state !== "OPEN") return null;
+  // What in the change needs a look (tests, workflows) is not read here yet: the line is GitHub's own answer.
+  const line = mergeLine(read, [], 0);
+  if (line.can) {
+    const title = line.rerun.map((r) => t("{name} passed only on run {n}", { name: r.name, n: r.attempts })).join("\n");
+    return { text: t("can merge"), cls: "checks-passing", title };
+  }
+  const waiting = line.reason === "checks-running" || line.reason === "unknown";
+  const reason =
+    line.reason === "checks-failing" ? t("checks failing ({what})", { what: line.detail })
+    : line.reason === "checks-running" ? t("checks still running")
+    : line.reason === "draft" ? t("it is a draft")
+    : line.reason === "conflicts" ? t("conflicts with {base}", { base: line.detail })
+    : line.reason === "blocked" ? t("GitHub blocks it ({state})", { state: line.detail })
+    : line.reason === "touches" ? t("a change to {path} needs a look", { path: line.flags[0]?.path ?? "" })
+    : line.reason === "not-open" ? t("it is not open")
+    : t("GitHub has not said yet");
+  return { text: t("cannot merge: {reason}", { reason }), cls: waiting ? "checks-pending" : "checks-failing", title: line.reason === "checks-running" || line.reason === "unknown" ? line.detail : "" };
+}
 
 export const prLabel = (pr: PullRequest) => (pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.draft ? "draft" : "open");

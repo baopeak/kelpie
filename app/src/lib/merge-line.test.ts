@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { changeFlags, mergeLine, openFlags, pathPattern, type ChangedFile, type Flag, type PrCheck, type PrRead } from "./merge-line";
+import { changeFlags, mergeLine, openFlags, pathPattern, prRead, type ChangedFile, type Flag, type PrCheck, type PrRead } from "./merge-line";
 
 const check = (name: string, state: PrCheck["state"], more: Partial<PrCheck> = {}): PrCheck => ({ name, required: true, state, attempts: 1, ...more });
 const pr = (more: Partial<Extract<PrRead, { ok: true }>> = {}): PrRead => ({
@@ -125,5 +125,20 @@ describe("openFlags", () => {
     expect(openFlags([workflow], accepted, "abc")).toEqual([]);
     expect(openFlags([workflow], accepted, "def")).toEqual([workflow]);
     expect(openFlags([workflow, { kind: "tests", path: "a.rs", what: "test-off" }], accepted, "abc")).toEqual([{ kind: "tests", path: "a.rs", what: "test-off" }]);
+  });
+});
+
+describe("prRead", () => {
+  const base = { number: 7, title: "t", url: "u", state: "OPEN" as const, draft: false, base: "master", checks: "passing" as const };
+
+  it("gives no line where GitHub's merge state did not come with the pull request", () => {
+    expect(prRead(base)).toBeNull();
+    expect(prRead({ ...base, mergeable: "MERGEABLE", merge_state: "CLEAN" })).toBeNull();
+  });
+
+  it("carries the merge state and the checks", () => {
+    const read = prRead({ ...base, mergeable: "MERGEABLE", merge_state: "BLOCKED", head: "abc", check_list: [{ name: "build", state: "failing", required: true }] });
+    expect(read).toEqual({ ok: true, state: "OPEN", draft: false, base: "master", mergeable: "MERGEABLE", mergeState: "BLOCKED", checks: [{ name: "build", required: true, state: "failing", attempts: 1 }] });
+    expect(mergeLine(read!, [], 0)).toEqual({ can: false, reason: "checks-failing", detail: "build" });
   });
 });

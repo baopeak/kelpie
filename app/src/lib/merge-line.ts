@@ -4,6 +4,8 @@
 // The answer follows GitHub's own state (what GitHub will allow), then what Kelpie adds: a change that touches what checks it (tests,
 // workflows, check scripts) holds the merge until a person accepts it for that commit. Nothing here reads a log.
 
+import type { PullRequest } from "./ipc";
+
 /** One check of a pull request's head commit. */
 export interface PrCheck {
   /** The job, as GitHub names it (`build (windows-latest)`). */
@@ -153,4 +155,15 @@ export function changeFlags(files: ChangedFile[], paths: FlagPaths = DEFAULT_FLA
 /** The flags no person has accepted. An acceptance is for one head commit: a new commit asks again. */
 export function openFlags(flags: Flag[], accepted: { head: string; path: string; what: string }[], head: string): Flag[] {
   return flags.filter((f) => !accepted.some((a) => a.head === head && a.path === f.path && a.what === f.what));
+}
+
+/**
+ * A pull request as the app read it, as the line's input. Null where GitHub's own merge state did not come with it (GitLab, a backend
+ * from before it was read): no line is shown then, which is better than one made up from the roll-up of every check.
+ */
+export function prRead(pr: PullRequest): PrRead | null {
+  if (pr.mergeable === undefined || pr.merge_state === undefined || pr.check_list === undefined) return null;
+  // How many times a check ran is not read yet: one.
+  const checks = pr.check_list.map((c) => ({ name: c.name, required: c.required, state: c.state, attempts: 1 }));
+  return { ok: true, state: pr.state, draft: pr.draft, base: pr.base, mergeable: pr.mergeable, mergeState: pr.merge_state, checks };
 }
