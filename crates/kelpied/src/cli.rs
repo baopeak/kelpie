@@ -364,7 +364,7 @@ usage: kelpied sub <command> [--json]
   report [--owes kind:what:closes_by]… <status> <summary…>
                                                 to the session that opened you: progress|done|failed|blocked|needs_user.
                                                 --owes (up to 4) records a check you could not run yourself; kind is
-                                                real_app|phone|clean_machine|soak|owner, "what" has no colon
+                                                real_app|phone|clean_machine|soak|owner; what is owed has no colon in it
   inbox                                         take the mail waiting for you
   close <session>                               close a sub-session you opened
   open <url> [--title T]                        show an http(s) page to the person in a background tab of your project
