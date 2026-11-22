@@ -13,10 +13,10 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetLBound, SafeArrayGetUBound,
-    SafeArrayUnaccessData,
+    SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetLBound, SafeArrayGetUBound,
+    SafeArrayGetVartype, SafeArrayUnaccessData,
 };
-use windows::Win32::System::Variant::VT_BSTR;
+use windows::Win32::System::Variant::{VT_BSTR, VT_I4};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, ExpandCollapseState_Collapsed, ExpandCollapseState_Expanded,
     ExpandCollapseState_PartiallyExpanded, IUIAutomation, IUIAutomationCacheRequest,
@@ -308,7 +308,10 @@ fn runtime_id(el: &IUIAutomationElement) -> Vec<i32> {
             return Vec::new();
         }
         let mut out = Vec::new();
-        if let (Ok(lo), Ok(hi)) = (SafeArrayGetLBound(sa, 1), SafeArrayGetUBound(sa, 1)) {
+        // The id is read as 32-bit integers only when the array says it holds them, in one dimension.
+        let ints = SafeArrayGetDim(sa) == 1 && SafeArrayGetVartype(sa).is_ok_and(|t| t == VT_I4);
+        if let (true, Ok(lo), Ok(hi)) = (ints, SafeArrayGetLBound(sa, 1), SafeArrayGetUBound(sa, 1))
+        {
             let n = (i64::from(hi) - i64::from(lo) + 1).max(0) as usize;
             let mut data = std::ptr::null_mut();
             if n > 0 && n <= MAX_ID_PARTS && SafeArrayAccessData(sa, &mut data).is_ok() {

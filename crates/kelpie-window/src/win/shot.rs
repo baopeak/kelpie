@@ -13,7 +13,8 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
 /// `PW_RENDERFULLCONTENT`: what the compositor shows, which is what a web view or a GPU-drawn window needs.
 const FULL_CONTENT: u32 = 2;
-const MAX_SIDE: i32 = 8192;
+/// Larger than any monitor in use; it bounds the memory one picture takes (64 MiB of pixels).
+const MAX_SIDE: i32 = 4096;
 
 /// The frame a person sees, in screen pixels: where a node's rectangle and the picture's pixels are measured from.
 pub fn frame(h: HWND) -> Option<Rect> {

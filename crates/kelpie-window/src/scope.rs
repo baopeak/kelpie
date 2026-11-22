@@ -113,6 +113,34 @@ pub fn command_line(program: &str, args: &[String]) -> String {
         .join(" ")
 }
 
+/// Why Kelpie itself may not be started, if it may not. A Kelpie window an agent started is in the agent's reach, and a Kelpie window
+/// approves what agents ask: so Kelpie is started only as a separate one, with its own daemon endpoint and its own data folder (a
+/// development build under test), never as another window of the person's Kelpie.
+pub fn kelpie_refusal(
+    program: &str,
+    endpoint: Option<&str>,
+    data_dir: Option<&str>,
+    session_endpoint: Option<&str>,
+) -> Option<&'static str> {
+    let file = program
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = file.strip_suffix(".exe").unwrap_or(&file);
+    if !matches!(stem, "kelpie" | "kelpied") {
+        return None;
+    }
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
+    if !set(endpoint) || !set(data_dir) {
+        return Some("Kelpie is started only as a separate one: set KELPIE_ENDPOINT and KELPIE_DATA_DIR to its own daemon and data folder");
+    }
+    if endpoint.map(str::trim) == session_endpoint.map(str::trim) {
+        return Some("that is the endpoint of the Kelpie this session runs in: a Kelpie under test needs its own");
+    }
+    None
+}
+
 /// The file's name for a scope: letters, digits, `-` and `_` of what the caller names, so one agent session does not reach another's
 /// programs. Anything else is the shared `default`.
 pub fn scope_name(raw: Option<&str>) -> String {
@@ -235,6 +263,35 @@ mod tests {
             command_line("app", &args(&[r"C:\plain\path\"])),
             r"app C:\plain\path\"
         );
+    }
+
+    #[test]
+    fn kelpie_is_started_only_as_a_separate_one() {
+        let ok = |p, e, d, s| kelpie_refusal(p, e, d, s).is_none();
+        assert!(ok("notepad.exe", None, None, None));
+        assert!(ok(r"C:\apps\kelpie-notes.exe", None, None, None));
+        for program in [
+            "kelpie",
+            "Kelpie.exe",
+            r"C:\Program Files\Kelpie\KELPIE.EXE",
+            "build/debug/kelpied.exe",
+        ] {
+            assert!(!ok(program, None, None, None), "{program}");
+            assert!(!ok(program, Some("kelpie-dev"), None, None), "{program}");
+            assert!(!ok(program, Some(" "), Some("d"), None), "{program}");
+            assert!(
+                !ok(program, Some("kelpie"), Some("d"), Some("kelpie")),
+                "{program}"
+            );
+            assert!(
+                ok(program, Some("kelpie-dev"), Some("d"), Some("kelpie")),
+                "{program}"
+            );
+            assert!(
+                ok(program, Some("kelpie-dev"), Some("d"), None),
+                "{program}"
+            );
+        }
     }
 
     #[test]

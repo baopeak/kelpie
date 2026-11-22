@@ -54,8 +54,10 @@ pub fn rejoin() {
     }
 }
 
-/// Start a program on the agent's desktop. `command_line` is the whole line, quoted (`scope::command_line`).
-pub fn start(command_line: &str) -> Result<u32, String> {
+/// Start a program on the agent's desktop. `command_line` is the whole line, quoted (`scope::command_line`). What comes back is the
+/// process id and its creation time, read while the process's handle is still open: read after, a program that ended at once could have
+/// left its id to another process, which would then be taken for it.
+pub fn start(command_line: &str) -> Result<(u32, u64), String> {
     let mut line = wide(command_line);
     let mut desktop = wide(NAME);
     let info = STARTUPINFOW {
@@ -78,8 +80,9 @@ pub fn start(command_line: &str) -> Result<u32, String> {
             &mut made,
         )
         .map_err(|e| format!("it could not be started: {}", e.message()))?;
+        let created = super::procs::created_of(made.hProcess);
         let _ = CloseHandle(made.hThread);
         let _ = CloseHandle(made.hProcess);
+        Ok((made.dwProcessId, created))
     }
-    Ok(made.dwProcessId)
 }

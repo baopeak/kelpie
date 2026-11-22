@@ -42,7 +42,9 @@ mod cli {
     use kelpie_screen::targets::{TargetId, WindowInfo};
     use kelpie_screen::win::system::init_process;
     use kelpie_screen::win::targets_win::{exists, hwnd, windows};
-    use kelpie_window::scope::{alive, command_line, owner, remember, scope_name, Launched, Proc};
+    use kelpie_window::scope::{
+        alive, command_line, kelpie_refusal, owner, remember, scope_name, Launched, Proc,
+    };
     use kelpie_window::tree::{outline, parse_id, prune, Action, MAX_NODES};
     use kelpie_window::win::desk;
     use kelpie_window::win::procs::{created, processes};
@@ -239,7 +241,17 @@ mod cli {
         } else {
             format!("{web_args} {ACCESSIBLE}").trim().to_string()
         };
-        let pid = if hidden {
+        let env = |name: &str| std::env::var(name).ok();
+        if let Some(why) = kelpie_refusal(
+            program,
+            env("KELPIE_ENDPOINT").as_deref(),
+            env("KELPIE_DATA_DIR").as_deref(),
+            env("KELPIE_SESSION_ENDPOINT").as_deref(),
+        ) {
+            return Err(why.into());
+        }
+        // The creation time is read while the process's handle is open, so that it and the id name the same process.
+        let (pid, made) = if hidden {
             // The program inherits this process's environment; no other thread of this process runs yet.
             unsafe { std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &web_args) };
             desk::start(&command_line(program, &args[1..]))
@@ -253,11 +265,11 @@ mod cli {
                 .show_window(SHOW_NO_ACTIVATE)
                 .env("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &web_args);
             // The child is not waited for: it lives on after this command.
-            cmd.spawn()
-                .map_err(|e| format!("{program} could not be started: {e}"))?
-                .id()
+            let child = cmd
+                .spawn()
+                .map_err(|e| format!("{program} could not be started: {e}"))?;
+            (child.id(), created(child.id()))
         };
-        let made = created(pid);
         if made == 0 {
             return Err(format!("{program} ended as soon as it started"));
         }
