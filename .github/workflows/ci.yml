@@ -49,7 +49,7 @@ jobs:
         shell: bash
         env:
           KELPIE_REQUIRE_PHONE: "1"
-        run: cargo test -p kelpie-proto -p kelpie-link -p kelpied -p kelpie -p kelpie-stt -p kelpie-screen -p kelpie-rtc
+        run: cargo test -p kelpie-proto -p kelpie-link -p kelpied -p kelpie -p kelpie-stt -p kelpie-screen -p kelpie-window -p kelpie-rtc
       - name: The phone link's crypto stays free of ring
         shell: bash
         run: |
