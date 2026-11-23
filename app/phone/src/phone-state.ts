@@ -34,7 +34,7 @@ import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { ScreenSession, type ScreenState } from "./screen";
 import { NEW_SESSION_API, PR_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAKEOVER_API } from "../../src/lib/attention";
-import { challengeOutcome, DEFAULT_METHOD, mergeOutcome, mergeRequestId, mergeRequestOf, type MergeMethod, type MergeRequest } from "./merge";
+import { challengeOutcome, DEFAULT_METHOD, mergeBlockWords, mergeOutcome, mergeRequestId, mergeRequestOf, type MergeMethod, type MergeRequest } from "./merge";
 import { pullView, type PullInfo, type PullView } from "./pull-line";
 import { ScreenPeer, type OfferReply } from "./screen-rtc";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
@@ -748,8 +748,12 @@ export async function loadPull(project: string): Promise<void> {
   setPullStates((all) => ({ ...all, [project]: { view, busy: false } }));
 }
 
-/** This phone may merge here: control, on the computer's own HTTPS address and unlocked (what a pane's takeover needs too), at a computer that has the verbs. */
-export const canMerge = () => device()?.permission === "control" && canReadPulls();
+/** Why this phone may not merge here, in words; null when it may: control, on the computer's own HTTPS address, the app lock on and unlocked with a passkey (what a
+ *  pane's takeover needs too), at a computer that has the verbs. The computer says which of these is missing (`device.control`). */
+export const mergeBlock = (): string | null => (canReadPulls() ? mergeBlockWords(device()?.control, device()?.permission, lockShown().face === "open") : null);
+
+/** This phone may merge here (`mergeBlock`). */
+export const canMerge = () => canReadPulls() && mergeBlock() === null;
 
 /** A merge being made: the person chooses how, the computer gives its challenge, the passkey signs it, and the answer is shown. Null: none. */
 export type MergeSheet =
@@ -778,13 +782,25 @@ export function closeMerge() {
 export async function askMerge() {
   const s = mergeSheet();
   if (s?.step !== "choose" || s.busy) return;
-  const request = mergeRequestOf(s.project, s.pr, s.method);
+  // What the person chose: the pull request and head they were shown, and how. Only the method goes to the computer, which reads the rest itself.
+  const asked = mergeRequestOf(s.project, s.pr, s.method);
   setMergeSheet({ ...s, busy: true, error: null });
-  const challenge = challengeOutcome(await link.prChallenge(request), request);
+  const challenge = challengeOutcome(await link.prChallenge(s.project, s.method), asked);
   // Closed meanwhile: nothing more is done.
   if (mergeSheet()?.step !== "choose") return;
   if (!challenge.ok) return setMergeSheet({ ...s, busy: false, error: challenge.message });
-  setMergeSheet({ step: "verify", request, pr: s.pr, nonce: challenge.nonce, expiry: challenge.expiry, command: challenge.command, busy: false, error: null });
+  // From here on the sheet shows what the computer read (it matches what was tapped), and the merge is sent for exactly that.
+  const { request } = challenge;
+  setMergeSheet({
+    step: "verify",
+    request,
+    pr: { ...s.pr, repo: request.repo, number: request.number, head: request.head, title: challenge.title },
+    nonce: challenge.nonce,
+    expiry: challenge.expiry,
+    command: challenge.command,
+    busy: false,
+    error: null,
+  });
 }
 
 /** The passkey signs the challenge's line, and the merge is sent with it. The press of the button is the person's own gesture, which a ceremony needs. */

@@ -1,10 +1,11 @@
 // The line a project's pull request gets in a session's view: whether GitHub would merge it, the repository and the title. Read when the view
-// opens and when the person asks again, never on a timer. The Merge button shows only while the line says it can be merged and this phone may merge.
+// opens and when the person asks again, never on a timer. The Merge button shows only while the line says it can be merged and this phone may merge;
+// on a phone that may not, the reason stands in its place.
 import { createEffect, on, Show } from "solid-js";
 import { Icon } from "./icons";
 import { t } from "./i18n";
 import { mergeOffered } from "./merge";
-import { canMerge, canReadPulls, connected, loadPull, openMerge, pullStates } from "./phone-state";
+import { canMerge, canReadPulls, connected, loadPull, mergeBlock, openMerge, pullStates } from "./phone-state";
 import { pullHeadline, pullOf, pullSubline, pullViewWords } from "./pull-line";
 
 export function PullLine(props: { project: string | null }) {
@@ -27,6 +28,8 @@ export function PullLine(props: { project: string | null }) {
                 <>
                   <strong data-pull-headline>{pullHeadline(pr())}</strong>
                   <span class="muted pull-sub">{pullSubline(pr())}</span>
+                  {/* In place of the Merge button: a pull request that can be merged, and why this phone cannot merge it. */}
+                  <Show when={pr().can && mergeBlock()}>{(why) => <span class="muted pull-sub" data-pull-merge-why>{why()}</span>}</Show>
                 </>
               )}
             </Show>

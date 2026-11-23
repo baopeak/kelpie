@@ -57,7 +57,7 @@ export function MergeSheet() {
                   <h2>{t("Confirm with your passkey")}</h2>
                   <p class="muted">{t("Your passkey signs exactly this, and the computer merges only that:")}</p>
                   <pre class="code command" data-merge-command>{s().command}</pre>
-                  <p class="muted">{`${methodWords(s().request.method)} · ${s().pr.repo} #${s().pr.number}`}</p>
+                  <p class="muted" data-merge-read>{`${methodWords(s().request.method)} · ${s().request.repo} #${s().request.number}${s().pr.title ? ` ${s().pr.title}` : ""} · ${shortHead(s().request.head)}`}</p>
                   <Show when={s().error}><p class="muted err" role="status" data-merge-error>{s().error}</p></Show>
                   <div class="actions">
                     <button class="btn primary" data-merge-go disabled={s().busy || !connected()} onClick={() => void confirmMerge()}>{s().busy ? t("Asking…") : t("Merge with passkey")}</button>

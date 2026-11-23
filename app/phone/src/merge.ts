@@ -66,8 +66,8 @@ export function refusalWords(code: string, message: string): string {
       return t("The passkey did not confirm this merge. Start again.");
     case "lock_refused":
       return t("The computer did not accept the passkey.");
-    case "repo_changed":
-      return t("This project's repository is not the one that was shown. Look at the pull request again.");
+    case "merges_waiting":
+      return t("Too many merges are waiting for a passkey on this phone. Finish or cancel one, or wait a minute.");
     case "not_ready":
     case "no_project":
       return t("Open Kelpie on your computer so it can tell this phone about the project.");
@@ -83,24 +83,65 @@ export function refusalWords(code: string, message: string): string {
 const OFFLINE = () => t("Not connected to your computer, so nothing was merged.");
 const NO_ANSWER = () => t("Your computer did not answer, so it is not known whether the pull request was merged. Look at it on GitHub.");
 
-/** The challenge the computer gave for a merge: what to sign, and until when. An answer that describes another merge than `asked` is refused. */
-export type Challenge = { ok: true; nonce: string; expiry: number; command: string } | { ok: false; message: string };
+/** The challenge the computer gave for a merge: what to sign, and until when. `request` and `title` are what the computer itself read (the repository from the
+ *  project's `origin`, the pull request of its branch), and what the person is shown from then on. An answer for another pull request or head than `asked`
+ *  (the one the person was shown and chose), or whose line does not describe what it says, is refused. */
+export type Challenge = { ok: true; nonce: string; expiry: number; command: string; request: MergeRequest; title: string } | { ok: false; message: string };
+
+const UNREADABLE = () => t("Your computer's answer about the merge could not be read.");
+const OTHER_MERGE = () => t("Your computer described another merge than the one you chose, so nothing was merged.");
 
 export function challengeOutcome(o: Outcome, asked: MergeRequest): Challenge {
   if (o.t === "offline") return { ok: false, message: OFFLINE() };
   if (o.t === "unknown") return { ok: false, message: t("Your computer did not answer. Try again.") };
   if (o.t === "error") return { ok: false, message: refusalWords(o.code, o.message) };
-  if (typeof o.nonce !== "string" || !o.nonce || typeof o.expiry !== "number" || typeof o.command !== "string") return { ok: false, message: t("Your computer's answer about the merge could not be read.") };
-  if (o.command !== mergeCommand(asked)) return { ok: false, message: t("Your computer described another merge than the one you chose, so nothing was merged.") };
-  return { ok: true, nonce: o.nonce, expiry: o.expiry, command: o.command };
+  const { nonce, expiry, command, repo, number, head, method, title } = o;
+  if (typeof nonce !== "string" || !nonce || typeof expiry !== "number" || typeof command !== "string") return { ok: false, message: UNREADABLE() };
+  if (typeof repo !== "string" || typeof number !== "number" || typeof head !== "string" || typeof title !== "string") return { ok: false, message: UNREADABLE() };
+  // What the person tapped is the pull request and the head they were shown: a computer that read another has found it changed since.
+  if (repo !== asked.repo || number !== asked.number || head !== asked.head) return { ok: false, message: t("The pull request changed since you looked (new commits, or another pull request). Nothing was merged. Look at it again.") };
+  if (method !== asked.method) return { ok: false, message: OTHER_MERGE() };
+  const request: MergeRequest = { project: asked.project, repo, number, head, method: asked.method };
+  if (command !== mergeCommand(request)) return { ok: false, message: OTHER_MERGE() };
+  return { ok: true, nonce, expiry, command, request, title };
 }
 
-/** What became of a merge: done, or why not. `unsure`: the request went out and no answer came, so the pull request may be merged. */
+/** What became of a merge: done, or why not. `unsure`: the request went out and no answer came (or the computer says it is still carrying it out), so the pull
+ *  request may be merged, or is queued. */
 export type MergeResult = { ok: true } | { ok: false; message: string; unsure: boolean };
 
 export function mergeOutcome(o: Outcome): MergeResult {
   if (o.t === "offline") return { ok: false, message: OFFLINE(), unsure: false };
   if (o.t === "unknown") return { ok: false, message: NO_ANSWER(), unsure: true };
-  if (o.t === "error") return { ok: false, message: refusalWords(o.code, o.message), unsure: false };
-  return o.result === "merged" ? { ok: true } : { ok: false, message: t("Your computer's answer about the merge could not be read. Look at the pull request on GitHub."), unsure: true };
+  if (o.t === "error") return o.code === "in_progress" ? { ok: false, message: NO_ANSWER(), unsure: true } : { ok: false, message: refusalWords(o.code, o.message), unsure: false };
+  if (o.result === "merged") return { ok: true };
+  if (o.result === "pending") return { ok: false, message: t("GitHub took the merge but the pull request is not merged yet (it may be queued). Look at it on GitHub."), unsure: true };
+  return { ok: false, message: t("Your computer's answer about the merge could not be read. Look at the pull request on GitHub."), unsure: true };
+}
+
+/** Why Merge is not offered on this connection, in words, or null when it is: what the computer says about control here (`device.control`), or, from a
+ *  computer that does not say, the permission the device has; and in any case the passkey must have opened this page (`unlocked`), because the merge asks it. */
+export function mergeBlockWords(control: string | undefined, permission: string | undefined, unlocked: boolean): string | null {
+  return controlBlock(control, permission) ?? (unlocked ? null : t("To merge, unlock Kelpie with your passkey."));
+}
+
+function controlBlock(control: string | undefined, permission: string | undefined): string | null {
+  switch (control) {
+    case "ok":
+      return null;
+    case "hosted_app":
+    case "plain_page":
+    case "via_relay":
+      return t("To merge, open Kelpie through your computer's own HTTPS address (Tailscale), not the hosted app or the relay.");
+    case "not_granted":
+      return t("To merge, allow control for this phone on your computer: Kelpie, Settings, Mobile.");
+    case "lock_off":
+      return t("To merge, turn the app lock on, on your computer.");
+    case "no_passkey":
+      return t("To merge, set up this phone's passkey (the app lock).");
+    case "locked":
+      return t("To merge, unlock Kelpie with your passkey.");
+    default:
+      return permission === "control" ? null : t("To merge, allow control for this phone on your computer: Kelpie, Settings, Mobile.");
+  }
 }

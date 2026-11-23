@@ -212,7 +212,7 @@ export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with.
    *  `prefs` with a `push_prefs`: the choices the computer keeps. `ready`, `projects`, `agents` and `why` with a `new_options`; `id` with a `new_session` (the session
    *  started), `dup` when that start was asked for before. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean; sdp?: string; nonce?: string; ice_servers?: RTCIceServer[]; turn?: string | null; pr?: PullStatus; expiry?: number; command?: string }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean; sdp?: string; nonce?: string; ice_servers?: RTCIceServer[]; turn?: string | null; pr?: PullStatus; expiry?: number; command?: string; repo?: string; number?: number; head?: string; method?: string }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -752,9 +752,10 @@ export class Link {
     return this.request({ type: "pr_get", project }, { write: false });
   }
 
-  /** The computer's challenge for one merge (`nonce`, `expiry` and the `command` the passkey will sign, in the reply). Asking again only gives another. */
-  prChallenge(m: MergeRequest) {
-    return this.request({ type: "pr_challenge", ...m }, { write: false });
+  /** The computer's challenge for merging the pull request of a project's branch by `method`: the only thing the phone chooses. The reply says what the
+   *  computer itself read (`repo`, `number`, `head`, `title`), the `command` the passkey will sign, and its `nonce` and `expiry`. Asking again only gives another. */
+  prChallenge(project: string, method: string) {
+    return this.request({ type: "pr_challenge", project, method }, { write: false });
   }
 
   /** Merges the pull request once the passkey has signed what the challenge described (`recheck`). Sent once more after a dropped connection with the same
