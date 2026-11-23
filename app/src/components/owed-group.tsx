@@ -61,6 +61,9 @@ function OwedEntry(props: { row: OwedRow }) {
   );
 }
 
+/** Whether any project the window knows has a check still owed: the panel is not empty then. */
+export const anyOwed = () => store.state.projects.some((p) => (openOwed[p.id] ?? []).length > 0);
+
 /** One group per project that has open entries, in the order of the sidebar. */
 export function OwedGroups() {
   const groups = () =>
