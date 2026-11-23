@@ -1108,8 +1108,9 @@ An agent can start a program on this computer (a browser, an editor, a desktop a
 fields in them, without your mouse or keyboard: to check what an app it just built looks like, or to run it through a screen it cannot
 test any other way. Windows only for now.
 
-**Turning it on.** It is off on a new install, and there is no switch in Settings yet. Run `kelpied call daemon.set_policy` with
-`{"window_agents":"on"}` as its argument (the daemon keeps it in `policy.json` in the data folder). Agents started after that get six tools,
+**Turning it on.** It is off on a new install. In Settings → Agents (on Windows only) turn on *Programs agents start*; a second switch,
+*Allow the visible desktop*, appears under it while the first is on. (The same two settings are `window_agents` and `window_visible` in
+`policy.json` in the data folder, which `kelpied call daemon.set_policy` also writes.) Agents started after that get six tools,
 `kelpie_window_launch`, `_list`, `_tree`, `_act`, `_shot` and `_close`. *Agents can control other sessions* has to be on, and a session
 started restricted never gets them.
 
@@ -1124,7 +1125,7 @@ with your files and sign-ins. Do not let it start a browser or app that is signe
 **The hidden desktop.** Programs start on a desktop of their own that you never see, so nothing appears in front of your work and your
 focus stays where it is. Browsers and ordinary Windows programs run there. A web view app, which is what a Tauri app is (Kelpie
 itself is one), does not: it stops with an error there. Such a program can be started with `visible: true`, on your own desktop, only when
-you also set `"window_visible": true`; acting on it then brings its window forward, which interrupts you, so use it on a computer nobody
+you also turn on *Allow the visible desktop*; acting on it then brings its window forward, which interrupts you, so use it on a computer nobody
 is working at (a test runner) when you can. A web view shows its page in the outline only after it has been read once, so an agent reads
 a window twice when the page is missing.
 

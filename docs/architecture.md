@@ -1030,8 +1030,11 @@ only). Inert at the default policy (`window_agents: off`). The tools are in `mcp
   a well-behaved agent, not a boundary against a program with a shell: such a program can run the helper itself with any scope, or the
   started program's own child processes. A browser or editor that hands over to an instance already running is not in reach.
 - **Not yet.** A Windows job object per session (programs ended with the session or the daemon, an exact count of what is alive), `ask` per
-  program, a desktop per session, short refs per session instead of raw runtime ids, the phone, macOS and Linux (the tools are not listed
-  there and the daemon answers "Window tools work on Windows only."), and a settings control in the app.
+  program, a desktop per session, short refs per session instead of raw runtime ids, the phone, and macOS and Linux (the tools are not listed
+  there and the daemon answers "Window tools work on Windows only.").
+- **Settings.** Settings → Agents shows *Programs agents start* (`window_agents` on or off) and, while it is on, *Allow the visible desktop*
+  (`window_visible`), on Windows with a daemon of API 48 or later (`lib/agent-window-policy.ts`; the catalogue rows are `windowsOnly`, so a
+  search elsewhere does not find them). Both go through `daemon.policy` and `daemon.set_policy`; turning the tools off withdraws the visible desktop too.
 
 ### The computer's screen on a phone
 

@@ -3,7 +3,9 @@
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { sessionLabel, store } from "../../lib/store";
-import { browserAudit, browserPolicySet, policyGet, subPolicySet } from "../../lib/ipc";
+import { browserAudit, browserPolicySet, policyGet, subPolicySet, windowPolicySet } from "../../lib/ipc";
+import { refreshWindowPolicy, setWindowPolicy, windowPolicy } from "../../lib/agent-window";
+import { toWindowPolicy, windowPatch, windowToolsShown } from "../../lib/agent-window-policy";
 import { SUB_MAX_LIMIT, SUB_SESSIONS_API, parseSubMax, setSubPolicy, subPolicy, toSubPolicy } from "../../lib/sub-sessions";
 import { formatDateTime, msg, t } from "../../lib/i18n";
 import { BROWSER_AGENT_API } from "../../lib/attention";
@@ -248,6 +250,40 @@ function BrowserAgentSettings() {
   );
 }
 
+/** The daemon's window-tools policy (kept in policy.json): whether agents may start programs and use their windows, and whether they may
+ *  use the person's own desktop. Shown on Windows, by a daemon that has it. */
+function WindowAgentSettings() {
+  const supported = () => windowToolsShown(store.daemonApi());
+  const [busy, setBusy] = createSignal(false);
+  createEffect(() => {
+    if (store.connected() && supported()) void refreshWindowPolicy();
+  });
+  const send = async (change: { on?: boolean; visible?: boolean }) => {
+    if (busy()) return;
+    setBusy(true);
+    try {
+      setWindowPolicy(toWindowPolicy(await windowPolicySet(windowPatch(change))));
+    } catch (e) {
+      store.notify(String(e).replace(/^Error: /, ""), undefined, 8000);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const on = () => windowPolicy()?.on ?? false;
+  return (
+    <Show when={supported()}>
+      <SettingRow id="window-agents">
+        <Toggle on={on()} disabled={busy()} onChange={(v) => void send({ on: v })} label={t("Programs agents start")} />
+      </SettingRow>
+      <Show when={on()}>
+        <SettingRow id="window-agents-visible">
+          <Toggle on={windowPolicy()?.visible ?? false} disabled={busy()} onChange={(v) => void send({ visible: v })} label={t("Allow the visible desktop")} />
+        </SettingRow>
+      </Show>
+    </Show>
+  );
+}
+
 /** A daemon that predates sub-sessions: the controls would do nothing, so they are not shown. */
 function DaemonTooOld() {
   return (
@@ -279,6 +315,7 @@ export function AgentSettings() {
       </SettingRow>
       <SubSessionSettings />
       <BrowserAgentSettings />
+      <WindowAgentSettings />
       <SettingRow id="ai-agent">
         <Choice value={s().aiAgent ?? "claude"} options={[["claude", "Claude Code"], ["codex", "Codex"]]} onChange={(v) => store.setSettings({ aiAgent: v })} />
       </SettingRow>
