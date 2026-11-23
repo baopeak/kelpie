@@ -23,6 +23,7 @@ import type { LockInfo } from "./lock";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { Initiator, MODE_RECONNECT, unb64url, type Endpoint, type Session } from "./noise";
 import type { Pairing } from "./pairing-store";
+import type { MergeRequest } from "./merge";
 import type { NewSessionRequest } from "./start-session";
 import type { ScreenFrame } from "./screen-sync";
 import type { PaneRow, TkOp } from "./takeover";
@@ -211,7 +212,7 @@ export type Outcome =
   /** `qid`, `state` and `ahead` come with a `chat_send`: what the message was called, and where it stands. `vapid` with a `push_info`: the key alerts are signed with.
    *  `prefs` with a `push_prefs`: the choices the computer keeps. `ready`, `projects`, `agents` and `why` with a `new_options`; `id` with a `new_session` (the session
    *  started), `dup` when that start was asked for before. */
-  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean; sdp?: string; nonce?: string; ice_servers?: RTCIceServer[]; turn?: string | null; pr?: PullStatus }
+  | { t: "ack"; entered?: boolean; result?: string; qid?: string; state?: string; ahead?: number; vapid?: string; prefs?: AlertPrefs | null; lock?: LockInfo; resume?: string; tk?: string; title?: string; host?: string; panes?: PaneRow[]; sc?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ready?: boolean; projects?: NewOptions["projects"]; agents?: NewOptions["agents"]; why?: string; id?: string; dup?: boolean; sdp?: string; nonce?: string; ice_servers?: RTCIceServer[]; turn?: string | null; pr?: PullStatus; expiry?: number; command?: string }
   | ({ t: "error" } & ReplyError)
   /** Not connected: nothing was sent (and nothing is kept to send later). */
   | { t: "offline" }
@@ -749,6 +750,17 @@ export class Link {
   /** A project's pull request and GitHub's word on merging it (`pr`, in the reply). Asking again changes nothing, so it carries no `cid`. */
   prGet(project: string) {
     return this.request({ type: "pr_get", project }, { write: false });
+  }
+
+  /** The computer's challenge for one merge (`nonce`, `expiry` and the `command` the passkey will sign, in the reply). Asking again only gives another. */
+  prChallenge(m: MergeRequest) {
+    return this.request({ type: "pr_challenge", ...m }, { write: false });
+  }
+
+  /** Merges the pull request once the passkey has signed what the challenge described (`recheck`). Sent once more after a dropped connection with the same
+   *  `cid`: the computer answers a repeat with the first reply, and never merges twice. */
+  prMerge(m: MergeRequest, nonce: string, recheck: Record<string, unknown>) {
+    return this.request({ type: "pr_merge", ...m, nonce, recheck }, { retry: true });
   }
 
   chatCancel(id: string, qid: string) {
@@ -1416,7 +1428,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at, busy } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at, busy });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers, turn: m.turn, pr: m.pr });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers, turn: m.turn, pr: m.pr, expiry: m.expiry, command: m.command });
     }
     this.h.changed();
     return true;

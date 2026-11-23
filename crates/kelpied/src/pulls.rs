@@ -446,6 +446,115 @@ pub fn status(folder: &str, neutral: &Path) -> Result<Value, String> {
     read().map_err(|why| without_folder(&why, folder))
 }
 
+// ---------- merging ----------
+
+/// How `gh pr merge` may merge, as its flags name them.
+pub const METHODS: [&str; 3] = ["squash", "merge", "rebase"];
+
+/// `method` as one of `METHODS`, or `None`.
+pub fn merge_method(name: &str) -> Option<&'static str> {
+    METHODS.iter().copied().find(|m| *m == name)
+}
+
+/// What one merge is bound to: the repository, the pull request, the head commit the person was shown, and how to merge. The passkey's
+/// assertion covers all four (`bound_command`), and the daemon reads the pull request again before it acts on any of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    pub repo: String,
+    pub number: u64,
+    pub head: String,
+    pub method: &'static str,
+}
+
+/// What the passkey is asked to sign for a merge, as one line: the host, the repository, the pull request, the head commit and the method.
+/// The phone builds the same line from what it shows (`app/phone/src/merge.ts`), so a daemon that described another merge gets an assertion
+/// that does not check.
+pub fn bound_command(b: &Bound) -> String {
+    format!("merge {HOST} {} #{} {} {}", b.repo, b.number, b.head, b.method)
+}
+
+/// The request id a merge's assertion is over. It cannot be any other kind's: a dangerous approval's is a number, a screen's starts `screen:`.
+pub fn challenge_request(nonce: &str) -> String {
+    format!("merge:{nonce}")
+}
+
+/// The arguments `gh` is run with to merge. The repository is spelled with its host, the head commit must still be the one named
+/// (`--match-head-commit`: GitHub refuses when it moved), and `--admin` is never passed, so branch protection holds for a phone too.
+pub fn merge_args(b: &Bound) -> Vec<String> {
+    vec![
+        "pr".to_string(),
+        "merge".to_string(),
+        b.number.to_string(),
+        "-R".to_string(),
+        repo_arg(&b.repo),
+        "--match-head-commit".to_string(),
+        b.head.clone(),
+        format!("--{}", b.method),
+    ]
+}
+
+/// Why `pull`, as just read from `repo` with the checks `required` of it, may not be merged as `b` says; `Ok` when it may. It must be the
+/// repository and the pull request that were bound, open and not a draft, at the head commit that was bound, with every required check passed,
+/// and GitHub's own merge state must allow it.
+pub fn merge_refusal(repo: &str, pull: &Pull, required: &[String], b: &Bound) -> Result<(), String> {
+    if repo != b.repo {
+        return Err("This project's repository is not the one you confirmed.".to_string());
+    }
+    if pull.number != b.number {
+        return Err("That is not the pull request you confirmed.".to_string());
+    }
+    if pull.state != "OPEN" {
+        return Err(format!("The pull request is not open ({}).", pull.state.to_ascii_lowercase()));
+    }
+    if pull.draft {
+        return Err("The pull request is a draft.".to_string());
+    }
+    if pull.head != b.head {
+        return Err("The pull request has new commits since you looked: look again before merging.".to_string());
+    }
+    let state = required_state(&pull.checks, required);
+    if !state.failing.is_empty() {
+        return Err(format!("A required check failed: {}.", names(&state.failing)));
+    }
+    if !state.running.is_empty() {
+        return Err(format!("A required check has not passed yet: {}.", names(&state.running)));
+    }
+    let line = merge_line(pull, required);
+    if !line.can {
+        return Err(format!("GitHub does not allow it now: {}.", line.sentence()));
+    }
+    Ok(())
+}
+
+/// Merges `b`'s pull request of the project in `folder`: reads the project's repository and the pull request again, refuses unless
+/// `merge_refusal` says it may be merged, then has `gh` merge it. `Err` is GitHub's own refusal or ours, one line without the folder.
+pub fn merge_now(folder: &str, neutral: &Path, b: &Bound) -> Result<(), String> {
+    let attempt = || -> Result<(), String> {
+        let repo = repo_of(folder)?;
+        if repo != b.repo {
+            return Err("This project's repository is not the one you confirmed.".to_string());
+        }
+        let (pull, required) = read_pull(&repo, &b.number.to_string(), neutral)?.ok_or_else(|| "That pull request is gone.".to_string())?;
+        merge_refusal(&repo, &pull, &required, b)?;
+        let ran = gh(neutral, merge_args(b))?;
+        if ran.ok {
+            Ok(())
+        } else {
+            Err(gh_refusal(&ran))
+        }
+    };
+    attempt().map_err(|why| without_folder(&why, folder))
+}
+
+/// The audit line for a merge attempt: what was asked for, by which phone, and what came of it.
+pub fn merge_summary(by: &str, b: &Bound, result: &Result<(), String>) -> String {
+    let outcome = match result {
+        Ok(()) => "merged".to_string(),
+        Err(why) => format!("refused: {}", one_line(why, MAX_MESSAGE)),
+    };
+    format!("{} #{} head {} ({}) by {}: {outcome}", b.repo, b.number, b.head, b.method, one_line(by, 60))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,6 +727,95 @@ mod tests {
         assert_eq!(shown["line"]["can"], true);
         let keys: Vec<&str> = shown.as_object().unwrap().keys().map(String::as_str).collect();
         assert!(!keys.iter().any(|k| k.contains("path") || k.contains("folder") || k.contains("cwd")), "{keys:?}");
+    }
+
+    fn bound(method: &'static str) -> Bound {
+        Bound { repo: "o/n".into(), number: 12, head: HEAD.into(), method }
+    }
+
+    #[test]
+    fn a_merge_method_is_one_of_three_flags_and_nothing_else() {
+        for method in ["squash", "merge", "rebase"] {
+            assert_eq!(merge_method(method), Some(method));
+        }
+        for other in ["", "Squash", "squash ", "--admin", "auto", "merge --admin", "fast-forward"] {
+            assert_eq!(merge_method(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_command_the_passkey_covers_names_the_host_the_repository_the_pull_request_the_head_and_the_method() {
+        let base = bound_command(&bound("squash"));
+        assert_eq!(base, format!("merge github.com o/n #12 {HEAD} squash"));
+        let mut other = bound("squash");
+        other.repo = "o/m".into();
+        assert_ne!(bound_command(&other), base);
+        let mut other = bound("squash");
+        other.number = 13;
+        assert_ne!(bound_command(&other), base);
+        let mut other = bound("squash");
+        other.head = "f".repeat(40);
+        assert_ne!(bound_command(&other), base);
+        assert_ne!(bound_command(&bound("rebase")), base);
+        // Its request id is a kind of its own: not a number (a dangerous approval's), nor a screen's.
+        assert_eq!(challenge_request("abc"), "merge:abc");
+    }
+
+    #[test]
+    fn gh_is_given_the_repository_with_its_host_the_head_to_match_and_never_admin() {
+        for method in METHODS {
+            let args = merge_args(&bound(method));
+            let flag = format!("--{method}");
+            assert_eq!(args, ["pr", "merge", "12", "-R", "github.com/o/n", "--match-head-commit", HEAD, flag.as_str()]);
+            for banned in ["--admin", "--auto", "--delete-branch", "--body", "--subject"] {
+                assert!(!args.iter().any(|a| a == banned), "{method}: {banned}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_merge_is_refused_unless_it_is_the_bound_pull_request_open_unchanged_and_allowed() {
+        let passed = [("build", CheckResult::Passed), ("test", CheckResult::Passed)];
+        let may = |p: &Pull, req: &[&str]| merge_refusal("o/n", p, &required(req), &bound("squash"));
+        let good = pull("OPEN", false, "MERGEABLE", "CLEAN", &passed);
+        assert_eq!(may(&good, &["build", "test"]), Ok(()));
+        assert_eq!(may(&good, &[]), Ok(()), "none required: GitHub's state is all there is");
+        // What was bound.
+        assert!(merge_refusal("o/other", &good, &[], &bound("squash")).unwrap_err().contains("repository"));
+        let mut moved = good.clone();
+        moved.number = 13;
+        assert!(may(&moved, &[]).unwrap_err().contains("not the pull request"));
+        let mut newer = good.clone();
+        newer.head = "f".repeat(40);
+        assert!(may(&newer, &[]).unwrap_err().contains("new commits"));
+        // Open and not a draft.
+        for state in ["MERGED", "CLOSED"] {
+            assert!(may(&pull(state, false, "MERGEABLE", "CLEAN", &passed), &[]).unwrap_err().contains("not open"), "{state}");
+        }
+        assert!(may(&pull("OPEN", true, "MERGEABLE", "CLEAN", &passed), &[]).unwrap_err().contains("draft"));
+        // Every required check passed: one that failed, one still running, one that never reported.
+        let failed = pull("OPEN", false, "MERGEABLE", "CLEAN", &[("build", CheckResult::Passed), ("test", CheckResult::Failed)]);
+        assert!(may(&failed, &["build", "test"]).unwrap_err().contains("failed: test"));
+        let running = pull("OPEN", false, "MERGEABLE", "CLEAN", &[("build", CheckResult::Passed), ("test", CheckResult::Pending)]);
+        assert!(may(&running, &["build", "test"]).unwrap_err().contains("not passed yet: test"));
+        assert!(may(&good, &["build", "deploy"]).unwrap_err().contains("not passed yet: deploy"));
+        // GitHub's own state says no, or has not said: no, even with every required check green.
+        for state in ["BLOCKED", "BEHIND", "DIRTY", "UNKNOWN", ""] {
+            assert!(may(&pull("OPEN", false, "MERGEABLE", state, &passed), &["build", "test"]).is_err(), "{state:?}");
+        }
+        assert!(may(&pull("OPEN", false, "CONFLICTING", "CLEAN", &passed), &[]).is_err());
+        // A check that is not required and failed does not stop what GitHub allows.
+        let optional = pull("OPEN", false, "MERGEABLE", "UNSTABLE", &[("build", CheckResult::Passed), ("lint", CheckResult::Failed)]);
+        assert_eq!(may(&optional, &["build"]), Ok(()));
+    }
+
+    #[test]
+    fn a_merge_attempt_is_recorded_with_what_was_asked_who_asked_and_what_came_of_it() {
+        let merged = merge_summary("Phone", &bound("squash"), &Ok(()));
+        assert_eq!(merged, format!("o/n #12 head {HEAD} (squash) by Phone: merged"));
+        let refused = merge_summary("Phone", &bound("rebase"), &Err("GitHub says:\nnot mergeable".to_string()));
+        assert_eq!(refused, format!("o/n #12 head {HEAD} (rebase) by Phone: refused: GitHub says: not mergeable"));
+        assert!(!merge_summary("A\nB", &bound("merge"), &Ok(())).contains('\n'));
     }
 
     #[test]

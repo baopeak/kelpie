@@ -3,7 +3,7 @@
 //! `session.update`, `session.attach`, closing, phone settings and the other admin methods cannot
 //! be reached by naming them.
 
-/// What a paired device may do, least first. `Control` (taking over a browser pane, seeing and driving the screen) is the native app's, or a browser device's that paired on a secure origin with its app lock set up and on (`mobile::record_ceiling`).
+/// What a paired device may do, least first. `Control` (taking over a browser pane, seeing and driving the screen, merging a pull request) is the native app's, or a browser device's that paired on a secure origin with its app lock set up and on (`mobile::record_ceiling`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
@@ -123,6 +123,10 @@ pub enum Verb {
     ScRtcServers,
     /// The pull request of a project's branch, and whether GitHub would merge it (`pulls`).
     PrGet,
+    /// A fresh challenge for the passkey that covers one merge: this repository, pull request, head commit and method.
+    PrChallenge,
+    /// Merge a pull request, with the passkey's assertion over what `PrChallenge` described.
+    PrMerge,
 }
 
 impl Verb {
@@ -176,6 +180,8 @@ impl Verb {
             "sc_via" => Verb::ScVia,
             "sc_rtc_servers" => Verb::ScRtcServers,
             "pr_get" => Verb::PrGet,
+            "pr_challenge" => Verb::PrChallenge,
+            "pr_merge" => Verb::PrMerge,
             _ => return None,
         })
     }
@@ -186,13 +192,20 @@ impl Verb {
             Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume | Verb::NewOptions | Verb::NewSession => Permission::Write,
             Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => Permission::Control,
             Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia | Verb::ScRtcServers => Permission::Control,
+            Verb::PrChallenge | Verb::PrMerge => Permission::Control,
         }
     }
 
     /// Whether this is one of the control verbs (a browser pane's takeover or the screen), which a broker carries out (`takeover::Broker::phone_verb`,
-    /// `screen::Broker::phone_verb`) and the audit log never sees the content of.
+    /// `screen::Broker::phone_verb`) and the audit log never sees the content of. A merge needs control too, but the daemon carries it out itself
+    /// and keeps a line of its own about it (`pr`).
     pub fn takeover(self) -> bool {
-        self.needs() == Permission::Control
+        self.needs() == Permission::Control && !self.merge()
+    }
+
+    /// Whether this is one of the two verbs that merge a pull request (`pr`).
+    pub fn merge(self) -> bool {
+        matches!(self, Verb::PrChallenge | Verb::PrMerge)
     }
 
     /// Whether this is one of the screen's verbs (`screen`).
@@ -246,11 +259,11 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 48] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::NewOptions, Verb::NewSession, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers, Verb::PrGet];
+    const ALL: [Verb; 50] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::NewOptions, Verb::NewSession, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers, Verb::PrGet, Verb::PrChallenge, Verb::PrMerge];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "panes", "tk_start", "tk_input", "tk_text", "tk_ack", "tk_stop", "tk_rebind", "screens", "sc_start", "sc_stop", "sc_ack", "sc_input", "sc_text", "sc_key", "sc_rebind", "sc_resume", "sc_sharpen", "sc_rtc_offer", "sc_rtc_ice", "sc_via", "sc_rtc_servers", "pr_get"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "panes", "tk_start", "tk_input", "tk_text", "tk_ack", "tk_stop", "tk_rebind", "screens", "sc_start", "sc_stop", "sc_ack", "sc_input", "sc_text", "sc_key", "sc_rebind", "sc_resume", "sc_sharpen", "sc_rtc_offer", "sc_rtc_ice", "sc_via", "sc_rtc_servers", "pr_get", "pr_challenge", "pr_merge"];
         assert_eq!(names.len(), ALL.len());
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
@@ -258,9 +271,12 @@ mod tests {
         let reads = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "pr_get"];
         for (name, verb) in names.iter().zip(ALL) {
             let screen = name.starts_with("sc_") || *name == "screens";
-            let expected = if reads.contains(name) { Permission::Read } else if name.starts_with("tk_") || *name == "panes" || screen { Permission::Control } else { Permission::Write };
+            let merge = matches!(*name, "pr_challenge" | "pr_merge");
+            let expected = if reads.contains(name) { Permission::Read } else if name.starts_with("tk_") || *name == "panes" || screen || merge { Permission::Control } else { Permission::Write };
             assert_eq!(verb.needs(), expected, "{name}");
-            assert_eq!(verb.takeover(), expected == Permission::Control, "{name}");
+            // A merge needs control but is not a broker's: the daemon carries it out, with a record of its own.
+            assert_eq!(verb.takeover(), expected == Permission::Control && !merge, "{name}");
+            assert_eq!(verb.merge(), merge, "{name}");
             assert_eq!(verb.screen(), screen, "{name}");
         }
         // The daemon's own methods, admin ones above all, are not verbs, whatever they are named.
@@ -275,9 +291,9 @@ mod tests {
         let reachable: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= read_only).collect();
         assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::PrGet]);
         let writes: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= Permission::Write).collect();
-        assert_eq!(writes.len(), 27, "everything but taking over a pane or seeing the screen");
+        assert_eq!(writes.len(), 27, "everything but taking over a pane, seeing the screen or merging a pull request");
         let control: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() == Permission::Control).collect();
-        assert_eq!(control, [Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers]);
+        assert_eq!(control, [Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers, Verb::PrChallenge, Verb::PrMerge]);
     }
 
     #[test]

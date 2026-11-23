@@ -257,6 +257,11 @@ a.btn { text-decoration: none; }
 .pull-line .pull-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .pull-line .pull-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pull-line.can strong { color: var(--ok); }
+.pull-line .btn { flex: none; min-height: var(--tap); padding: 0 var(--s3); border-radius: var(--r-pill); }
+.merge-facts { display: grid; grid-template-columns: auto 1fr; gap: var(--s1) var(--s3); margin: 0; font-size: var(--fs-sm); }
+.merge-facts dt { color: var(--dim); }
+.merge-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.merge-facts .mono { font-family: var(--mono); }
 .takeover-entry .btn { flex: none; white-space: nowrap; min-height: var(--tap); padding: 0 var(--s3); font-size: var(--fs-sm); border-radius: var(--r-pill); }
 
 /* ---------- chat ---------- */

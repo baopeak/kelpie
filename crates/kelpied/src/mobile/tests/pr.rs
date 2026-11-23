@@ -51,3 +51,49 @@ async fn reading_pull_requests_over_and_over_is_held_back() {
     }
     assert_eq!(code(&r.ask(Permission::Read, json!({"type": "pr_get", "project": "p1"})).await), Some("rate_limited"));
 }
+
+fn merge_requests() -> (Value, Value) {
+    let bound = json!({"project": "p1", "repo": "o/n", "number": 12, "head": "0123456789abcdef0123456789abcdef01234567", "method": "squash"});
+    let mut challenge = bound.clone();
+    challenge["type"] = json!("pr_challenge");
+    let mut merge = bound;
+    merge["type"] = json!("pr_merge");
+    merge["nonce"] = json!("n1");
+    (challenge, merge)
+}
+
+#[tokio::test]
+async fn a_merge_needs_control_and_then_a_passkey_this_connection_can_give() {
+    let mut r = rig();
+    let (challenge, merge) = merge_requests();
+    // Control is what a pane's takeover needs: a device whose record is below it is told so, and nothing is asked of GitHub.
+    for granted in [Permission::Read, Permission::Write] {
+        for req in [&challenge, &merge] {
+            let reply = r.ask(granted, req.clone()).await;
+            assert_eq!((reply["type"].as_str(), code(&reply)), (Some("error"), Some("no_control")), "{granted:?}: {reply}");
+        }
+    }
+    // With control but over a connection that has no passkey (the rig's is a plain local one), a merge has nothing to be confirmed with.
+    for req in [&challenge, &merge] {
+        let reply = r.ask(Permission::Control, req.clone()).await;
+        assert_eq!(code(&reply), Some("no_passkey"), "{reply}");
+    }
+    assert!(r.typed.writes().is_empty());
+}
+
+#[tokio::test]
+async fn a_merge_request_is_checked_before_any_challenge_is_kept() {
+    let mut r = rig();
+    let (challenge, merge) = merge_requests();
+    for (key, bad) in [("repo", json!("o")), ("number", json!(0)), ("head", json!("main")), ("method", json!("--admin"))] {
+        for request in [&challenge, &merge] {
+            let mut req = request.clone();
+            req[key] = bad.clone();
+            let reply = r.ask(Permission::Control, req).await;
+            assert_eq!(code(&reply), Some("bad_request"), "{key}: {reply}");
+        }
+    }
+    // A request that is whole but has no passkey behind it keeps no challenge.
+    assert_eq!(code(&r.ask(Permission::Control, challenge).await), Some("no_passkey"));
+    assert!(r.daemon.mobile.pr.asks.lock().is_empty(), "nothing was kept");
+}

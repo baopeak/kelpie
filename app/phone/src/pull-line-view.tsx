@@ -1,9 +1,10 @@
 // The line a project's pull request gets in a session's view: whether GitHub would merge it, the repository and the title. Read when the view
-// opens and when the person asks again, never on a timer.
+// opens and when the person asks again, never on a timer. The Merge button shows only while the line says it can be merged and this phone may merge.
 import { createEffect, on, Show } from "solid-js";
 import { Icon } from "./icons";
 import { t } from "./i18n";
-import { canReadPulls, connected, loadPull, pullStates } from "./phone-state";
+import { mergeOffered } from "./merge";
+import { canMerge, canReadPulls, connected, loadPull, openMerge, pullStates } from "./phone-state";
 import { pullHeadline, pullOf, pullSubline, pullViewWords } from "./pull-line";
 
 export function PullLine(props: { project: string | null }) {
@@ -30,6 +31,11 @@ export function PullLine(props: { project: string | null }) {
               )}
             </Show>
           </div>
+          <Show when={props.project && mergeOffered({ pr: pullOf(s().view), control: canMerge(), api: canReadPulls() }) ? pullOf(s().view) : null}>
+            {(pr) => (
+              <button class="btn" data-pull-merge disabled={s().busy || !connected()} onClick={() => props.project && openMerge(props.project, pr())}>{t("Merge")}</button>
+            )}
+          </Show>
           <button class="icon" data-pull-refresh aria-label={t("Look again")} disabled={s().busy || !connected()} onClick={() => props.project && void loadPull(props.project)}>
             <Icon name="refresh" size={18} />
           </button>

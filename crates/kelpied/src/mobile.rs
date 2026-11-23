@@ -2655,7 +2655,7 @@ impl Conn {
         // only: a phone that sees `daemon_epoch` change starts over anyway.
         let window = match Verb::parse(name) {
             Some(v @ (Verb::Input | Verb::Key)) if v.needs() <= granted => Some(INPUT_DEDUPE),
-            Some(v @ (Verb::Answer | Verb::ChatAnswer | Verb::NewSession)) if v.needs() <= granted => Some(ANSWER_DEDUPE),
+            Some(v @ (Verb::Answer | Verb::ChatAnswer | Verb::NewSession | Verb::PrMerge)) if v.needs() <= granted => Some(ANSWER_DEDUPE),
             _ => None,
         };
         let cid = window.and(req.get("cid").and_then(Value::as_str).filter(|c| !c.is_empty() && c.len() <= 64));
@@ -2694,7 +2694,8 @@ impl Conn {
             return;
         }
         // Looking at what may be started changes nothing, and a start is noted by its handler (`session_new`), which knows the agent and the project.
-        if matches!(name, "new_options" | "new_session") {
+        // A challenge for a merge changes nothing either, and a merge is noted by its own handler (`pr_merge`), from the thread that carries it out.
+        if matches!(name, "new_options" | "new_session" | "pr_challenge" | "pr_merge") {
             return;
         }
         let id = req["id"].as_str().unwrap_or_default();
@@ -2842,11 +2843,17 @@ impl Conn {
         Ok(())
     }
 
-    /// A control verb (a pane's takeover or the screen) this connection may not use now, and why.
+    /// A control verb (a pane's takeover, the screen or a merge) this connection may not use now, and why.
     fn control_refused(&self, verb: Verb, granted: Permission) -> Result<(), Refusal> {
-        if verb.takeover() && verb.needs() > granted {
+        if verb.needs() == Permission::Control && verb.needs() > granted {
             if self.daemon.mobile.permission(&self.device).is_some_and(|record| record >= Permission::Control) {
-                let what = if verb.screen() { "Seeing the computer's screen" } else { "Taking over a pane" };
+                let what = if verb.screen() {
+                    "Seeing the computer's screen"
+                } else if verb.merge() {
+                    "Merging a pull request"
+                } else {
+                    "Taking over a pane"
+                };
                 return Err(refuse("no_control", format!("{what} needs this computer's HTTPS address through Tailscale (not the relay), with the app lock on and unlocked.")));
             }
             return Err(refuse("no_control", "This device may not take control. Allow it in Kelpie → Settings → Mobile."));
@@ -3145,6 +3152,8 @@ impl Conn {
             }
             Verb::NewSession => return self.new_session(req).await.map(Some),
             Verb::PrGet => return self.pr_get(req).await.map(Some),
+            Verb::PrChallenge => return self.pr_challenge(req).await.map(Some),
+            Verb::PrMerge => return self.pr_merge(req).await.map(Some),
             Verb::PushInfo => {
                 self.secure_transport()?;
                 let (daemon, device) = (self.daemon.clone(), self.device.clone());

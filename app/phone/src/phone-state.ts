@@ -34,7 +34,8 @@ import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { ScreenSession, type ScreenState } from "./screen";
 import { NEW_SESSION_API, PR_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAKEOVER_API } from "../../src/lib/attention";
-import { pullView, type PullView } from "./pull-line";
+import { challengeOutcome, DEFAULT_METHOD, mergeOutcome, mergeRequestId, mergeRequestOf, type MergeMethod, type MergeRequest } from "./merge";
+import { pullView, type PullInfo, type PullView } from "./pull-line";
 import { ScreenPeer, type OfferReply } from "./screen-rtc";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
@@ -745,6 +746,58 @@ export async function loadPull(project: string): Promise<void> {
   setPullStates((all) => ({ ...all, [project]: { view: before ?? { kind: "loading" }, busy: true } }));
   const view = pullView(await link.prGet(project));
   setPullStates((all) => ({ ...all, [project]: { view, busy: false } }));
+}
+
+/** This phone may merge here: control, on the computer's own HTTPS address and unlocked (what a pane's takeover needs too), at a computer that has the verbs. */
+export const canMerge = () => device()?.permission === "control" && canReadPulls();
+
+/** A merge being made: the person chooses how, the computer gives its challenge, the passkey signs it, and the answer is shown. Null: none. */
+export type MergeSheet =
+  | { step: "choose"; project: string; pr: PullInfo; method: MergeMethod; busy: boolean; error: string | null }
+  | { step: "verify"; request: MergeRequest; pr: PullInfo; nonce: string; expiry: number; command: string; busy: boolean; error: string | null }
+  | { step: "done"; project: string; ok: boolean; message: string };
+export const [mergeSheet, setMergeSheet] = createSignal<MergeSheet | null>(null);
+
+/** Opens the sheet for the pull request the line shows. Nothing is asked of the computer yet. */
+export function openMerge(project: string, pr: PullInfo) {
+  setMergeSheet({ step: "choose", project, pr, method: DEFAULT_METHOD, busy: false, error: null });
+}
+
+export function chooseMergeMethod(method: MergeMethod) {
+  setMergeSheet((s) => (s?.step === "choose" ? { ...s, method, error: null } : s));
+}
+
+/** Closes the sheet; after an answer, the pull request is read again, so the line says what became of it. */
+export function closeMerge() {
+  const s = mergeSheet();
+  setMergeSheet(null);
+  if (s?.step === "done") void loadPull(s.project);
+}
+
+/** Asks the computer for the challenge of the merge chosen: what the passkey will sign, shown before it is asked. */
+export async function askMerge() {
+  const s = mergeSheet();
+  if (s?.step !== "choose" || s.busy) return;
+  const request = mergeRequestOf(s.project, s.pr, s.method);
+  setMergeSheet({ ...s, busy: true, error: null });
+  const challenge = challengeOutcome(await link.prChallenge(request), request);
+  // Closed meanwhile: nothing more is done.
+  if (mergeSheet()?.step !== "choose") return;
+  if (!challenge.ok) return setMergeSheet({ ...s, busy: false, error: challenge.message });
+  setMergeSheet({ step: "verify", request, pr: s.pr, nonce: challenge.nonce, expiry: challenge.expiry, command: challenge.command, busy: false, error: null });
+}
+
+/** The passkey signs the challenge's line, and the merge is sent with it. The press of the button is the person's own gesture, which a ceremony needs. */
+export async function confirmMerge() {
+  const s = mergeSheet();
+  if (s?.step !== "verify" || s.busy) return;
+  setMergeSheet({ ...s, busy: true, error: null });
+  const proof = await lock.recheck(mergeRequestId(s.nonce), s.command, s.expiry);
+  // Cancelled while the ceremony was open: nothing is sent.
+  if (mergeSheet()?.step !== "verify") return;
+  if (!proof) return setMergeSheet({ ...s, busy: false, error: lock.error ?? t("Not confirmed, so nothing was merged.") });
+  const result = mergeOutcome(await link.prMerge(s.request, s.nonce, proof));
+  setMergeSheet({ step: "done", project: s.request.project, ok: result.ok, message: result.ok ? t("The pull request was merged. The worktree and its sessions are still here.") : result.message });
 }
 
 /** Answers the prompt a terminal session waits on with one of its keys. */

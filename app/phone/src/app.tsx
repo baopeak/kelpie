@@ -10,6 +10,7 @@ import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } fro
 import { PaneTakeover } from "./pane-takeover";
 import { ScreenView } from "./screen-view";
 import { LockCover, LockScreen, RecheckSheet } from "./lock-screen";
+import { MergeSheet } from "./merge-sheet";
 import { InstallGuide, PairWays, ScanCode, screenNow } from "./install-guide";
 import { groupOf, labelOf, needsCount, whereOf } from "./inbox-order";
 import { Icon } from "./icons";
@@ -289,6 +290,7 @@ export function App() {
       <Show when={starting() && open() && canStartSessions()}><NewSessionSheet onClose={() => setStarting(false)} /></Show>
       <Show when={HOSTED && trustOpen()}><TrustSheet onClose={() => setTrustOpen(false)} /></Show>
       <RecheckSheet />
+      <MergeSheet />
       <LockCover />
     </>
   );
