@@ -164,9 +164,9 @@ export function StatusBar() {
         <Show when={!store.state.settings.notifications}>{t("muted")}</Show>
       </span>
       <span class="item clickable inbox-anchor" title={t("Activity and notifications")} onPointerDown={(e) => e.stopPropagation()} onClick={() => setInbox(!inbox())}>
-        {/* The bell is a button to assistive technology (the panel below is inside this item, so the item itself cannot be one:
-            a button's content is not read). `display: contents` keeps the layout as it was. */}
-        <span role="button" aria-label={t("Activity and notifications")} aria-expanded={inbox()} style={{ display: "contents" }}><Icon name="bell" size={13} /></span>
+        {/* The bell is a real button, so that a screen reader, and anything else that works through the accessibility tree, can find it
+            and press it. The panel below is inside this item, so the item itself cannot be the button: what is inside a button is not read. */}
+        <button type="button" class="bell-btn" aria-label={t("Activity and notifications")} aria-expanded={inbox()}><Icon name="bell" size={13} /></button>
         <Show when={store.unreadInbox()}><span class="badge waiting">{store.unreadInbox()}</span></Show>
         <Show when={counts().waiting}><span class="bell-needs-you" title={t("{n} need you", { n: counts().waiting })} /></Show>
         <Show when={inbox()}><InboxPanel onClose={() => setInbox(false)} /></Show>

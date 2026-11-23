@@ -1785,3 +1785,7 @@ button.sub-crumb:hover { color: var(--text); }
 .pane-appearance-list { display: flex; flex-direction: column; gap: 1px; max-height: 300px; overflow: auto; }
 .pane-appearance-option { padding: 4px 6px; }
 .pane-appearance-foot { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 8px; }
+
+/* The Activity bell: a button that looks like the status bar item it sits in. */
+.bell-btn { all: unset; display: inline-flex; align-items: center; }
+.bell-btn:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
