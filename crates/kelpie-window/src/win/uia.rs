@@ -193,6 +193,22 @@ unsafe fn perform(el: &IUIAutomationElement, action: &Action) -> Result<&'static
             if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
             {
                 p.Invoke().map_err(said)?;
+            } else if let Ok(p) = el.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                UIA_ExpandCollapsePatternId,
+            ) {
+                // Something that opens and closes (a web button with `aria-expanded`, a menu button) offers no invoke: pressing it is
+                // opening it when it is closed and closing it when it is open. Its default action, tried here before, said it was
+                // done and did nothing in a web view.
+                let open = p.CurrentExpandCollapseState().is_ok_and(|state| {
+                    state == ExpandCollapseState_Expanded
+                        || state == ExpandCollapseState_PartiallyExpanded
+                });
+                if open {
+                    p.Collapse().map_err(said)?;
+                    return Ok("invoked: it was open and is asked to close");
+                }
+                p.Expand().map_err(said)?;
+                return Ok("invoked: it was closed and is asked to open");
             } else {
                 // Older controls offer only their default action.
                 let p = el
