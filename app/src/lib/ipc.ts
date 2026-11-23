@@ -29,6 +29,8 @@ export const owedClose = (id: string, evidence: string) => daemon<unknown>("owed
 export const policyGet = () => daemon<unknown>("daemon.policy");
 export const subPolicySet = (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => daemon<unknown>("daemon.set_policy", patch);
 export const browserPolicySet = (patch: { browser_agents?: "off" | "read" | "act"; browser_eval?: boolean; browser_sites?: string[] }) => daemon<unknown>("daemon.set_policy", patch);
+/** The window-tools part of the policy: `window_agents` off|on, `window_visible` (agents may use the person's own desktop). */
+export const windowPolicySet = (patch: { window_agents?: "off" | "on"; window_visible?: boolean }) => daemon<unknown>("daemon.set_policy", patch);
 /** The latest things agents did in browser panes, as the daemon logged them: `{entries: [{at, session, label, tool, host, target, ok, error}]}`. */
 export const browserAudit = (limit: number) => daemon<unknown>("browser.audit", { limit });
 
@@ -214,7 +216,9 @@ export const gitLog = (root: string) => invoke<GitCommit[]>("git_log", { root })
 export const gitStashes = (root: string) => invoke<GitStash[]>("git_stashes", { root });
 /** `oid` is the stash's commit from the list: the action is refused when `stash` points elsewhere now. */
 export const gitStashAction = (root: string, stash: string, oid: string, action: "apply" | "drop") => invoke<string>("git_stash_action", { root, stash, oid, action });
-export interface PullRequest { number: number; title: string; url: string; state: "OPEN" | "CLOSED" | "MERGED"; draft: boolean; base: string; checks: "passing" | "failing" | "pending" | "none"; provider?: "github" | "gitlab" }
+export interface PullRequest { number: number; title: string; url: string; state: "OPEN" | "CLOSED" | "MERGED"; draft: boolean; base: string; checks: "passing" | "failing" | "pending" | "none"; provider?: "github" | "gitlab";
+  /** GitHub only: its own merge state, the head commit, and each check with whether the base branch requires it. */
+  mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"; merge_state?: string; head?: string; check_list?: { name: string; state: "passing" | "failing" | "pending"; required: boolean }[] }
 export const ghPrStatus = (root: string) => invoke<PullRequest | null>("gh_pr_status", { root });
 export const ghDefaultBranch = (root: string) => invoke<string | null>("gh_default_branch", { root });
 export const ghPrCreate = (root: string, title: string, body: string, base: string, draft: boolean) => invoke<string>("gh_pr_create", { root, title, body, base, draft });

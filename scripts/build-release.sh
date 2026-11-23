@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the Kelpie installer for the current platform:
-#   Windows → NSIS installer (kelpied.exe, kelpie-stt.exe, kelpie-screen.exe + sideloaded ConPTY next to Kelpie.exe)
+#   Windows → NSIS installer (kelpied.exe, kelpie-stt.exe, kelpie-screen.exe, kelpie-window.exe + sideloaded ConPTY next to Kelpie.exe)
 #   macOS   → Kelpie.app + .dmg (kelpied, kelpie-stt, kelpie-screen inside Contents/MacOS)
 #   Linux   → AppImage + .deb with `--bundles appimage,deb` (kelpied, kelpie-stt, kelpie-screen next to the app in usr/bin)
 # Usage: scripts/build-release.sh [extra tauri build args]
@@ -83,6 +83,14 @@ else
   cp "$out_dir/release/kelpied$ext" "app/src-tauri/binaries/kelpied-$triple$ext"
   cp "$out_dir/release/kelpie-stt$ext" "app/src-tauri/binaries/kelpie-stt-$triple$ext"
   cp "$out_dir/release/kelpie-screen$ext" "app/src-tauri/binaries/kelpie-screen-$triple$ext"
+  # The window helper (agents' tools for programs they start) is Windows only: it joins the sidecars through a second
+  # config file that lists them all (a config array replaces the one before it), so macOS and Linux bundle what they did.
+  case "$triple" in *windows*)
+    cargo build --release -p kelpie-window
+    cp "$out_dir/release/kelpie-window$ext" "app/src-tauri/binaries/kelpie-window-$triple$ext"
+    target_args+=(--config src-tauri/tauri.bundle.windows.json)
+    ;;
+  esac
 fi
 
 cd app

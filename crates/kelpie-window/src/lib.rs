@@ -6,7 +6,8 @@
 //! the window comes from the window itself (`PrintWindow`), so it works while the window is covered.
 //!
 //! **Reach.** An agent reaches only the windows of programs it started with `launch`, and of their child processes (a web view's
-//! processes are children of its app). The person's own windows, Kelpie's included, are never read and never operated: what is on them
+//! processes are children of its app); where the daemon names a job object for the session, the windows of the processes in that job
+//! instead. The person's own windows, Kelpie's included, are never read and never operated: what is on them
 //! is not the agent's to see, and a program that can press buttons in Kelpie's window could approve its own requests. This is a rule of
 //! this tool, not a boundary of the system: a program running as the same user can do all of this without it.
 //!

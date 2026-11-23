@@ -10,6 +10,7 @@ import { RightPanel } from "./right-panel";
 import { StatusBar } from "./status-bar";
 import { Palette } from "./palette";
 import { Dashboard } from "./dashboard";
+import { mainViewCovered } from "../lib/page-cover";
 import { SettingsPage } from "./settings/settings-page";
 import { Tips } from "./tips";
 import { HoverHints } from "./hover-hints";
@@ -207,10 +208,13 @@ export function App() {
     });
   });
 
+  // The main view stays mounted under a full-window page; `inert` takes it out of the accessibility tree and the tab order.
+  const covered = () => mainViewCovered(store.overlay());
+
   return (
     <div class="app" style={{ "--sidebar-w": `${store.state.settings.sidebarWidth}px`, "--right-w": `${store.state.settings.rightPanelWidth}px` }}>
-      <Sidebar />
-      <div class="main">
+      <Sidebar inert={covered() || undefined} />
+      <div class="main" inert={covered() || undefined}>
         <div class="workarea">
           <div class="center">
             <Show when={store.activeProject()} fallback={<Welcome />} keyed>

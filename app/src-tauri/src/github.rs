@@ -41,6 +41,59 @@ pub struct PullRequest {
     base: String,
     /// passing | failing | pending | none
     checks: &'static str,
+    /// GitHub's `mergeable`: MERGEABLE | CONFLICTING | UNKNOWN.
+    mergeable: String,
+    /// GitHub's `mergeStateStatus`: CLEAN | BLOCKED | BEHIND | DIRTY | UNSTABLE | HAS_HOOKS | DRAFT | UNKNOWN.
+    merge_state: String,
+    /// The head commit the state above is about.
+    head: String,
+    /// Each check of the head commit, and whether the base branch requires it.
+    check_list: Vec<CheckItem>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct CheckItem {
+    name: String,
+    /// passing | failing | pending
+    state: &'static str,
+    required: bool,
+}
+
+/// One entry of `statusCheckRollup` (a check run or a commit status) as passing, failing or pending.
+fn item_state(c: &Value) -> &'static str {
+    let field = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("");
+    let (conclusion, state, status) = (field("conclusion"), field("state"), field("status"));
+    if matches!(conclusion, "FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE") || matches!(state, "FAILURE" | "ERROR") {
+        "failing"
+    } else if (!status.is_empty() && status != "COMPLETED") || state == "PENDING" || state == "EXPECTED" {
+        "pending"
+    } else {
+        "passing"
+    }
+}
+
+/// The checks by name (a check run's `name`, a commit status's `context`). A name that ran more than once keeps its last entry, which
+/// is the one GitHub decides by. `required` are the names the base branch requires.
+fn check_list(rollup: Option<&Value>, required: &[String]) -> Vec<CheckItem> {
+    let mut out: Vec<CheckItem> = Vec::new();
+    for c in rollup.and_then(Value::as_array).into_iter().flatten() {
+        let name = c.get("name").or_else(|| c.get("context")).and_then(Value::as_str).unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let item = CheckItem { required: required.contains(&name), state: item_state(c), name };
+        match out.iter_mut().find(|o| o.name == item.name) {
+            Some(old) => *old = item,
+            None => out.push(item),
+        }
+    }
+    out
+}
+
+/// The names of the checks the base branch requires, from `gh pr checks --required --json name`. Empty when there are none or they
+/// cannot be read: nothing is then treated as required, and what GitHub allows is in `merge_state` all the same.
+fn required_names(out: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(out).ok().and_then(|v| v.as_array().map(|a| a.iter().filter_map(|c| c.get("name").and_then(Value::as_str).map(String::from)).collect())).unwrap_or_default()
 }
 
 /// Summarises `statusCheckRollup` (check runs and commit statuses).
@@ -75,7 +128,7 @@ async fn remote_repo(root: &str) -> CmdResult<Option<(String, String)>> {
 #[tauri::command]
 pub async fn gh_pr_status(root: String) -> CmdResult<Option<PullRequest>> {
     let dir = guard(&root, "")?;
-    const FIELDS: &str = "number,title,url,state,isDraft,baseRefName,statusCheckRollup";
+    const FIELDS: &str = "number,title,url,state,isDraft,baseRefName,statusCheckRollup,mergeable,mergeStateStatus,headRefOid";
     let (ok, out, err) = if crate::remote::is_remote(&root) {
         let Some((slug, branch)) = remote_repo(&root).await? else { return Ok(None) };
         gh(Path::new("."), &["pr", "view", &branch, "-R", &slug, "--json", FIELDS]).await?
@@ -90,6 +143,16 @@ pub async fn gh_pr_status(root: String) -> CmdResult<Option<PullRequest>> {
         return Err(err);
     }
     let v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+    // Which checks are required is a second question to `gh`; it answers with an error when none are, which is read as none.
+    let number = v["number"].as_u64().unwrap_or(0).to_string();
+    let required = if crate::remote::is_remote(&root) {
+        match remote_repo(&root).await? {
+            Some((slug, _)) => gh(Path::new("."), &["pr", "checks", &number, "-R", &slug, "--required", "--json", "name"]).await.map(|(_, out, _)| required_names(&out)).unwrap_or_default(),
+            None => Vec::new(),
+        }
+    } else {
+        gh(&dir, &["pr", "checks", &number, "--required", "--json", "name"]).await.map(|(_, out, _)| required_names(&out)).unwrap_or_default()
+    };
     Ok(Some(PullRequest {
         number: v["number"].as_u64().unwrap_or(0),
         title: v["title"].as_str().unwrap_or("").into(),
@@ -98,6 +161,10 @@ pub async fn gh_pr_status(root: String) -> CmdResult<Option<PullRequest>> {
         draft: v["isDraft"].as_bool().unwrap_or(false),
         base: v["baseRefName"].as_str().unwrap_or("").into(),
         checks: checks_state(v.get("statusCheckRollup")),
+        mergeable: v["mergeable"].as_str().unwrap_or("UNKNOWN").into(),
+        merge_state: v["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
+        head: v["headRefOid"].as_str().unwrap_or("").into(),
+        check_list: check_list(v.get("statusCheckRollup"), &required),
     }))
 }
 
@@ -154,5 +221,32 @@ mod tests {
         assert_eq!(checks_state(Some(&json!([{"status": "IN_PROGRESS", "conclusion": ""}, {"conclusion": "SUCCESS", "status": "COMPLETED"}]))), "pending");
         assert_eq!(checks_state(Some(&json!([{"status": "IN_PROGRESS"}, {"conclusion": "FAILURE", "status": "COMPLETED"}]))), "failing");
         assert_eq!(checks_state(Some(&json!([{"state": "PENDING"}]))), "pending");
+    }
+
+    #[test]
+    fn lists_each_check_once_with_whether_it_is_required() {
+        let rollup = json!([
+            {"name": "build (windows-latest)", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"name": "build (ubuntu-22.04)", "status": "IN_PROGRESS"},
+            {"context": "deploy/preview", "state": "SUCCESS"},
+            {"status": "COMPLETED", "conclusion": "SUCCESS"},
+            // Run again: the later entry is the one that counts.
+            {"name": "build (windows-latest)", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ]);
+        let required = vec!["build (windows-latest)".to_string(), "build (ubuntu-22.04)".to_string()];
+        let item = |name: &str, state, required| CheckItem { name: name.into(), state, required };
+        assert_eq!(
+            check_list(Some(&rollup), &required),
+            vec![item("build (windows-latest)", "passing", true), item("build (ubuntu-22.04)", "pending", true), item("deploy/preview", "passing", false)]
+        );
+        assert!(check_list(None, &required).is_empty());
+    }
+
+    #[test]
+    fn reads_the_required_names_and_takes_anything_else_as_none() {
+        assert_eq!(required_names(r#"[{"name":"build (macos-latest)"},{"name":"build (ubuntu-22.04)"},{"other":1}]"#), vec!["build (macos-latest)", "build (ubuntu-22.04)"]);
+        assert!(required_names("no required checks reported on the 'x' branch").is_empty());
+        assert!(required_names("").is_empty());
+        assert!(required_names("{}").is_empty());
     }
 }

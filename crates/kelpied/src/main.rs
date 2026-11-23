@@ -60,6 +60,7 @@ mod subs;
 mod takeover;
 mod user_presence;
 mod vt;
+mod window_agent;
 
 use std::path::PathBuf;
 

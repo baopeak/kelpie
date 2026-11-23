@@ -9,7 +9,9 @@
 //!   `worktree`, `run`, `call session.*`) unless the user turned that off or the session was
 //!   started restricted; then only their own session, plus `sub.report` (to the session that opened them),
 //!   `sub.inbox` (their own mail), `page.open` (a web page in their own project) and `browser.call` / `browser.policy` (the browser panes the
-//!   window lets them use). Hook, run, sub-session, page and browser calls always speak for the caller's own session; `browser.audit` is the user's;
+//!   window lets them use). Hook, run, sub-session, page, browser and window calls always speak for the caller's own session; `browser.audit` and
+//!   `window.audit` are the user's; `window.call` / `window.policy` (the windows of programs the session started) are on the scripting surface only, never a restricted
+//!   session's;
 //!   answering a sub-session request (`sub.answer`) is the user's. Admin methods (custom agents, automations, phone access, daemon
 //!   settings, closing sessions, turn checkpoints and their undo, notification channels, timers
 //!   that type into a session, changing a session's account, resolving review notes, listing and stopping a session's processes, reading a project's pull request…) are the user's only. Other sessions' environments are left
@@ -130,10 +132,11 @@ const SCRIPTING: &[&str] = &[
     "daemon.info", "agent.presets", "session.list", "session.read", "session.input", "session.create",
     "meta.list", "meta.get", "meta.set", "run.list", "run.get", "run.create", "run.retry",
     "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "note.add", "note.list", "owed.open", "owed.list",
-    "sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close", "page.open", "browser.call", "browser.policy",
+    "sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close", "page.open", "browser.call", "browser.policy", "window.call", "window.policy",
 ];
 /// Methods a restricted session's programs may call, on their own session only. `page.open` shows a page in the session's own project;
 /// `browser.call` uses the panes the window lets this session use, under the same policy as any other session.
+/// `window.call` and `window.policy` are left out on purpose: the window tools add power to a limited session, so it does not get them.
 const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list", "owed.open", "owed.list", "sub.report", "sub.inbox", "page.open", "browser.call", "browser.policy"];
 /// Methods of a session whose token went missing.
 const CLAIMED: &[&str] = &["daemon.info", "hook.report"];
@@ -186,7 +189,7 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
     // `sub.*` speak for the caller's own session too: a program cannot report as, read the mail of, close
     // the sub-sessions of, or message as another session. `sub.answer` and `sub.pending` are the user's. A page is opened in the
     // caller's own project, and browser panes are used as the caller.
-    if matches!(method, "hook.report" | "run.report" | "owed.open" | "owed.list" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open" | "browser.call") {
+    if matches!(method, "hook.report" | "run.report" | "owed.open" | "owed.list" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open" | "browser.call" | "window.call") {
         if let Some(obj) = params.as_object_mut() {
             obj.insert("session_id".into(), Value::String(id.clone()));
             // Whether the caller proved it is that session (a claimed id proves nothing).
@@ -547,6 +550,17 @@ mod tests {
             assert!(allowed(&user, false, m), "user: {m}");
             assert!(!allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");
         }
+        // Windows of programs a session started: only a session that may script others (a restricted one, or one with scripting
+        // turned off, has no such tools); the audit is the user's.
+        for m in ["window.call", "window.policy"] {
+            assert!(allowed(&s, true, m), "scripting session: {m}");
+            assert!(!allowed(&s, false, m), "restricted or own-only session: {m}");
+            assert!(!OWN.contains(&m), "{m}");
+            assert!(allowed(&user, false, m), "user: {m}");
+            assert!(!allowed(&claimed, true, m) && !allowed(&Role::Anonymous, false, m), "{m}");
+        }
+        assert!(allowed(&user, false, "window.audit") && allowed(&Role::App, false, "window.audit"));
+        assert!(!allowed(&s, true, "window.audit") && !allowed(&s, false, "window.audit") && !allowed(&claimed, true, "window.audit"));
         assert!(allowed(&user, false, "browser.audit") && allowed(&Role::App, false, "browser.audit"));
         assert!(!allowed(&s, true, "browser.audit") && !allowed(&s, false, "browser.audit") && !allowed(&claimed, true, "browser.audit"));
         for m in ["sub.answer", "sub.pending"] {

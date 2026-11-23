@@ -664,6 +664,15 @@ commit offers **Fix with AI**; *Amend* rewrites the last commit.
 **Pull requests** (GitHub, through your `gh`): the branch's PR shows with its state and
 checks (also as a chip in the sidebar); *Create pull request…* pushes and opens one, with
 **Generate with AI** for the title and description. Failing checks offer *Fix with AI*.
+Next to them a **merge line** says *can merge* or *cannot merge* and why: GitHub's own answer
+(a draft, conflicts, required checks failing or still running, a rule that blocks it), plus one
+thing Kelpie adds. A change *needs a look* when it touches what decides the checks (a workflow, a
+check script, a baseline) or removes or switches off tests, judged from the file names and the
+changed lines against the base branch, so it is a hint and not a proof. Those files are listed
+under the line; click one to see its diff, and **Accept for this commit** once you have looked.
+The acceptance holds for that commit only, so a new commit asks again, and it stays in the
+chip's tooltip as *accepted for this commit*. When the change cannot be read, the line is shown
+without this check and the tooltip says why.
 
 **Review notes**: in a diff, click the gutter (`+`) to note a line; notes on all files of
 the project collect in a bar above the diff. **Send to agent ▾** sends them as one prompt to
@@ -1101,6 +1110,44 @@ session, tool, site, the element (its role and name) and whether it worked. The 
 holds typed text or scripts; it keeps only the host of a site, and any address in an element's
 name or an error loses its query and fragment. Screenshots agents take are saved under
 `browser-shots/agent` in the data folder, which keeps the newest 200.
+
+### Letting agents use the windows of programs they start
+
+An agent can start a program on this computer (a browser, an editor, a desktop app), read what its windows show and press buttons or fill
+fields in them, without your mouse or keyboard: to check what an app it just built looks like, or to run it through a screen it cannot
+test any other way. Windows only for now.
+
+**Turning it on.** It is off on a new install. In Settings → Agents (on Windows only) turn on *Programs agents start*; a second switch,
+*Allow the visible desktop*, appears under it while the first is on. (The same two settings are `window_agents` and `window_visible` in
+`policy.json` in the data folder, which `kelpied call daemon.set_policy` also writes.) Agents started after that get six tools,
+`kelpie_window_launch`, `_list`, `_tree`, `_act`, `_shot` and `_close`. *Agents can control other sessions* has to be on, and a session
+started restricted never gets them.
+
+**What an agent can and cannot do.** It reaches only the programs it started itself with `kelpie_window_launch`, and only their windows;
+not your own windows, not another session's programs, and not Kelpie (a separate Kelpie with its own data folder can be started from a
+shell, not through these tools). It reads a window as an outline of elements, presses a button, sets the text of a field, toggles,
+expands or selects, and takes a picture of the window, which is kept under `window-shots` in the data folder (the newest 20 per session).
+It cannot bring a window to the front on its own, and what a window says is data for it, not instructions. This is a rule for an agent that
+behaves, not a wall: an agent that can run shell commands can do far more than these tools, and a program an agent starts runs as you,
+with your files and sign-ins. Do not let it start a browser or app that is signed in to accounts you would not hand to it.
+
+**The hidden desktop.** Programs start on a desktop of their own that you never see, so nothing appears in front of your work and your
+focus stays where it is. Browsers and ordinary Windows programs run there. A web view app, which is what a Tauri app is (Kelpie
+itself is one), does not: it stops with an error there. Such a program can be started with `visible: true`, on your own desktop, only when
+you also turn on *Allow the visible desktop*; acting on it then brings its window forward, which interrupts you, so use it on a computer nobody
+is working at (a test runner) when you can. A web view shows its page in the outline only after it has been read once, so an agent reads
+a window twice when the page is missing.
+
+**Approvals and the record.** Claude Code and Codex in a terminal ask before starting a program, acting on a window or closing one, unless
+the session runs with permission checks off; reading is approved in advance. `window-audit.jsonl` in the data folder (past 1 MB it moves to
+`window-audit.jsonl.1`) lists each start, action and close: time, session, tool, the window, or the program's file name for a start, and the
+action. It never holds the text typed into a field, a program's path or its arguments.
+
+**Limits.** At most 20 programs started per session per hour, 10 calls a second per session, and no more than six helper runs at once.
+Every program a session starts, and everything that program starts, belongs to that session. When you close the session in Kelpie, the
+windows are asked to close and whatever is still running is then ended; the same happens to all of them when Kelpie's daemon ends (it ends
+for an update too, so an agent's programs do not survive one). A session that ended by itself leaves its programs open until you close the
+session. Not available yet: asking you per program, a hidden desktop per session, the phone, macOS and Linux.
 
 ### Remote projects (SSH)
 

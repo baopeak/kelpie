@@ -4,6 +4,10 @@
 //! is gone, so an entry counts only while a process with that id **and** that creation time is alive. A window is in reach when its
 //! process is such a program or descends from one through parent links, each link checked the same way (a child is never older than its
 //! parent: a parent id that now names a younger process is a reused id, and the chain ends there).
+//!
+//! When the daemon names a job object (`KELPIE_WINDOW_JOB`), the job decides instead: `launch` puts each program in it before the program
+//! runs any code, and a window is in reach when its process is in the job, however it got there. The list then only gives a window its
+//! program's name.
 
 use serde::{Deserialize, Serialize};
 
@@ -157,6 +161,45 @@ pub fn scope_name(raw: Option<&str>) -> String {
     }
 }
 
+/// The longest job name taken.
+pub const MAX_JOB_NAME: usize = 160;
+
+/// The job object the daemon named (`KELPIE_WINDOW_JOB`). `Ok(None)`: none is named, and reach is by the list of started programs. A name
+/// that is not one the daemon would make (letters, digits, `-` and `_`) is an error and never falls back to the list: a call that was
+/// meant to be held to a job must not quietly be held to something wider.
+pub fn job_name(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(name) = raw.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let plain = name.len() <= MAX_JOB_NAME
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if plain {
+        Ok(Some(name.to_string()))
+    } else {
+        Err("KELPIE_WINDOW_JOB is not a job name Kelpie makes".into())
+    }
+}
+
+/// Whether a window's process is in reach. `in_job` is `Some(member)` when a job is named (whether the process is in it) and `None`
+/// when none is: the list's `owner` decides then.
+pub fn reaches(in_job: Option<bool>, owner: Option<&Launched>) -> bool {
+    in_job.unwrap_or(owner.is_some())
+}
+
+/// The program name a window is listed under: the one `launch` wrote down for its process or an ancestor, else the file name of the
+/// process's image (a program a started one handed over to, which only the job knows).
+pub fn program_label(owner: Option<&Launched>, image: Option<&str>) -> String {
+    if let Some(l) = owner {
+        return l.program.clone();
+    }
+    image
+        .and_then(|p| p.rsplit(['\\', '/']).next())
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| "program".to_string(), str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +344,55 @@ mod tests {
         assert_eq!(scope_name(Some("../..\\x:y")), "xy");
         assert_eq!(scope_name(Some("sess-12_a")), "sess-12_a");
         assert_eq!(scope_name(Some(&"a".repeat(100))).len(), 64);
+    }
+
+    #[test]
+    fn a_job_is_named_by_the_daemon_or_not_at_all() {
+        assert_eq!(job_name(None), Ok(None));
+        assert_eq!(job_name(Some("")), Ok(None));
+        assert_eq!(
+            job_name(Some("kelpie-win-s_1-0a1B")),
+            Ok(Some("kelpie-win-s_1-0a1B".to_string()))
+        );
+        assert!(job_name(Some("a".repeat(MAX_JOB_NAME).as_str())).is_ok());
+        // Anything else is refused, never read as "no job": the namespace prefixes, a path, a space, a longer name.
+        let long = "a".repeat(MAX_JOB_NAME + 1);
+        for bad in [
+            r"Global\x",
+            r"Local\x",
+            "a b",
+            "../x",
+            "x\0",
+            "é",
+            long.as_str(),
+        ] {
+            assert!(job_name(Some(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_named_job_decides_reach_and_the_list_only_when_there_is_none() {
+        let listed = l(100, 10);
+        // With a job, being in it is all that counts: a program the list does not know is in reach, one the list knows but the job
+        // does not hold is not.
+        assert!(reaches(Some(true), None));
+        assert!(reaches(Some(true), Some(&listed)));
+        assert!(!reaches(Some(false), Some(&listed)));
+        assert!(!reaches(Some(false), None));
+        // With none, the list's answer stands.
+        assert!(reaches(None, Some(&listed)));
+        assert!(!reaches(None, None));
+    }
+
+    #[test]
+    fn a_window_is_listed_under_its_program_s_name() {
+        assert_eq!(program_label(Some(&l(1, 1)), Some(r"C:\x\other.exe")), "app.exe");
+        assert_eq!(
+            program_label(None, Some(r"C:\Program Files\Edge\msedge.exe")),
+            "msedge.exe"
+        );
+        assert_eq!(program_label(None, Some("/opt/app")), "app");
+        assert_eq!(program_label(None, Some(r"C:\dir\")), "program");
+        assert_eq!(program_label(None, None), "program");
     }
 }

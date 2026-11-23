@@ -29,6 +29,8 @@ import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, familyRoot, folder
 import { remember } from "./prompt-history";
 import { pulseSession } from "./reveal-pulse";
 import { defaultSettings } from "./default-settings";
+import type { Flag } from "./merge-line";
+import { withAcceptances } from "./merge-review";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 import { OWED_API, applyOwedChanged, replaceOwed } from "./owed";
 
@@ -1566,6 +1568,11 @@ function createAppStore() {
       : t("{n} sub-session tabs were folded into their parent's tab: sub-sessions now show there, under the parent's header.", { n: drop.length }), undefined, 8000);
   }
 
+  /** Accepts the flags of a pull request's change for its head commit. */
+  function acceptFlags(projectId: string, head: string, flags: Flag[]) {
+    update((s) => (s.acceptedFlags = withAcceptances(s.acceptedFlags, projectId, head, flags)));
+  }
+
   function openFile(projectId: string, path: string, opts: { line?: number; diff?: boolean; staged?: boolean; rev?: Pane["rev"]; base?: string } = {}) {
     const kind = opts.diff ? "diff" : "file";
     if (!opts.diff) recordRecent("file", path, projectId);
@@ -2009,7 +2016,7 @@ function createAppStore() {
   return {
     state, sessions, connected, sessionsKnown, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
     init, activeProject, workspace, activeTab, addProject, removeProject, restoreProjects, renameProject, moveProject, switchProject,
-    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, forgetPlace, openFile, closePane,
+    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, forgetPlace, openFile, acceptFlags, closePane,
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,
