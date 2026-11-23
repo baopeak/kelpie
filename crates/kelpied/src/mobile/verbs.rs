@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn only_keeping_the_connection_up_and_getting_out_of_the_lock_pass_it() {
         let passing: Vec<Verb> = ALL.into_iter().filter(|v| v.passes_lock()).collect();
-        assert_eq!(passing, [Verb::Hb, Verb::Ack, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::PrGet]);
+        assert_eq!(passing, [Verb::Hb, Verb::Ack, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch]);
         for alerts in [Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest] {
             assert!(!alerts.passes_lock(), "{alerts:?}");
         }

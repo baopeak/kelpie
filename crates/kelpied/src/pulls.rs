@@ -30,6 +30,10 @@ const DRAIN_WAIT: Duration = Duration::from_secs(2);
 /// What `gh pr view` is asked for.
 const VIEW_FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefOid,mergeable,mergeStateStatus,statusCheckRollup";
 
+/// Variables of the daemon's own environment that would change which repository or host a program reads, or make `gh` print its traffic into error text.
+const GIT_UNSET: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"];
+const GH_UNSET: &[&str] = &["GH_REPO", "GH_HOST", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_DEBUG", "DEBUG", "GH_FORCE_TTY", "GH_PAGER", "PAGER"];
+
 const GH_MISSING: &str = "GitHub's command line tool (`gh`) is not installed here, or not on the computer's PATH.";
 const GH_SIGNED_OUT: &str = "`gh` is not signed in to GitHub: run `gh auth login` on the computer.";
 const GH_TIMED_OUT: &str = "GitHub did not answer within a minute.";
@@ -63,6 +67,12 @@ fn drain<R: Read + Send + 'static>(stream: Option<R>) -> mpsc::Receiver<String> 
 
 /// Runs `program` in `cwd` with no input, its output read and bounded, and killed when `limit` passes. `env` is set and `unset` removed.
 fn run(program: &str, args: &[String], cwd: &Path, env: &[(&str, &str)], unset: &[&str], limit: Duration) -> Result<Ran, RunError> {
+    #[cfg(test)]
+    {
+        if let Some(ran) = fake::answer(program, args, cwd) {
+            return Ok(ran);
+        }
+    }
     let mut cmd = Command::new(program);
     cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (key, value) in env {
@@ -100,7 +110,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut all: Vec<String> = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"].iter().map(|s| s.to_string()).collect();
     all.extend(args.iter().map(|s| s.to_string()));
     let env = [("GIT_OPTIONAL_LOCKS", "0"), ("GIT_TERMINAL_PROMPT", "0"), ("LC_ALL", "C")];
-    match run("git", &all, dir, &env, &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"], GIT_LIMIT) {
+    match run("git", &all, dir, &env, GIT_UNSET, GIT_LIMIT) {
         Ok(ran) if ran.ok => Ok(ran.stdout),
         Ok(ran) => Err(one_line(&ran.stderr, MAX_MESSAGE)),
         Err(RunError::Missing) => Err("`git` is not installed here, or not on the computer's PATH.".to_string()),
@@ -112,7 +122,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// `gh` from `neutral` (the daemon's data folder), with prompts, colour and the user's repository and host overrides out of the way.
 fn gh(neutral: &Path, args: Vec<String>) -> Result<Ran, String> {
     let env = [("GH_PROMPT_DISABLED", "1"), ("NO_COLOR", "1"), ("GH_NO_UPDATE_NOTIFIER", "1"), ("GH_SPINNER_DISABLED", "1")];
-    match run("gh", &args, neutral, &env, &["GH_REPO", "GH_HOST", "GH_FORCE_TTY", "GH_PAGER", "PAGER"], GH_LIMIT) {
+    match run("gh", &args, neutral, &env, GH_UNSET, GH_LIMIT) {
         Ok(ran) => Ok(ran),
         Err(RunError::Missing) => Err(GH_MISSING.to_string()),
         Err(RunError::TimedOut) => Err(GH_TIMED_OUT.to_string()),
@@ -130,10 +140,15 @@ fn gh_refusal(ran: &Ran) -> String {
     one_line(text, MAX_MESSAGE)
 }
 
-/// Text from a program or from GitHub as one line without control characters, at most `limit` characters.
+/// Characters that draw nothing or change the direction text runs in: they could make a title read as something else next to a number.
+fn is_invisible(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+}
+
+/// Text from a program or from GitHub as one line without control or direction-changing characters, at most `limit` characters.
 pub fn one_line(text: &str, limit: usize) -> String {
     let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let clean: String = joined.chars().filter(|c| !c.is_control()).collect();
+    let clean: String = joined.chars().filter(|c| !is_invisible(*c)).collect();
     if clean.chars().count() <= limit {
         return clean;
     }
@@ -142,12 +157,33 @@ pub fn one_line(text: &str, limit: usize) -> String {
     cut
 }
 
+/// What stands for a project's folder in a message.
+const FOLDER_WORDS: &str = "the project's folder";
+
+/// `text` with every `form` of a folder taken out; with `fold_case` whatever the case of its ASCII letters (Windows does not tell `D:\Works` from `d:/works`).
+fn replace_folder(text: &str, form: &str, fold_case: bool) -> String {
+    if !fold_case {
+        return text.replace(form, FOLDER_WORDS);
+    }
+    // Lowering ASCII keeps every byte position, so a match in the lowered text is the same bytes in the original.
+    let (lower, needle) = (text.to_ascii_lowercase(), form.to_ascii_lowercase());
+    let (mut out, mut at) = (String::new(), 0);
+    while let Some(found) = lower[at..].find(&needle) {
+        out.push_str(&text[at..at + found]);
+        out.push_str(FOLDER_WORDS);
+        at += found + needle.len();
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// `message` with every mention of the project's `folder` taken out: a phone is never told where a project is.
 fn without_folder(message: &str, folder: &str) -> String {
+    let bare = folder.trim_end_matches(|c| c == '/' || c == '\\');
     let mut out = message.to_string();
-    for form in [folder.to_string(), folder.replace('\\', "/"), folder.replace('/', "\\")] {
+    for form in [bare.to_string(), bare.replace('\\', "/"), bare.replace('/', "\\")] {
         if !form.is_empty() {
-            out = out.replace(&form, "the project's folder");
+            out = replace_folder(&out, &form, cfg!(windows));
         }
     }
     out
@@ -298,13 +334,30 @@ pub fn parse_pull(text: &str) -> Result<Pull, String> {
     })
 }
 
-/// The names `gh pr checks --required --json name` printed. Anything else (an error's text, no output) is none.
-pub fn parse_required(text: &str) -> Vec<String> {
-    let Ok(Value::Array(all)) = serde_json::from_str::<Value>(text) else { return Vec::new() };
+/// The checks branch protection requires of a pull request, by name, or why they could not be read. An unreadable list is never "none are required".
+pub type Listed = Result<Vec<String>, String>;
+
+/// The names `gh pr checks --required --json name` printed; `None` when what it printed is not a list.
+fn parse_required(text: &str) -> Option<Vec<String>> {
+    let Ok(Value::Array(all)) = serde_json::from_str::<Value>(text) else { return None };
     let mut names: Vec<String> = all.iter().filter_map(|c| c["name"].as_str()).map(|n| one_line(n, 120)).collect();
     names.sort();
     names.dedup();
-    names
+    Some(names)
+}
+
+/// What `gh pr checks --required --json name` came to. It exits non-zero while a check fails or runs, so the output is what counts: a list is
+/// the answer (an empty one means none are required), and so is `gh`'s own sentence that no required checks are reported. Anything else (a
+/// `gh` too old for `--json`, an error, a timeout, text that is not a list) is a failure to read.
+fn required_list(ran: &Ran) -> Listed {
+    if let Some(names) = parse_required(&ran.stdout) {
+        return Ok(names);
+    }
+    if !ran.ok && ran.stderr.to_ascii_lowercase().contains("no required checks reported") {
+        return Ok(Vec::new());
+    }
+    let why = if ran.ok { String::new() } else { gh_refusal(ran) };
+    Err(if why.is_empty() { "its answer could not be read".to_string() } else { why })
 }
 
 /// The required checks that failed, and those still running or not reported at all.
@@ -381,8 +434,9 @@ fn names(list: &[String]) -> String {
 }
 
 /// What `pull` comes to, in this order: not open, a draft, conflicts, a required check that failed, one still running, then GitHub's own merge state.
-/// A check that is not required never decides; with none known as required, GitHub's merge state is all there is.
-pub fn merge_line(pull: &Pull, required: &[String]) -> Line {
+/// A check that is not required never decides; with GitHub saying none are required, its merge state is all there is. When the list of required
+/// checks could not be read, nothing is known about them: `unknown`, whatever the merge state says.
+pub fn merge_line(pull: &Pull, required: &Listed) -> Line {
     if pull.state != "OPEN" {
         return Line::cannot("not_open", pull.state.to_ascii_lowercase());
     }
@@ -392,6 +446,10 @@ pub fn merge_line(pull: &Pull, required: &[String]) -> Line {
     if pull.mergeable == "CONFLICTING" || pull.merge_state == "DIRTY" {
         return Line::cannot("conflicts", format!("with {}", pull.base));
     }
+    let required = match required {
+        Ok(names) => names,
+        Err(why) => return Line::cannot("unknown", format!("the required checks could not be read: {why}")),
+    };
     let state = required_state(&pull.checks, required);
     if !state.failing.is_empty() {
         return Line::cannot("checks_failing", names(&state.failing));
@@ -408,6 +466,11 @@ pub fn merge_line(pull: &Pull, required: &[String]) -> Line {
     }
 }
 
+/// The required names, or the refusal that they could not be read.
+fn required_names(required: &Listed) -> Result<&[String], String> {
+    required.as_deref().map_err(|why| format!("The required checks could not be read, so nothing is merged: {why}"))
+}
+
 /// What `pr.status` answers for a pull request that exists.
 pub fn status_json(repo: &str, pull: &Pull, line: &Line) -> Value {
     json!({"repo": repo, "number": pull.number, "title": pull.title, "url": pull.url, "base": pull.base, "head": pull.head, "line": line.to_json()})
@@ -415,8 +478,8 @@ pub fn status_json(repo: &str, pull: &Pull, line: &Line) -> Value {
 
 // ---------- reading ----------
 
-/// The pull request of `selector` (a branch or a number) in `repo` and the checks branch protection requires of it; `None` when there is none.
-fn read_pull(repo: &str, selector: &str, neutral: &Path) -> Result<Option<(Pull, Vec<String>)>, String> {
+/// The pull request of `selector` (a branch or a number) in `repo`; `None` when there is none.
+fn view_pull(repo: &str, selector: &str, neutral: &Path) -> Result<Option<Pull>, String> {
     let view = vec!["pr".to_string(), "view".to_string(), selector.to_string(), "-R".to_string(), repo_arg(repo), "--json".to_string(), VIEW_FIELDS.to_string()];
     let ran = gh(neutral, view)?;
     if !ran.ok {
@@ -425,10 +488,15 @@ fn read_pull(repo: &str, selector: &str, neutral: &Path) -> Result<Option<(Pull,
         }
         return Err(gh_refusal(&ran));
     }
-    let pull = parse_pull(&ran.stdout)?;
-    // Its exit code says whether the checks are all passing, so it is the output that counts. Any failure to read is "none required".
+    parse_pull(&ran.stdout).map(Some)
+}
+
+/// The pull request of `selector` in `repo` and the checks branch protection requires of it; `None` when there is none. A failure to read the
+/// required checks is kept as such (`Listed`), not turned into "none".
+fn read_pull(repo: &str, selector: &str, neutral: &Path) -> Result<Option<(Pull, Listed)>, String> {
+    let Some(pull) = view_pull(repo, selector, neutral)? else { return Ok(None) };
     let checks = vec!["pr".to_string(), "checks".to_string(), pull.number.to_string(), "-R".to_string(), repo_arg(repo), "--required".to_string(), "--json".to_string(), "name".to_string()];
-    let required = gh(neutral, checks).map(|ran| parse_required(&ran.stdout)).unwrap_or_default();
+    let required = gh(neutral, checks).and_then(|ran| required_list(&ran));
     Ok(Some((pull, required)))
 }
 
@@ -473,7 +541,9 @@ pub fn bound_command(b: &Bound) -> String {
     format!("merge {HOST} {} #{} {} {}", b.repo, b.number, b.head, b.method)
 }
 
-/// The request id a merge's assertion is over. It cannot be any other kind's: a dangerous approval's is a number, a screen's starts `screen:`.
+/// The request id a merge's assertion is over: `merge:` and the challenge's nonce. A terminal approval's is a number and a screen's starts `screen:`,
+/// but a chat approval's is whatever string its agent chose, so the prefix alone separates nothing from it. What does is the nonce, made here, never
+/// seen by an agent, and used once.
 pub fn challenge_request(nonce: &str) -> String {
     format!("merge:{nonce}")
 }
@@ -494,9 +564,9 @@ pub fn merge_args(b: &Bound) -> Vec<String> {
 }
 
 /// Why `pull`, as just read from `repo` with the checks `required` of it, may not be merged as `b` says; `Ok` when it may. It must be the
-/// repository and the pull request that were bound, open and not a draft, at the head commit that was bound, with every required check passed,
-/// and GitHub's own merge state must allow it.
-pub fn merge_refusal(repo: &str, pull: &Pull, required: &[String], b: &Bound) -> Result<(), String> {
+/// repository and the pull request that were bound, open and not a draft, at the head commit that was bound, with the list of required checks
+/// read and every one of them passed, and GitHub's own merge state must allow it.
+pub fn merge_refusal(repo: &str, pull: &Pull, required: &Listed, b: &Bound) -> Result<(), String> {
     if repo != b.repo {
         return Err("This project's repository is not the one you confirmed.".to_string());
     }
@@ -512,7 +582,7 @@ pub fn merge_refusal(repo: &str, pull: &Pull, required: &[String], b: &Bound) ->
     if pull.head != b.head {
         return Err("The pull request has new commits since you looked: look again before merging.".to_string());
     }
-    let state = required_state(&pull.checks, required);
+    let state = required_state(&pull.checks, required_names(required)?);
     if !state.failing.is_empty() {
         return Err(format!("A required check failed: {}.", names(&state.failing)));
     }
@@ -526,10 +596,49 @@ pub fn merge_refusal(repo: &str, pull: &Pull, required: &[String], b: &Bound) ->
     Ok(())
 }
 
+/// The pull request of the project's branch as a merge of it would be bound: what the daemon itself read, and what a passkey is then asked to sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Challenged {
+    pub bound: Bound,
+    pub title: String,
+}
+
+/// Reads the project in `folder` for a merge by `method`: its repository from `origin`, and the pull request of its branch (number, head commit and
+/// title) from `gh`. It is refused here, before any passkey is asked, if `merge_refusal` would refuse it now. `Err` is one line without the folder.
+pub fn challenge_read(folder: &str, neutral: &Path, method: &'static str) -> Result<Challenged, String> {
+    let attempt = || -> Result<Challenged, String> {
+        let repo = repo_of(folder)?;
+        let branch = branch_of(folder)?;
+        let (pull, required) = read_pull(&repo, &branch, neutral)?.ok_or_else(|| "This branch has no pull request.".to_string())?;
+        let bound = Bound { repo, number: pull.number, head: pull.head.clone(), method };
+        merge_refusal(&bound.repo, &pull, &required, &bound)?;
+        Ok(Challenged { bound, title: pull.title })
+    };
+    attempt().map_err(|why| without_folder(&why, folder))
+}
+
+/// What a merge that `gh` accepted came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Done {
+    Merged,
+    /// `gh` exited 0 but the pull request is not merged (a merge queue only takes it in): its state as read, or `unknown`.
+    Pending(String),
+}
+
+/// `Done` from the pull request read once more after `gh pr merge` said yes: merged only when GitHub says its state is `MERGED`.
+pub fn done_of(read: &Result<Option<Pull>, String>) -> Done {
+    match read {
+        Ok(Some(pull)) if pull.state == "MERGED" => Done::Merged,
+        Ok(Some(pull)) if !pull.state.is_empty() => Done::Pending(pull.state.to_ascii_lowercase()),
+        _ => Done::Pending("unknown".to_string()),
+    }
+}
+
 /// Merges `b`'s pull request of the project in `folder`: reads the project's repository and the pull request again, refuses unless
-/// `merge_refusal` says it may be merged, then has `gh` merge it. `Err` is GitHub's own refusal or ours, one line without the folder.
-pub fn merge_now(folder: &str, neutral: &Path, b: &Bound) -> Result<(), String> {
-    let attempt = || -> Result<(), String> {
+/// `merge_refusal` says it may be merged, has `gh` merge it, and reads it once more to say whether it is merged. `Err` is GitHub's own refusal
+/// or ours, one line without the folder.
+pub fn merge_now(folder: &str, neutral: &Path, b: &Bound) -> Result<Done, String> {
+    let attempt = || -> Result<Done, String> {
         let repo = repo_of(folder)?;
         if repo != b.repo {
             return Err("This project's repository is not the one you confirmed.".to_string());
@@ -537,22 +646,68 @@ pub fn merge_now(folder: &str, neutral: &Path, b: &Bound) -> Result<(), String> 
         let (pull, required) = read_pull(&repo, &b.number.to_string(), neutral)?.ok_or_else(|| "That pull request is gone.".to_string())?;
         merge_refusal(&repo, &pull, &required, b)?;
         let ran = gh(neutral, merge_args(b))?;
-        if ran.ok {
-            Ok(())
-        } else {
-            Err(gh_refusal(&ran))
+        if !ran.ok {
+            return Err(gh_refusal(&ran));
         }
+        Ok(done_of(&view_pull(&repo, &b.number.to_string(), neutral)))
     };
     attempt().map_err(|why| without_folder(&why, folder))
 }
 
 /// The audit line for a merge attempt: what was asked for, by which phone, and what came of it.
-pub fn merge_summary(by: &str, b: &Bound, result: &Result<(), String>) -> String {
+pub fn merge_summary(by: &str, b: &Bound, result: &Result<Done, String>) -> String {
     let outcome = match result {
-        Ok(()) => "merged".to_string(),
+        Ok(Done::Merged) => "merged".to_string(),
+        Ok(Done::Pending(state)) => format!("accepted, not merged yet ({})", one_line(state, 40)),
         Err(why) => format!("refused: {}", one_line(why, MAX_MESSAGE)),
     };
     format!("{} #{} head {} ({}) by {}: {outcome}", b.repo, b.number, b.head, b.method, one_line(by, 60))
+}
+
+/// Programs answered by the tests instead of being run: a handler is registered for a working folder, and every `git` or `gh` run there goes to it.
+/// Each test works in folders of its own (a project's, and the daemon's data folder where `gh` runs), so tests do not meet each other's handlers.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    /// What a program printed and whether it succeeded.
+    pub struct Answer {
+        pub ok: bool,
+        pub stdout: String,
+        pub stderr: String,
+    }
+
+    impl Answer {
+        pub fn out(stdout: impl Into<String>) -> Answer {
+            Answer { ok: true, stdout: stdout.into(), stderr: String::new() }
+        }
+
+        pub fn failed(stderr: impl Into<String>) -> Answer {
+            Answer { ok: false, stdout: String::new(), stderr: stderr.into() }
+        }
+    }
+
+    type Handler = Arc<dyn Fn(&str, &[String]) -> Answer + Send + Sync>;
+
+    fn table() -> &'static Mutex<HashMap<PathBuf, Handler>> {
+        static TABLE: OnceLock<Mutex<HashMap<PathBuf, Handler>>> = OnceLock::new();
+        TABLE.get_or_init(Default::default)
+    }
+
+    /// Answers every program run in `cwd` with `handler` (program name and arguments in, what it printed out).
+    pub fn answer_in(cwd: &Path, handler: impl Fn(&str, &[String]) -> Answer + Send + Sync + 'static) {
+        table().lock().unwrap().insert(cwd.to_path_buf(), Arc::new(handler));
+    }
+
+    pub(super) fn answer(program: &str, args: &[String], cwd: &Path) -> Option<Ran> {
+        // The handler runs with the table unlocked: it may be slow or look at the table itself.
+        let handler = table().lock().unwrap().get(cwd)?.clone();
+        let said = handler(program, args);
+        Some(Ran { ok: said.ok, stdout: said.stdout, stderr: said.stderr })
+    }
 }
 
 #[cfg(test)]
@@ -576,8 +731,12 @@ mod tests {
         }
     }
 
-    fn required(names: &[&str]) -> Vec<String> {
-        names.iter().map(|n| n.to_string()).collect()
+    fn required(names: &[&str]) -> Listed {
+        Ok(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    fn ran(ok: bool, stdout: &str, stderr: &str) -> Ran {
+        Ran { ok, stdout: stdout.to_string(), stderr: stderr.to_string() }
     }
 
     #[test]
@@ -661,10 +820,88 @@ mod tests {
     }
 
     #[test]
-    fn the_required_checks_are_the_names_gh_lists_and_a_failure_to_read_is_none() {
-        assert_eq!(parse_required(r#"[{"name": "test"}, {"name": "build"}, {"name": "test"}]"#), ["build", "test"]);
-        for none in ["", "[]", "no required checks reported on the 'x' branch", "{\"message\": \"bad\"}", "[{\"state\": \"x\"}]"] {
-            assert!(parse_required(none).is_empty(), "{none:?}");
+    fn the_required_checks_are_what_gh_lists_and_only_its_own_word_for_none_means_none() {
+        let list = r#"[{"name": "test"}, {"name": "build"}, {"name": "test"}]"#;
+        // A list is the answer whatever the exit code says (gh exits non-zero while a check fails or runs).
+        assert_eq!(required_list(&ran(true, list, "")), Ok(vec!["build".to_string(), "test".to_string()]));
+        assert_eq!(required_list(&ran(false, list, "")), Ok(vec!["build".to_string(), "test".to_string()]));
+        assert_eq!(required_list(&ran(true, "[]", "")), Ok(Vec::new()));
+        // gh's sentence for a branch that has no required checks.
+        assert_eq!(required_list(&ran(false, "", "no required checks reported on the 'feature' branch\n")), Ok(Vec::new()));
+        // Everything else could not be read: a gh too old for --json, a failure, a timeout's empty output, text that is not a list.
+        for (ok, out, err) in [
+            (false, "", "unknown flag: --json"),
+            (false, "", "HTTP 502: Bad Gateway"),
+            (false, "", ""),
+            (true, "", ""),
+            (true, "{\"message\": \"bad\"}", ""),
+            (true, "no required checks reported on the 'x' branch", ""),
+            (false, "no checks reported", ""),
+        ] {
+            assert!(required_list(&ran(ok, out, err)).is_err(), "{ok} {out:?} {err:?}");
+        }
+        assert_eq!(required_list(&ran(false, "", "To get started with GitHub CLI, please run:  gh auth login")), Err(GH_SIGNED_OUT.to_string()));
+    }
+
+    #[test]
+    fn required_checks_that_could_not_be_read_are_unknown_and_never_a_merge() {
+        let passed = [("build", CheckResult::Passed)];
+        let clean = pull("OPEN", false, "MERGEABLE", "CLEAN", &passed);
+        let unread: Listed = Err("HTTP 502".to_string());
+        let line = merge_line(&clean, &unread);
+        assert_eq!((line.can, line.reason), (false, Some("unknown")));
+        assert!(line.detail.contains("HTTP 502"), "{}", line.detail);
+        let why = merge_refusal("o/n", &clean, &unread, &bound("squash")).unwrap_err();
+        assert!(why.contains("required checks could not be read") && why.contains("HTTP 502"), "{why}");
+        // What does not depend on them is still said first.
+        assert_eq!(merge_line(&pull("MERGED", false, "MERGEABLE", "CLEAN", &passed), &unread).reason, Some("not_open"));
+        assert_eq!(merge_line(&pull("OPEN", true, "MERGEABLE", "CLEAN", &passed), &unread).reason, Some("draft"));
+        // None required and GitHub saying clean: it can be merged. A required check failing: it cannot.
+        let none = merge_line(&clean, &required(&[]));
+        assert_eq!((none.can, none.reason), (true, None));
+        assert_eq!(merge_refusal("o/n", &clean, &required(&[]), &bound("squash")), Ok(()));
+        let failing = pull("OPEN", false, "MERGEABLE", "CLEAN", &[("build", CheckResult::Failed)]);
+        let line = merge_line(&failing, &required(&["build"]));
+        assert_eq!((line.can, line.reason, line.detail.as_str()), (false, Some("checks_failing"), "build"));
+        assert!(merge_refusal("o/n", &failing, &required(&["build"]), &bound("squash")).unwrap_err().contains("failed: build"));
+    }
+
+    #[test]
+    fn a_merge_that_gh_accepted_is_merged_only_when_the_pull_request_says_so() {
+        let state = |s: &str| Ok(Some(pull(s, false, "MERGEABLE", "CLEAN", &[])));
+        assert_eq!(done_of(&state("MERGED")), Done::Merged);
+        assert_eq!(done_of(&state("OPEN")), Done::Pending("open".to_string()));
+        assert_eq!(done_of(&state("CLOSED")), Done::Pending("closed".to_string()));
+        assert_eq!(done_of(&state("")), Done::Pending("unknown".to_string()));
+        assert_eq!(done_of(&Ok(None)), Done::Pending("unknown".to_string()));
+        assert_eq!(done_of(&Err("HTTP 502".to_string())), Done::Pending("unknown".to_string()));
+    }
+
+    #[test]
+    fn text_for_a_phone_loses_characters_that_turn_it_around_or_hide() {
+        assert_eq!(one_line("Fix \u{202e}the\u{200b} th\u{2066}ing\u{feff}", 50), "Fix the thing");
+        assert_eq!(one_line("a\u{200f}b\u{061c}c", 50), "abc");
+        // Ordinary letters of other scripts stay.
+        assert_eq!(one_line("Sửa lỗi 修正", 50), "Sửa lỗi 修正");
+    }
+
+    #[test]
+    fn a_folder_is_taken_out_of_a_message_whatever_its_slashes_and_on_windows_its_case() {
+        let said = "fatal: detected dubious ownership in repository at 'd:/works/Shop/' and C:\\x";
+        assert_eq!(without_folder(said, "D:\\Works\\Shop\\"), if cfg!(windows) { "fatal: detected dubious ownership in repository at 'the project's folder/' and C:\\x" } else { said });
+        assert_eq!(replace_folder("see D:\\WORKS\\shop\\objects", "d:\\works\\shop", true), "see the project's folder\\objects");
+        assert_eq!(replace_folder("see D:\\WORKS\\shop\\objects", "d:\\works\\shop", false), "see D:\\WORKS\\shop\\objects");
+        assert_eq!(replace_folder("a x a x", "x", true), "a the project's folder a the project's folder");
+        assert_eq!(without_folder("nothing here", ""), "nothing here");
+    }
+
+    #[test]
+    fn the_programs_never_inherit_what_would_move_them_to_another_repository_or_host() {
+        for var in ["GH_REPO", "GH_HOST", "GH_ENTERPRISE_TOKEN", "GH_DEBUG", "DEBUG"] {
+            assert!(GH_UNSET.contains(&var), "{var}");
+        }
+        for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
+            assert!(GIT_UNSET.contains(&var), "{var}");
         }
     }
 
@@ -721,7 +958,7 @@ mod tests {
         assert_eq!(without_folder("fatal: cannot change to 'C:\\work\\shop'", "C:\\work\\shop"), "fatal: cannot change to 'the project's folder'");
         assert_eq!(without_folder("cannot open C:/work/shop/objects", "C:\\work\\shop"), "cannot open the project's folder/objects");
         let p = pull("OPEN", false, "MERGEABLE", "CLEAN", &[]);
-        let shown = status_json("o/n", &p, &merge_line(&p, &[]));
+        let shown = status_json("o/n", &p, &merge_line(&p, &required(&[])));
         assert_eq!(shown["repo"], "o/n");
         assert_eq!((shown["number"].as_u64(), shown["head"].as_str(), shown["base"].as_str()), (Some(12), Some(HEAD), Some("master")));
         assert_eq!(shown["line"]["can"], true);
@@ -811,11 +1048,13 @@ mod tests {
 
     #[test]
     fn a_merge_attempt_is_recorded_with_what_was_asked_who_asked_and_what_came_of_it() {
-        let merged = merge_summary("Phone", &bound("squash"), &Ok(()));
+        let merged = merge_summary("Phone", &bound("squash"), &Ok(Done::Merged));
         assert_eq!(merged, format!("o/n #12 head {HEAD} (squash) by Phone: merged"));
+        let queued = merge_summary("Phone", &bound("squash"), &Ok(Done::Pending("open".to_string())));
+        assert_eq!(queued, format!("o/n #12 head {HEAD} (squash) by Phone: accepted, not merged yet (open)"));
         let refused = merge_summary("Phone", &bound("rebase"), &Err("GitHub says:\nnot mergeable".to_string()));
         assert_eq!(refused, format!("o/n #12 head {HEAD} (rebase) by Phone: refused: GitHub says: not mergeable"));
-        assert!(!merge_summary("A\nB", &bound("merge"), &Ok(())).contains('\n'));
+        assert!(!merge_summary("A\nB", &bound("merge"), &Ok(Done::Merged)).contains('\n'));
     }
 
     #[test]

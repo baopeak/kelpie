@@ -638,38 +638,49 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   only: a project the window has not told the daemon about since the daemon started is refused (`not_ready`, `no_project`) until the window
   connects. From the folder, `git remote get-url origin` and `git rev-parse --abbrev-ref HEAD` run the way the commit watcher runs git (hooks off,
   no prompts, 10 s); only a `github.com` remote counts, and credentials in its URL are dropped. Then `gh pr view <branch> -R github.com/<owner>/<name>
-  --json …` and `gh pr checks <number> -R … --required --json name` (an error there means none required) run from the daemon's data folder, never from
+  --json …` and `gh pr checks <number> -R … --required --json name` (a JSON list is the answer, and `gh`'s own "no required checks reported" means none; any other failure leaves the required checks unread) run from the daemon's data folder, never from
   a project's folder (a program in a session can change a worktree's git configuration), with prompts and colour off, no input, 60 s and the process
   killed on timeout. `gh` missing or signed out is a plain message. `pulls::merge_line` turns what was read into `{can, reason, detail}` from GitHub's
   own merge state (`mergeable`, `mergeStateStatus`): the reasons are `unknown`, `not_open`, `draft`, `conflicts`, `checks_failing`, `checks_running`
   and `blocked`, in that order; a check counts only when branch protection requires it, and with none known as required GitHub's state decides. A read
-  that failed or that GitHub has not finished is `unknown`, never "can merge". `pr.status {project}` (the user and the app; a session may not
+  that failed or that GitHub has not finished is `unknown`, never "can merge"; so is a list of required checks that could not be read (the line says
+  why, and a merge is refused). Text from `git`, `gh` or GitHub is one line without control or direction-changing characters, and the folder is taken out
+  of it whatever the slashes (and, on Windows, the case). `GH_REPO`, `GH_HOST`, `GH_ENTERPRISE_TOKEN`, `GH_DEBUG` and `DEBUG` (and the `GIT_*` variables that
+  point git elsewhere) are not passed on to either program. `pr.status {project}` (the user and the app; a session may not
   call it) answers `{repo, number, title, url, base, head, line}` or `{none: true}`, from a thread of its own. The phone's `pr_get {project}` (read)
-  calls the same code, at most 4 at once and then one every 5 s per device, and answers `ack {pr}`; the reply never holds the project's folder, and a
-  message from `git` or `gh` has it taken out. The phone asks when a session's view opens and when the person asks again, never on a timer.
-- **Merging a pull request** (API 48; `pulls.rs`, `mobile/pr.rs`): `pr_challenge {project, repo, number, head, method}` and `pr_merge {project, repo,
-  number, head, method, nonce, recheck}` need *control* (the same conditions as a pane's takeover: the record, the computer's own HTTPS address, the lock on
+  calls the same code, at most 4 at once and then one every 5 s per device, and answers `ack {pr}`; the reply never holds the project's folder. The
+  phone asks when a session's view opens and when the person asks again, never on a timer. `pr_get`, `pr_challenge` and `pr_merge` wait for `git` and `gh`
+  off the phone's connection loop (`Conn::pr_verb`): what costs nothing is checked there, and the answer comes later on the connection's control queue
+  with the request's `req`, as the screen's slow verbs do, so heartbeats and acknowledgements go on meanwhile.
+- **Merging a pull request** (API 48; `pulls.rs`, `mobile/pr.rs`): `pr_challenge {project, method}` and `pr_merge {project, repo,
+  number, head, method, nonce, recheck, cid}` need *control* (the same conditions as a pane's takeover: the record, the computer's own HTTPS address, the lock on
   and open; never the relay or the hosted app) and a connection the passkey is asked of (`no_passkey` otherwise). `Verb::takeover` is false for them: the
-  daemon carries them out itself, and `Verb::merge` says which they are. `repo` is `owner/name` on github.com (the repository the person was shown, which
-  the daemon reads again from the project's `origin`: `repo_changed` when it differs), `number` the pull request, `head` the 40 (or 64) hex digits of its
-  head commit as the line showed it, and `method` `squash`, `merge` or `rebase`. **Where challenges live:** the challenge of `pr_challenge` is in a table of
-  its own (`PrMemory`), not the app lock's (whose challenges unlock a phone): a random nonce, the device, the line to be signed and a minute's expiry,
-  at most 4 a device, used up by being asked for. It answers `{nonce, expiry, command}`, `command` being `pulls::bound_command`: `merge github.com <owner/name>
-  #<number> <head> <method>`. The phone builds the same line from what it shows (`app/phone/src/merge.ts`) and signs nothing if the computer's differs.
+  daemon carries them out itself, and `Verb::merge` says which they are. **What is signed is what the daemon read:** `pr_challenge` takes the method
+  (`squash`, `merge` or `rebase`) as the only choice of the phone; the daemon reads the repository from the project's `origin` and the pull request of
+  its branch from `gh` (`pulls::challenge_read`), refuses at once what `merge_refusal` would refuse, and answers `{nonce, expiry, command, repo, number,
+  head, method, title}`. `command` is `pulls::bound_command`: `merge github.com <owner/name> #<number> <head> <method>`, with `head` the 40 (or 64) hex
+  digits of the head commit. The phone shows these fields, and signs nothing if the number, head or repository differ from the line the person tapped,
+  or if `command` is not the line those fields make (`app/phone/src/merge.ts`). **Where challenges live:** in a table of its own (`PrMemory`), not the
+  app lock's (whose challenges unlock a phone): a random nonce, the device, the line and a minute's expiry; at most 4 a device, and a fifth is refused
+  (`merges_waiting`) rather than costing the device one it holds; at most 4 asks at once and then one every 5 s per device; used up by being asked for.
   **The assertion** is the one a dangerous approval's is: `webauthn::recheck_challenge(request, command, expiry)` checked by `Mobile::lock_recheck`, with
-  the request id `merge:<nonce>` (a dangerous approval's is a number and a screen's starts `screen:`, so no assertion of one kind passes for another), the line
-  as the command and the challenge's own expiry (a different one is refused). `pr_merge` rebuilds the line from its own fields and refuses (`challenge`)
-  unless it is the one kept for that nonce, then checks the assertion (`recheck`, `lock_refused`), then that the phone may still merge (access on,
-  paired, control, unlocked), and only then runs `pulls::merge_now` on a thread of its own. That reads the repository and the pull request again and
-  refuses unless the repository and the number are the bound ones, the pull request is open and not a draft, its head commit is the bound one, every
-  required check has passed, and GitHub's merge state allows it (`pulls::merge_refusal`). It then runs `gh pr merge <number> -R github.com/<owner/name>
-  --match-head-commit <head> --<method>` from the daemon's data folder, with the same environment as the reads; `--admin` is never passed (master's
-  protection does not apply to administrators, so these checks are the daemon's own), and nothing is deleted. The reply is `ack {result: merged}`, or
-  `merge_refused` with GitHub's refusal or ours as one line of at most 200 characters, without the folder. A repeat of the `cid` within 10 minutes gets the
-  first reply. **Audit:** every attempt that gets as far as the passkey adds a `pr_merge` line to the phone audit log (`mobile-audit.jsonl`, the one that
-  holds the other phone actions) from the thread that merges: `<owner/name> #<n> head <sha> (<method>) by <device name>: merged` or `: refused: <why>`, under
-  the device's id; a refused passkey is already a `lock_refused` line. A merge needs the project in the launch catalogue (the window must have told the
-  daemon about it since the daemon started), and the worktree and the sessions stay where they are.
+  the request id `merge:<nonce>` (a chat approval's is a string its agent chose, so the prefix alone separates nothing: the nonce, never seen by an agent,
+  does), the line as the command and the challenge's own expiry (a different one is refused). `pr_merge` rebuilds the line from its own fields and refuses
+  (`challenge`) unless it is the one kept for that nonce, then checks the assertion (`recheck`, `lock_refused`), then that the phone may still merge
+  (access on, paired, control, unlocked), and only then runs `pulls::merge_now` on a thread of its own. That reads the repository and the pull request
+  again and refuses unless the repository and the number are the bound ones, the pull request is open and not a draft, its head commit is the bound one,
+  the list of required checks was read and every one has passed, and GitHub's merge state allows it (`pulls::merge_refusal`). It then runs `gh pr merge
+  <number> -R github.com/<owner/name> --match-head-commit <head> --<method>` from the daemon's data folder, with the same environment as the reads, and
+  reads the pull request once more: `ack {result: merged}` only when its state is `MERGED`, `ack {result: pending, state}` when `gh` accepted the merge
+  but the pull request is not merged (a merge queue). `--admin` is never passed (master's protection does not apply to administrators, so these checks
+  are the daemon's own), and nothing is deleted. A refusal is `merge_refused` with GitHub's refusal or ours as one line of at most 200 characters,
+  without the folder. **The `cid`:** held by the task that merges, not by the connection. The task keeps the turn of (device, `cid`) until its reply is
+  remembered (10 minutes). A repeat that comes while it runs waits 1 s and is then answered `in_progress` (the phone asks again); a repeat after it
+  gets the first reply, marked `dup`; neither starts a second merge, also over another connection of the device. **Audit:** every attempt that gets
+  as far as the passkey adds a `pr_merge` line to the phone audit log (`mobile-audit.jsonl`, the one that holds the other phone actions): `<owner/name>
+  #<n> head <sha> (<method>) by <device name>: merged`, `: accepted, not merged yet (<state>)` or `: refused: <why>` (also when the phone lost its
+  standing after the passkey), under the device's id; a refused passkey is already a `lock_refused` line. A merge needs the project in the launch
+  catalogue (the window must have told the daemon about it since the daemon started), and the worktree and the sessions stay where they are.
 - **One-shot approvals**: a phone's answer holds for this one request. For a chat the daemon keeps a list of the answer shapes
   known to be one-shot for each kind of request (`chat::answer_is_one_shot`: Claude's allow or deny, Codex's `accept`, `decline`,
   `cancel` or a permission grant for this `turn`, ACP's `allow_once` and `reject_once`, a form's answers) and refuses anything else as

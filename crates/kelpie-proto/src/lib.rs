@@ -115,8 +115,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// them, so a client offers the record only at 47.
 /// 48: a project's pull request: `pr.status {project}` (the user and the app; the project's folder is the one the window pushed with `mobile.set_launch`) answered
 /// `{repo, number, title, url, base, head, line: {can, reason, detail}}` or `{none: true}`, and the phone's `pr_get {project}` (read), answered `pr` with the
-/// same; and merging from the phone: `pr_challenge {project, repo, number, head, method}` (control; answered `{nonce, expiry, command}`) and `pr_merge {…, nonce,
-/// recheck}` (control, with a passkey assertion over `merge:<nonce>`, the command and the expiry; answered `{result: merged}` or `merge_refused`), and a
+/// same; and merging from the phone: `pr_challenge {project, method}` (control; the daemon reads the pull request itself and answers `{nonce, expiry, command, repo, number, head, method, title}`) and `pr_merge {…, nonce,
+/// recheck}` (control, with a passkey assertion over `merge:<nonce>`, the command and the expiry; answered `{result: merged}`, `{result: pending, state}` when GitHub only queued it, or `merge_refused`), and a
 /// `pr_merge` line in the phone audit log. An older daemon has none of it, so the phone shows a pull request's line and Merge only at 48.
 pub const API_LEVEL: u32 = 48;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
