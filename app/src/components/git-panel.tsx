@@ -3,7 +3,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { store } from "../lib/store";
 import { agentRun, ghDefaultBranch, ghPrCreate, gitAbort, gitCommit, gitContext, gitDiscard, gitRemote, gitRepoState, gitStage, type RemoteAction } from "../lib/ipc";
 import { gitState } from "../lib/git-state";
-import { mergeChip, prLabel, pullRequests } from "../lib/pull-requests";
+import { prLabel, pullRequests } from "../lib/pull-requests";
+import { flagLabel, mergeChip, reviewOf } from "../lib/merge-review";
 import { gitlabDefaultBranch, gitlabMrCreate } from "../lib/integrations";
 import { isMac } from "../lib/platform";
 import { Icon } from "./icons";
@@ -267,6 +268,8 @@ function PullRequestRow(props: { project: Project; pr: import("../lib/ipc").Pull
   const [busy, setBusy] = createSignal<string | null>(null);
   const root = () => props.project.path;
   const gitlab = () => pullRequests.providers[props.project.id] === "gitlab";
+  /** What in the change needs a look, and what a person accepted for this head commit. */
+  const review = () => reviewOf(pullRequests.flagReads[props.project.id], store.state.acceptedFlags, props.project.id, props.pr?.head);
   /** GitLab calls them merge requests (!12), GitHub pull requests (#12). */
   const noun = () => (gitlab() ? t("merge request") : t("pull request"));
 
@@ -333,13 +336,14 @@ function PullRequestRow(props: { project: Project; pr: import("../lib/ipc").Pull
       }
     >
       {(pr) => (
+        <>
         <div class="pr-row" title={pr().title}>
           <Icon name="pr" size={14} />
           <a href="#" onClick={(e) => { e.preventDefault(); void openUrl(pr().url); }}>{gitlab() ? "!" : "#"}{pr().number}</a>
           <span class="pr-title">{pr().title}</span>
           <span class={`chip pr-${prLabel(pr())}`}>{prText(pr())}</span>
           <Show when={pr().checks !== "none"}><span class={`chip checks-${pr().checks}`}>{t("checks {state}", { state: checksText(pr().checks) })}</span></Show>
-          <Show when={mergeChip(pr())}>{(m) => <span class={`chip ${m().cls}`} title={m().title}>{m().text}</span>}</Show>
+          <Show when={mergeChip(pr(), review())}>{(m) => <span class={`chip ${m().cls}`} title={m().title}>{m().text}</span>}</Show>
           <Show when={pr().checks === "failing"}>
             <button class="link-btn" onClick={() => void store.newSession(props.project.id, store.state.settings.aiAgent ?? "claude", {
               prompt: gitlab()
@@ -348,6 +352,20 @@ function PullRequestRow(props: { project: Project; pr: import("../lib/ipc").Pull
             })}>{t("Fix with AI")}</button>
           </Show>
         </div>
+        <Show when={review().open.length}>
+          <div class="pr-flags">
+            <For each={review().open}>
+              {(f) => (
+                <div class="list-row" onClick={() => store.openFile(props.project.id, f.path, { diff: true, base: pr().base })} title={f.path}>
+                  <a href="#" class="name" onClick={(e) => e.preventDefault()}>{f.path}</a>
+                  <span class="dir">{flagLabel(f.what)}</span>
+                </div>
+              )}
+            </For>
+            <button class="btn" onClick={() => store.acceptFlags(props.project.id, pr().head ?? "", review().open)}>{t("Accept for this commit")}</button>
+          </div>
+        </Show>
+        </>
       )}
     </Show>
   );

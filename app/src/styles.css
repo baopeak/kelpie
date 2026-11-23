@@ -1104,7 +1104,9 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .pr-form { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border-strong); border-radius: 8px; }
 .pr-form .commit-box { min-height: 72px; }
 .pr-row { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; color: var(--text-dim); }
-.pr-row a { color: var(--accent); text-decoration: none; }
+.pr-row a, .pr-flags a { color: var(--accent); text-decoration: none; }
+.pr-flags { display: flex; flex-direction: column; align-items: flex-start; padding: 2px 0 6px; }
+.pr-flags > .list-row { align-self: stretch; padding-left: 0; padding-right: 0; }
 .pr-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip.pr-open, .primary-tag.pr-open { color: var(--added); border-color: var(--added); }
 .chip.pr-draft, .primary-tag.pr-draft { color: var(--text-faint); }
