@@ -32,8 +32,14 @@ async fn a_phone_reads_a_pull_request_only_of_a_project_the_window_told_the_daem
     assert_eq!(code(&r.ask(Permission::Read, json!({"type": "pr_get", "project": "other"})).await), Some("no_project"));
     assert_eq!(code(&r.ask(Permission::Read, json!({"type": "pr_get"})).await), Some("bad_request"));
     assert_eq!(code(&r.ask(Permission::Read, json!({"type": "pr_get", "project": ""})).await), Some("bad_request"));
-    assert_eq!(code(&r.ask(Permission::Read, json!({"type": "pr_get", "project": "x".repeat(launch::MAX_PROJECT_ID + 1)})).await), Some("bad_request"));
     let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn a_project_id_longer_than_any_the_window_sends_is_a_bad_request() {
+    // A connection of its own: a phone's reads are limited, and the test above already made as many as a moment allows.
+    let mut r = rig();
+    assert_eq!(code(&r.ask(Permission::Read, json!({"type": "pr_get", "project": "x".repeat(launch::MAX_PROJECT_ID + 1)})).await), Some("bad_request"));
 }
 
 #[tokio::test]
