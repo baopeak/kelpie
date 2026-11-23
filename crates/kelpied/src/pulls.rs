@@ -1018,7 +1018,7 @@ mod tests {
         assert_eq!(may(&good, &["build", "test"]), Ok(()));
         assert_eq!(may(&good, &[]), Ok(()), "none required: GitHub's state is all there is");
         // What was bound.
-        assert!(merge_refusal("o/other", &good, &[], &bound("squash")).unwrap_err().contains("repository"));
+        assert!(merge_refusal("o/other", &good, &required(&[]), &bound("squash")).unwrap_err().contains("repository"));
         let mut moved = good.clone();
         moved.number = 13;
         assert!(may(&moved, &[]).unwrap_err().contains("not the pull request"));
