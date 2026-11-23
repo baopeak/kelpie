@@ -106,7 +106,10 @@ numbers = {}
 def spawn(name, argv):
     # Own process group on Unix, so the driver's WebKitWebDriver goes down with it.
     extra = {"start_new_session": True} if os.name != "nt" else {}
-    procs[name] = subprocess.Popen(argv, env=os.environ.copy(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **extra)
+    # What each one says is kept beside the result (the scratch folder stays; CI keeps it): a run that fails at the driver
+    # ("Remote end closed connection without response") is not explained by this script's own output.
+    log = open(os.path.join(scratch, f"boot-smoke-{name}.log"), "ab")
+    procs[name] = subprocess.Popen(argv, env=os.environ.copy(), stdout=log, stderr=subprocess.STDOUT, **extra)
 
 
 def killpg(pgid, sig):
