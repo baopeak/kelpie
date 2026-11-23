@@ -1,4 +1,5 @@
 name: ci
+# A sample change to a workflow, for a trial of the git panel flags. This pull request is closed, never merged.
 
 on:
   push:
