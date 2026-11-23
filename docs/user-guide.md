@@ -1134,11 +1134,11 @@ the session runs with permission checks off; reading is approved in advance. `wi
 `window-audit.jsonl.1`) lists each start, action and close: time, session, tool, the window, or the program's file name for a start, and the
 action. It never holds the text typed into a field, a program's path or its arguments.
 
-**Limits.** At most 20 programs started per session per hour (how many are alive is not counted yet), 10 calls a second per session, and
-no more than six helper runs at once. When you close a session in Kelpie, its programs' windows are asked to close; a program that ignores
-that, or that is still open when Kelpie's daemon ends, stays open: close it yourself. A session that ended by itself leaves its programs open
-until you close the session. Not available yet: asking you per program, a hidden desktop per session, programs ended for certain with their
-session, the phone, macOS and Linux.
+**Limits.** At most 20 programs started per session per hour, 10 calls a second per session, and no more than six helper runs at once.
+Every program a session starts, and everything that program starts, belongs to that session. When you close the session in Kelpie, the
+windows are asked to close and whatever is still running is then ended; the same happens to all of them when Kelpie's daemon ends (it ends
+for an update too, so an agent's programs do not survive one). A session that ended by itself leaves its programs open until you close the
+session. Not available yet: asking you per program, a hidden desktop per session, the phone, macOS and Linux.
 
 ### Remote projects (SSH)
 

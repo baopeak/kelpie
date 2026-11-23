@@ -1010,7 +1010,7 @@ only). Inert at the default policy (`window_agents: off`). The tools are in `mcp
   daemon runs from a copy in `<data>/daemon/a|b`, while the app and its helpers stay in the install folder; the same file the app-identity check
   reads; the Windows installer puts `kelpie-window.exe` there, built by `scripts/build-release.sh` and named in `tauri.bundle.windows.json`, which only Windows adds), in a debug build also `KELPIE_WINDOW_PATH` and the `release` folder of a development build. Not found: "The window helper is not
   installed with this build." Environment: `KELPIE_WINDOW_SCOPE=<session id>` (a session reaches only the programs it started, by the
-  helper's own list), `KELPIE_WINDOW_DESKTOP=hidden` unless `visible` is allowed and given (or the session last started a program visible);
+  helper's own list), `KELPIE_WINDOW_JOB=<job name>` once the session has started a program (below), `KELPIE_WINDOW_DESKTOP=hidden` unless `visible` is allowed and given (or the session last started a program visible);
   `KELPIE_ENDPOINT`, `KELPIE_DATA_DIR` and the session variables are removed, so Kelpie itself is refused by the helper. Standard input is
   null; output is read to bounded sizes (256 KiB, 16 KiB of errors); the limit is 20 s (`launch` 30 s) and the helper is killed at the limit;
   at most 6 run at once. The helper's text is returned as `{text}` (at most 30 000 characters); `kelpied mcp` marks it as window content
@@ -1018,19 +1018,29 @@ only). Inert at the default policy (`window_agents: off`). The tools are in `mcp
 - **Pictures.** `shot` is written by the helper to a file the daemon chose, `<data>/window-shots/<session id>/<ms>-<n>.png` (the agent names
   no path; the newest 20 per session are kept; the folder goes when the session is closed) and read back as `{image: {mime, data, path, width,
   height}}`. A picture over 4 MiB stays in its file and the reply names it.
-- **Rate.** The browser tools' bucket per session (10 calls a second, 20 at once), and at most 20 `launch` calls per session per hour: how
-  many programs are alive cannot be counted without a job object per session, so starts are what is capped.
+- **Rate.** The browser tools' bucket per session (10 calls a second, 20 at once), and at most 20 `launch` calls per session per hour. Starts
+  stay what is capped: the session's job counts processes, not programs, and one browser is a dozen of them, so a count of what is alive would
+  not say how many programs the session started.
+- **A job object per session** (`window_agent/job.rs`, Windows). The first `launch` of a session makes a job named
+  `kelpie-win-<session id>-<random>` with kill-on-close, and the daemon keeps its handle until the session is closed. Every call of the session
+  passes the name in `KELPIE_WINDOW_JOB`. The helper creates or opens the job by that name; `launch` creates the process suspended
+  (`CREATE_SUSPENDED`), assigns it to the job, then resumes it, so the program runs no code and starts no child outside the job (a process
+  that cannot be assigned is ended and the start fails). Reach becomes "the window's process is in the job" (`IsProcessInJob`), which holds
+  for a child however it was started; the list of started programs only gives a window its program's name. A name the helper does not take
+  is refused, never read as "no job"; with no name (a session that has not started a program) the list decides, as before. If the job cannot
+  be made, nothing is started. The daemon ending, however it ends, closes the handle and so ends the programs.
 - **Audit** (`<data>/window-audit.jsonl`, `.1` past 1 MiB, written before the answer): every call of `launch`, `act` or `close` that reached
   the helper, `{at, session, label, tool, target, action, ok, error}`. `target` is the window, or for a start the program's file name (no path,
   no arguments); never the text of a `set`. Calls refused before the helper, and reads, add none.
 - **When a session is closed** (`Daemon::close`): if it started a program, a thread asks the helper to list the windows in its scope and to close
   each (`WM_CLOSE`, at most 16, 5 s each) and removes its pictures. A session that exits by itself is not closed in the daemon (it stays
-  until the person closes it), so nothing runs then, and a program that ignores `WM_CLOSE`, or that the daemon's own end leaves, keeps running.
-- **What the reach rule is not.** A session reaches what it started because the helper lists only programs in that scope. It is a rule for
-  a well-behaved agent, not a boundary against a program with a shell: such a program can run the helper itself with any scope, or the
-  started program's own child processes. A browser or editor that hands over to an instance already running is not in reach.
-- **Not yet.** A Windows job object per session (programs ended with the session or the daemon, an exact count of what is alive), `ask` per
-  program, a desktop per session, short refs per session instead of raw runtime ids, the phone, and macOS and Linux (the tools are not listed
+  until the person closes it), so nothing runs then. When those requests have been made the session's job is closed, which ends every
+  process still in it, a program that ignored `WM_CLOSE` included.
+- **What the reach rule is not.** A session reaches what is in its job because the helper holds its calls to it. It is a rule for a
+  well-behaved agent, not a boundary against a program with a shell: such a program can run the helper itself with any scope or job name.
+  A browser or editor that hands over to an instance already running is not in reach (that instance is not in the job).
+- **Not yet.** `ask` per program (neither the sub-session approval card, whose answer is kept per session in memory, nor the automations'
+  approval, which is a hash kept on one automation, holds an answer per program), an exact count of programs alive, a desktop per session, short refs per session instead of raw runtime ids, the phone, and macOS and Linux (the tools are not listed
   there and the daemon answers "Window tools work on Windows only.").
 - **Settings.** Settings → Agents shows *Programs agents start* (`window_agents` on or off) and, while it is on, *Allow the visible desktop*
   (`window_visible`), on Windows with a daemon of API 48 or later (`lib/agent-window-policy.ts`; the catalogue rows are `windowsOnly`, so a

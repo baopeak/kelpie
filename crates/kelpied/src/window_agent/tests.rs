@@ -176,9 +176,9 @@ fn the_command_line_of_each_tool() {
 #[test]
 fn the_helper_runs_with_the_session_as_its_scope_on_the_hidden_desktop_unless_told() {
     let helper = Path::new("kelpie-window");
-    let hidden = invocation(helper, "list", &json!({}), None, "s-1", false, Duration::from_secs(20));
+    let hidden = invocation(helper, "list", &json!({}), None, "s-1", false, None, Duration::from_secs(20));
     assert_eq!(hidden.env, [("KELPIE_WINDOW_SCOPE".to_string(), "s-1".to_string()), ("KELPIE_WINDOW_DESKTOP".to_string(), "hidden".to_string())]);
-    let visible = invocation(helper, "list", &json!({}), None, "s-1", true, Duration::from_secs(20));
+    let visible = invocation(helper, "list", &json!({}), None, "s-1", true, None, Duration::from_secs(20));
     assert_eq!(visible.env, [("KELPIE_WINDOW_SCOPE".to_string(), "s-1".to_string())]);
     // What names this Kelpie or speaks for a session is not passed on to the helper, nor to what it starts.
     for name in ["KELPIE_ENDPOINT", "KELPIE_DATA_DIR", "KELPIE_SESSION_ID", "KELPIE_SESSION_TOKEN", "KELPIE_SESSION_ENDPOINT"] {
@@ -409,4 +409,41 @@ fn the_helper_is_run_as_a_process_with_bounded_output() {
     assert_eq!(read_bounded(&b"ab"[..], 4), b"ab");
     let missing = Invocation { program: PathBuf::from("kelpie-window-that-does-not-exist"), args: Vec::new(), env: Vec::new(), env_remove: Vec::new(), limit: Duration::from_secs(1) };
     assert!(run_helper(&missing).unwrap_err().contains("could not be started"));
+}
+
+#[test]
+fn a_job_name_is_one_the_helper_takes() {
+    let sid = "s".repeat(64);
+    let name = job::job_name(&sid, &uuid::Uuid::new_v4().simple().to_string());
+    assert!(name.len() <= 160 && name.starts_with("kelpie-win-s"), "{name}");
+    assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "{name}");
+    assert_ne!(job::job_name("s1", "aa"), job::job_name("s1", "bb"));
+    assert_ne!(job::job_name("s1", "aa"), job::job_name("s2", "aa"));
+}
+
+#[test]
+fn a_session_that_starts_a_program_gets_one_job_that_its_calls_and_its_end_name() {
+    let dir = dir("job");
+    let (runner, seen) = fake(|inv| Ok(if inv.args[0] == "list" { "w:10:20  app.exe  \"Main\"  800x600\n".into() } else { "ok".into() }));
+    let state = State::with_runner(on(false), &dir, Path::new("kelpie-window"), runner);
+    let job_of = |n: usize| seen.lock()[n].env.iter().find(|(k, _)| k == "KELPIE_WINDOW_JOB").map(|(_, v)| v.clone());
+    // Before a start there is nothing to name; a start makes the job and names it, and the same name goes with every later call.
+    execute(&state, "s1", "agent", "list", &json!({}), 1).unwrap();
+    execute(&state, "s1", "agent", "launch", &json!({"program": "app.exe"}), 2).unwrap();
+    execute(&state, "s1", "agent", "launch", &json!({"program": "app.exe"}), 3).unwrap();
+    execute(&state, "s1", "agent", "list", &json!({}), 4).unwrap();
+    let name = job_of(1).expect("a start names the job");
+    assert_eq!((job_of(0), job_of(2), job_of(3)), (None, Some(name.clone()), Some(name.clone())));
+    assert!(name.starts_with("kelpie-win-s1-"));
+    // Another session has a job of its own.
+    execute(&state, "s2", "agent", "launch", &json!({"program": "app.exe"}), 5).unwrap();
+    let other = job_of(4).unwrap();
+    assert!(other.starts_with("kelpie-win-s2-") && other != name);
+    // The end of the session asks about its windows within its own job, then lets the job go.
+    seen.lock().clear();
+    end_session(&state, "s1");
+    let calls = seen.lock().len();
+    assert!(calls > 0 && (0..calls).all(|n| job_of(n).as_deref() == Some(name.as_str())));
+    assert!(state.job_of("s1").is_none() && state.job_of("s2").as_deref() == Some(other.as_str()));
+    let _ = std::fs::remove_dir_all(dir);
 }

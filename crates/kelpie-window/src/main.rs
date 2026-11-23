@@ -12,7 +12,8 @@
 //! Only windows of programs started with `launch` (and of their child processes) are in reach; see the library's notes. A web view shows
 //! its page in the tree only with accessibility on: `launch` asks WebView2 apps for it, and a Chromium or Electron program takes
 //! `--force-renderer-accessibility` as an argument. `KELPIE_WINDOW_SCOPE` names the agent session, so that sessions do not reach each
-//! other's programs.
+//! other's programs. `KELPIE_WINDOW_JOB` names the session's job object, made by the daemon: `launch` then puts each program in it before
+//! the program runs, and what is in the job is in reach, whoever started it. Without it, reach is by the list of started programs.
 
 #[cfg(not(windows))]
 fn main() {
@@ -41,11 +42,13 @@ mod cli {
     use kelpie_screen::win::system::init_process;
     use kelpie_screen::win::targets_win::{exists, hwnd, windows};
     use kelpie_window::scope::{
-        alive, command_line, kelpie_refusal, owner, remember, scope_name, Launched, Proc,
+        alive, command_line, job_name, kelpie_refusal, owner, program_label, reaches, remember,
+        scope_name, Launched, Proc,
     };
     use kelpie_window::tree::{content_pending, outline, parse_id, prune, Action, MAX_NODES};
     use kelpie_window::win::desk;
-    use kelpie_window::win::procs::processes;
+    use kelpie_window::win::job::Job;
+    use kelpie_window::win::procs::{image_of, processes};
     use kelpie_window::win::shot;
     use kelpie_window::win::uia::Uia;
     use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -108,11 +111,51 @@ mod cli {
         w.visible && !w.cloaked && (w.minimized || (w.rect.w >= MIN_SIDE && w.rect.h >= MIN_SIDE))
     }
 
-    fn in_reach(launched: &[Launched], procs: &[Proc]) -> Vec<(WindowInfo, Launched)> {
+    /// The job the daemon named for this call, if it named one.
+    fn named_job() -> Result<Option<String>, String> {
+        job_name(std::env::var("KELPIE_WINDOW_JOB").ok().as_deref())
+    }
+
+    /// What decides whether a window is in reach.
+    enum Scope {
+        /// No job is named: the programs `launch` wrote down, and their children.
+        List,
+        /// The daemon's job for the session (`None`: it is not there, so nothing is in it).
+        Job(Option<Job>),
+    }
+
+    impl Scope {
+        /// From `KELPIE_WINDOW_JOB`, for reading. A name that is not one the daemon makes is an error, not "no job".
+        fn from_env() -> Result<Scope, String> {
+            Ok(match named_job()? {
+                Some(name) => Scope::Job(Job::open(&name)),
+                None => Scope::List,
+            })
+        }
+
+        /// The program and its window's label when `pid` is in reach.
+        fn reach(&self, pid: u32, launched: &[Launched], procs: &[Proc]) -> Option<Launched> {
+            let listed = owner(pid, launched, procs);
+            let in_job = match self {
+                Scope::List => None,
+                Scope::Job(job) => Some(job.as_ref().is_some_and(|j| j.contains(pid))),
+            };
+            if !reaches(in_job, listed) {
+                return None;
+            }
+            Some(listed.cloned().unwrap_or_else(|| Launched {
+                pid,
+                created: 0,
+                program: program_label(None, image_of(pid).as_deref()),
+            }))
+        }
+    }
+
+    fn in_reach(scope: &Scope, launched: &[Launched], procs: &[Proc]) -> Vec<(WindowInfo, Launched)> {
         windows()
             .into_iter()
             .filter(usable)
-            .filter_map(|w| owner(w.pid, launched, procs).cloned().map(|l| (w, l)))
+            .filter_map(|w| scope.reach(w.pid, launched, procs).map(|l| (w, l)))
             .collect()
     }
 
@@ -137,7 +180,7 @@ mod cli {
     }
 
     /// The window a target names, when it is in reach.
-    fn target(arg: Option<&String>) -> Result<windows::Win32::Foundation::HWND, String> {
+    fn target(scope: &Scope, arg: Option<&String>) -> Result<windows::Win32::Foundation::HWND, String> {
         let Some(TargetId::Window { hwnd: h, pid }) = arg.and_then(|a| TargetId::parse(a)) else {
             return Err(format!("a target looks like w:<number>:<number>, as `kelpie-window list` prints it\n{USAGE}"));
         };
@@ -147,7 +190,8 @@ mod cli {
         }
         let procs = processes();
         let launched = Registry::open().read(&procs);
-        owner(pid, &launched, &procs)
+        scope
+            .reach(pid, &launched, &procs)
             .map(|_| h)
             .ok_or_else(|| NOT_YOURS.to_string())
     }
@@ -159,12 +203,15 @@ mod cli {
         if hidden {
             desk::enter()?;
         }
+        if args.first().map(String::as_str) == Some("launch") {
+            return launch(&args[1..], hidden);
+        }
+        let scope = Scope::from_env()?;
         match args.first().map(String::as_str) {
-            Some("launch") => launch(&args[1..], hidden),
             Some("list") => {
                 let procs = processes();
                 let launched = Registry::open().read(&procs);
-                let lines: String = in_reach(&launched, &procs)
+                let lines: String = in_reach(&scope, &launched, &procs)
                     .iter()
                     .map(|(w, l)| line(w, l))
                     .collect();
@@ -176,7 +223,7 @@ mod cli {
                 })
             }
             Some("tree") => {
-                let h = target(args.get(1))?;
+                let h = target(&scope, args.get(1))?;
                 let mut max = MAX_NODES;
                 let mut rects = false;
                 let mut rest = args[2..].iter();
@@ -208,7 +255,7 @@ mod cli {
                 Ok(outline(&nodes, max, rects))
             }
             Some("act") => {
-                let h = target(args.get(1))?;
+                let h = target(&scope, args.get(1))?;
                 let id = args.get(2).and_then(|s| parse_id(s)).ok_or(
                     "the id is the numbers in [brackets] in the tree, such as 42.1312340.4.7",
                 )?;
@@ -224,7 +271,7 @@ mod cli {
                     .map(|done| format!("{done}\n"))
             }
             Some("shot") => {
-                let h = target(args.get(1))?;
+                let h = target(&scope, args.get(1))?;
                 let path = args
                     .get(2)
                     .filter(|p| p.to_ascii_lowercase().ends_with(".png"))
@@ -235,7 +282,7 @@ mod cli {
                 Ok(format!("{w}x{hgt} {path}\n"))
             }
             Some("close") => {
-                let h = target(args.get(1))?;
+                let h = target(&scope, args.get(1))?;
                 unsafe { PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0)) }
                     .map_err(|e| format!("the window did not take the request: {}", e.message()))?;
                 Ok("asked to close; the app may ask a question in a dialog first\n".into())
@@ -266,7 +313,16 @@ mod cli {
         // The program inherits this process's environment; no other thread of this process runs yet. It is not waited for: it lives on
         // after this command.
         unsafe { std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &web_args) };
-        let (pid, made) = desk::start(&command_line(program, &args[1..]), hidden)
+        // The session's job, when the daemon named one: the program is put in it before it runs.
+        let scope = match named_job()? {
+            Some(name) => Scope::Job(Some(Job::create(&name)?)),
+            None => Scope::List,
+        };
+        let job = match &scope {
+            Scope::Job(job) => job.as_ref(),
+            Scope::List => None,
+        };
+        let (pid, made) = desk::start(&command_line(program, &args[1..]), hidden, job)
             .map_err(|e| format!("{program}: {e}"))?;
         if made == 0 {
             return Err(format!("{program} ended as soon as it started"));
@@ -285,7 +341,7 @@ mod cli {
         loop {
             let procs = processes();
             let launched = registry.read(&procs);
-            let mine: String = in_reach(&launched, &procs)
+            let mine: String = in_reach(&scope, &launched, &procs)
                 .iter()
                 .filter(|(_, l)| l.pid == pid)
                 .map(|(w, l)| line(w, l))

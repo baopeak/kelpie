@@ -6,6 +6,11 @@
 //! many calls, or an argument that is not of the tool's shape never reach it. `KELPIE_WINDOW_SCOPE` names the calling session, so that
 //! a session reaches only the programs it started. That is a rule for a well-behaved agent, not a boundary against a program that has a
 //! shell: such a program can start the helper itself with any scope.
+//!
+//! Each session that starts a program also gets a job object of its own ([`job`]), named to the helper in `KELPIE_WINDOW_JOB`: the
+//! programs go in it as they start, the helper reaches what is in it, and it ends them when the session closes or the daemon ends.
+
+mod job;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
@@ -350,11 +355,16 @@ pub fn command(helper: &Path, tool: &str, args: &Value, shot: Option<&Path>) -> 
     (helper.to_path_buf(), out)
 }
 
-fn invocation(helper: &Path, tool: &str, args: &Value, shot: Option<&Path>, sid: &str, visible: bool, limit: Duration) -> Invocation {
+/// The helper's call. `job` is the name of the session's job object, when it has one: the helper then holds reach to what is in it.
+#[allow(clippy::too_many_arguments)]
+fn invocation(helper: &Path, tool: &str, args: &Value, shot: Option<&Path>, sid: &str, visible: bool, job: Option<&str>, limit: Duration) -> Invocation {
     let (program, args) = command(helper, tool, args, shot);
     let mut env = vec![("KELPIE_WINDOW_SCOPE".to_string(), sid.to_string())];
     if !visible {
         env.push(("KELPIE_WINDOW_DESKTOP".to_string(), "hidden".to_string()));
+    }
+    if let Some(job) = job {
+        env.push(("KELPIE_WINDOW_JOB".to_string(), job.to_string()));
     }
     Invocation { program, args, env, env_remove: NOT_INHERITED.to_vec(), limit }
 }
@@ -455,8 +465,8 @@ pub fn find_helper() -> Option<PathBuf> {
 pub const LAUNCHES_PER_HOUR: usize = 20;
 const HOUR: Duration = Duration::from_secs(3600);
 
-/// When each session started its programs in the last hour. A cap on starts, since what is alive cannot be counted without a job
-/// object per session.
+/// When each session started its programs in the last hour. A cap on starts: the session's job counts processes, not programs, and one
+/// browser is a dozen of them, so a count of what is alive would say nothing about how many programs the session started.
 #[derive(Default)]
 pub struct Launches {
     by_session: HashMap<String, VecDeque<Instant>>,
@@ -518,6 +528,8 @@ pub struct State {
     pub audit: Arc<Audit>,
     /// Sessions that started a program, for what to close when one ends and which desktop a call without `visible` means.
     used: Mutex<HashMap<String, Used>>,
+    /// The job object of each session that started a program, with the name the helper is told. Dropping one ends what is in it.
+    jobs: Mutex<HashMap<String, (String, job::Job)>>,
     running: AtomicUsize,
     shots: PathBuf,
     runner: Runner,
@@ -561,6 +573,7 @@ impl State {
             launches: Mutex::new(Launches::default()),
             audit: Arc::new(Audit::named(data_dir, AUDIT_FILE)),
             used: Mutex::new(HashMap::new()),
+            jobs: Mutex::new(HashMap::new()),
             running: AtomicUsize::new(0),
             shots: data_dir.join("window-shots"),
             runner: Arc::new(run_helper),
@@ -582,6 +595,24 @@ impl State {
 
     fn shot_dir(&self, sid: &str) -> PathBuf {
         self.shots.join(sid)
+    }
+
+    /// The name of session `sid`'s job when it has one.
+    fn job_of(&self, sid: &str) -> Option<String> {
+        self.jobs.lock().get(sid).map(|(name, _)| name.clone())
+    }
+
+    /// The name of session `sid`'s job, made now when it has none: a program is started only inside one, so that it ends with the
+    /// session. Not made, no program is started.
+    fn ensure_job(&self, sid: &str) -> Result<String, String> {
+        let mut jobs = self.jobs.lock();
+        if let Some((name, _)) = jobs.get(sid) {
+            return Ok(name.clone());
+        }
+        let name = job::job_name(sid, &uuid::Uuid::new_v4().simple().to_string());
+        let made = job::Job::create(&name).map_err(|e| format!("The session's job for the programs it starts could not be made: {e}"))?;
+        jobs.insert(sid.to_string(), (name.clone(), made));
+        Ok(name)
     }
 }
 
@@ -666,7 +697,9 @@ pub fn execute(state: &State, sid: &str, label: &str, tool: &str, args: &Value, 
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         dir.join(format!("{now}-{}.png", SEQ.fetch_add(1, Ordering::Relaxed)))
     });
-    let inv = invocation(&helper, tool, &args, shot.as_deref(), sid, visible, limit(tool));
+    // A program is started inside the session's job; the other tools use it when there is one (there is none before the first start).
+    let job = if tool == "launch" { Some(state.ensure_job(sid)?) } else { state.job_of(sid) };
+    let inv = invocation(&helper, tool, &args, shot.as_deref(), sid, visible, job.as_deref(), limit(tool));
     if tool == "launch" {
         let mut used = state.used.lock();
         let entry = used.entry(sid.to_string()).or_default();
@@ -695,9 +728,12 @@ fn listed_targets(answer: &str) -> Vec<String> {
 const MAX_CLOSE: usize = 16;
 
 /// When session `sid` ends: asks the windows of the programs it started to close (`WM_CLOSE`: a program may ask a question first or
-/// ignore it), and removes its pictures. Best effort, each helper call bounded to a few seconds; blocking. The programs are not ended by
-/// force: that needs a job object per session.
+/// ignore it), and removes its pictures. Best effort, each helper call bounded to a few seconds; blocking. What is left when the requests
+/// have been made is ended by force: the session's job is closed on the way out, and it ends every process in it.
 pub fn end_session(state: &State, sid: &str) {
+    // Held to the end of the function: the helper still needs the job to find the windows.
+    let held = state.jobs.lock().remove(sid);
+    let job_name = held.as_ref().map(|(name, _)| name.as_str());
     let Some(used) = state.used.lock().remove(sid) else { return };
     let _ = std::fs::remove_dir_all(state.shot_dir(sid));
     if !state.supported || !id_safe(sid) {
@@ -707,10 +743,10 @@ pub fn end_session(state: &State, sid: &str) {
     let few = Duration::from_secs(5);
     let desktops: &[bool] = if used.visible { &[false, true] } else { &[false] };
     for &visible in desktops {
-        let list = invocation(&helper, "list", &Value::Null, None, sid, visible, few);
+        let list = invocation(&helper, "list", &Value::Null, None, sid, visible, job_name, few);
         let Ok(answer) = (state.runner)(&list) else { continue };
         for target in listed_targets(&answer).into_iter().take(MAX_CLOSE) {
-            let close = invocation(&helper, "close", &json!({"window": target}), None, sid, visible, few);
+            let close = invocation(&helper, "close", &json!({"window": target}), None, sid, visible, job_name, few);
             if let Err(e) = (state.runner)(&close) {
                 tracing::debug!("window close at the end of a session: {e}");
             }

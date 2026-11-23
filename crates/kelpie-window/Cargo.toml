@@ -40,6 +40,8 @@ windows = { version = "0.62", optional = true, features = [
     # `CreateProcessW` and `CreateDesktopW` name security attributes in their signatures.
     "Win32_Security",
     "Win32_System_StationsAndDesktops",
+    # The session's job object (`CreateJobObjectW`, `IsProcessInJob`).
+    "Win32_System_JobObjects",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_UI_Accessibility",
