@@ -1010,9 +1010,10 @@ fn a_failed_read_of_a_channels_secret_is_tried_again_and_loses_nothing() {
 
 #[test]
 fn switching_a_channel_off_ends_what_it_had_to_send() {
-    // The retry is a second away (the service asks for it), so the switch below always comes first, and it falls inside the wait that
-    // would see it: a first retry of its own may come after 100 ms, before a slow runner has switched the channel off.
-    let service = PushService::start(&[Answer::RetryAfter(503, "1")]);
+    // The retry is four seconds away (the service asks for it), so the switch below comes first on a slow runner too: switching off
+    // writes the configuration to disk before the worker is ended, and with a retry one second away that write lost the race there.
+    // A first retry of the worker's own may come after 100 ms, which is why the service names the wait.
+    let service = PushService::start(&[Answer::RetryAfter(503, "4")]);
     let r = rig();
     let mut c = r.notifier.config();
     c.ntfy.enabled = true;
@@ -1025,7 +1026,8 @@ fn switching_a_channel_off_ends_what_it_had_to_send() {
     r.notifier.update(Some(c), &Value::Null).unwrap();
     assert!(!r.notifier.started());
     assert!(!r.outbox(&Dest::Channel(Channel::Ntfy)).exists());
-    std::thread::sleep(Duration::from_millis(2500));
+    // Past the moment the retry would have been sent.
+    std::thread::sleep(Duration::from_millis(4500));
     assert_eq!(service.count(), 1);
 }
 
