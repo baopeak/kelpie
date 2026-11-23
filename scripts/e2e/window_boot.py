@@ -28,6 +28,10 @@ import time
 # What the first screen and the settings must show, by the names a person reads. Checked as text of the outline.
 FIRST_SCREEN = ['button "Add project folder"', 'button "Settings"', 'text "0 sessions"']
 SETTINGS = ['text "WORKFLOW"', 'button "Agents"', 'button "Session Daemon"']
+# Lines only the main view has (the welcome button only without a project): gone while the settings cover it. Compared in lower case.
+MAIN_ONLY = ['button "Agent dashboard"', 'button "Toggle sidebar"', 'button "Command palette']
+# The ones present on every main view, waited for when the settings close.
+MAIN_ALWAYS = MAIN_ONLY[:2]
 
 
 def main():
@@ -176,6 +180,22 @@ def main():
             missing = [w for w in SETTINGS if w not in after]
             check("the settings open", not missing, f"missing {missing}; {len(after.splitlines())} lines")
             kw("shot", window, os.path.join(scratch, "window-boot-settings.png"), ok=False)
+
+            # The main view stays mounted under the settings, but it must not be reachable by a screen reader or the keyboard.
+            leaked = [w for w in MAIN_ONLY if w.lower() in after.lower()]
+            check("the view behind the settings is not in the outline", not leaked, f"still there: {leaked}")
+            # With the main view out of the outline, the settings' own way back is the only button called Settings.
+            back = button(after, "Settings") or button(after, "Back (Esc)")
+            if check("the settings have a way back that can be pressed", back):
+                kw("act", window, back, "invoke", ok=False)
+                returned = ""
+                for _ in range(20):
+                    returned = kw("tree", window, "--max", "1500", ok=False).lower()
+                    if all(w.lower() in returned for w in MAIN_ALWAYS):
+                        break
+                    time.sleep(1)
+                lost = [w for w in MAIN_ALWAYS if w.lower() not in returned]
+                check("the main view is back in the outline after the settings close", not lost, f"missing {lost}")
     except Exception as e:  # noqa: BLE001 - whatever went wrong is a failed check with its reason
         check("the check ran to its end", False, str(e))
     finally:
