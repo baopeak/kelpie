@@ -1008,7 +1008,7 @@ only). Inert at the default policy (`window_agents: off`). The tools are in `mcp
   are), so this is a second guard. Nothing goes through a shell: the daemon starts the helper with an argument vector.
 - **Carrying out.** The helper is found next to the daemon, then in the folder named by the runtime slot's `source.txt` (on Windows the
   daemon runs from a copy in `<data>/daemon/a|b`, while the app and its helpers stay in the install folder; the same file the app-identity check
-  reads), in a debug build also `KELPIE_WINDOW_PATH` and the `release` folder of a development build. Not found: "The window helper is not
+  reads; the Windows installer puts `kelpie-window.exe` there, built by `scripts/build-release.sh` and named in `tauri.bundle.windows.json`, which only Windows adds), in a debug build also `KELPIE_WINDOW_PATH` and the `release` folder of a development build. Not found: "The window helper is not
   installed with this build." Environment: `KELPIE_WINDOW_SCOPE=<session id>` (a session reaches only the programs it started, by the
   helper's own list), `KELPIE_WINDOW_DESKTOP=hidden` unless `visible` is allowed and given (or the session last started a program visible);
   `KELPIE_ENDPOINT`, `KELPIE_DATA_DIR` and the session variables are removed, so Kelpie itself is refused by the helper. Standard input is
