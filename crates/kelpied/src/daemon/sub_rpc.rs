@@ -183,6 +183,7 @@ impl Daemon {
     pub(super) fn policy_json(&self) -> Value {
         let sub = *self.subs.policy.read();
         let browser = self.browser.policy.read().clone();
+        let window = *self.window.policy.read();
         json!({
             "agents_control_others": self.agents_control_others(),
             "sub_sessions": sub.mode.as_str(),
@@ -192,13 +193,15 @@ impl Daemon {
             "browser_agents": browser.mode.as_str(),
             "browser_eval": browser.eval,
             "browser_sites": browser.sites,
+            "window_agents": window.mode.as_str(),
+            "window_visible": window.visible,
         })
     }
 
     pub(super) fn persist_policy(&self) {
         // One writer at a time, each taking its snapshot inside the lock: the last write is the newest.
         let _writing = self.subs.policy_file.lock();
-        save_policy(&self.data_dir, &Policy { agents_control_others: self.agents_control_others(), sub: *self.subs.policy.read(), browser: self.browser.policy.read().clone() });
+        save_policy(&self.data_dir, &Policy { agents_control_others: self.agents_control_others(), sub: *self.subs.policy.read(), browser: self.browser.policy.read().clone(), window: *self.window.policy.read() });
     }
 
     /// The sub-session policy `daemon.set_policy` asks for, checked as a whole; `None` when it names neither key.
@@ -662,10 +665,10 @@ impl Daemon {
         self.subs.policy.read().mode != Mode::Off
     }
 
-    /// Whether a new session gets Kelpie's tools (the MCP server, `KELPIE_CLI`): while sub-sessions or browser control are allowed. The
-    /// server lists each group of tools only while its own policy allows it (`browser.policy`).
+    /// Whether a new session gets Kelpie's tools (the MCP server, `KELPIE_CLI`): while sub-sessions, browser control or window control are
+    /// allowed. The server lists each group of tools only while its own policy allows it (`browser.policy`, `window.policy`).
     pub(super) fn agent_tools_on(&self) -> bool {
-        self.sub_tools_on() || self.browser.policy.read().mode != crate::browser_agent::Mode::Off
+        self.sub_tools_on() || self.browser.policy.read().mode != crate::browser_agent::Mode::Off || self.window.policy.read().mode != crate::window_agent::Mode::Off
     }
 
     /// How a sub-session ended, for the routing hints. The first end counts (a session closed after it reported done is `done`);

@@ -113,7 +113,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `owed.close {id, evidence}` (the user's; a session lists and opens its own project's and never closes), the `owed.changed {project, owed}`
 /// event, and an optional `owes` list on `sub.report` and `run.report`, answered as `owes: {opened, refused}`. An older daemon has none of
 /// them, so a client offers the record only at 47.
-pub const API_LEVEL: u32 = 47;
+/// 48: agents use the windows of programs they started: `window.call {tool, args}` and `window.policy` from a program in a session that may
+/// script others (the `kelpie_window_*` tools; the daemon runs the `kelpie-window` helper), `window.audit {limit}` for the user, and the
+/// `daemon.policy` / `daemon.set_policy` keys `window_agents` (`off|on`) and `window_visible`. An older daemon has none of it, so a client
+/// offers the settings only at 48.
+pub const API_LEVEL: u32 = 48;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

@@ -1102,6 +1102,43 @@ holds typed text or scripts; it keeps only the host of a site, and any address i
 name or an error loses its query and fragment. Screenshots agents take are saved under
 `browser-shots/agent` in the data folder, which keeps the newest 200.
 
+### Letting agents use the windows of programs they start
+
+An agent can start a program on this computer (a browser, an editor, a desktop app), read what its windows show and press buttons or fill
+fields in them, without your mouse or keyboard: to check what an app it just built looks like, or to run it through a screen it cannot
+test any other way. Windows only for now.
+
+**Turning it on.** It is off on a new install, and there is no switch in Settings yet. Run `kelpied call daemon.set_policy` with
+`{"window_agents":"on"}` as its argument (the daemon keeps it in `policy.json` in the data folder). Agents started after that get six tools,
+`kelpie_window_launch`, `_list`, `_tree`, `_act`, `_shot` and `_close`. *Agents can control other sessions* has to be on, and a session
+started restricted never gets them.
+
+**What an agent can and cannot do.** It reaches only the programs it started itself with `kelpie_window_launch`, and only their windows;
+not your own windows, not another session's programs, and not Kelpie (a separate Kelpie with its own data folder can be started from a
+shell, not through these tools). It reads a window as an outline of elements, presses a button, sets the text of a field, toggles,
+expands or selects, and takes a picture of the window, which is kept under `window-shots` in the data folder (the newest 20 per session).
+It cannot bring a window to the front on its own, and what a window says is data for it, not instructions. This is a rule for an agent that
+behaves, not a wall: an agent that can run shell commands can do far more than these tools, and a program an agent starts runs as you,
+with your files and sign-ins. Do not let it start a browser or app that is signed in to accounts you would not hand to it.
+
+**The hidden desktop.** Programs start on a desktop of their own that you never see, so nothing appears in front of your work and your
+focus stays where it is. Browsers and ordinary Windows programs run there. A web view app, which is what a Tauri app is (Kelpie
+itself is one), does not: it stops with an error there. Such a program can be started with `visible: true`, on your own desktop, only when
+you also set `"window_visible": true`; acting on it then brings its window forward, which interrupts you, so use it on a computer nobody
+is working at (a test runner) when you can. A web view shows its page in the outline only after it has been read once, so an agent reads
+a window twice when the page is missing.
+
+**Approvals and the record.** Claude Code and Codex in a terminal ask before starting a program, acting on a window or closing one, unless
+the session runs with permission checks off; reading is approved in advance. `window-audit.jsonl` in the data folder (past 1 MB it moves to
+`window-audit.jsonl.1`) lists each start, action and close: time, session, tool, the window, or the program's file name for a start, and the
+action. It never holds the text typed into a field, a program's path or its arguments.
+
+**Limits.** At most 20 programs started per session per hour (how many are alive is not counted yet), 10 calls a second per session, and
+no more than six helper runs at once. When you close a session in Kelpie, its programs' windows are asked to close; a program that ignores
+that, or that is still open when Kelpie's daemon ends, stays open: close it yourself. A session that ended by itself leaves its programs open
+until you close the session. Not available yet: asking you per program, a hidden desktop per session, programs ended for certain with their
+session, the phone, macOS and Linux.
+
 ### Remote projects (SSH)
 
 *Add Remote Project (SSH)…* (search, or the server icon in the sidebar's project toolbar) picks a host

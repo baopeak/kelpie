@@ -601,12 +601,12 @@ fn full_bypass(kind: &str, args: &[String]) -> bool {
 
 /// Claude's allow rules for Kelpie's tools. With permission checks off, the whole server. Otherwise each tool that only looks or
 /// that Kelpie asks the user about itself (the sub-session tools), by name: acting on a web page, or running a script in one, asks in
-/// Claude like any other action.
+/// Claude like any other action, and so do starting a program, acting on a window and closing one (`kelpie_window_launch`, `_act`, `_close`).
 pub fn kelpie_allow_rules(bypass: bool) -> Vec<String> {
     if bypass {
         return vec![KELPIE_MCP_RULE.to_string()];
     }
-    crate::mcp::TOOL_NAMES.into_iter().chain(crate::mcp::browser::read_names()).map(|name| format!("{KELPIE_MCP_RULE}__{name}")).collect()
+    crate::mcp::TOOL_NAMES.into_iter().chain(crate::mcp::browser::read_names()).chain(crate::mcp::window::read_names()).map(|name| format!("{KELPIE_MCP_RULE}__{name}")).collect()
 }
 
 /// Claude Code's MCP configuration with Kelpie's sub-session server. No `env` block: Claude passes its own environment
@@ -634,10 +634,11 @@ fn toml_string(text: &str) -> String {
 
 /// Codex's `-c` overrides for the `kelpie` MCP server. Codex gives a stdio server only a small environment, so the
 /// session's variables are named (`env_vars`): by name, never by value; `KELPIE_ENDPOINT` so that a daemon with an endpoint of its own is the one reached. `kelpie_wait` may block for half an hour,
-/// which Codex's default tool timeout (60 s) would cut. `ask_acting`: the browser tools that act on a page or run a script in one ask in
-/// Codex (per-tool `approval_mode`), as any other action does; the rest Kelpie asks the user about itself, or they only look.
+/// which Codex's default tool timeout (60 s) would cut. `ask_acting`: the browser tools that act on a page or run a script in one, and the
+/// window tools that start a program, act on a window or close one, ask in Codex (per-tool `approval_mode`), as any other action does; the
+/// rest Kelpie asks the user about itself, or they only look.
 fn codex_mcp_args(exe: &str, ask_acting: bool) -> Vec<String> {
-    let acting = crate::mcp::browser::acting_names().filter(|_| ask_acting).map(|name| format!("mcp_servers.kelpie.tools.{name}.approval_mode=\"prompt\""));
+    let acting = crate::mcp::browser::acting_names().chain(crate::mcp::window::acting_names()).filter(|_| ask_acting).map(|name| format!("mcp_servers.kelpie.tools.{name}.approval_mode=\"prompt\""));
     [
         format!("mcp_servers.kelpie.command={}", toml_string(exe)),
         "mcp_servers.kelpie.args=[\"mcp\"]".to_string(),
@@ -1205,14 +1206,22 @@ mod sub_tool_tests {
     #[test]
     fn claude_allows_every_kelpie_tool_but_acting_on_a_page_by_name() {
         let rules = kelpie_allow_rules(false);
-        for name in crate::mcp::TOOL_NAMES.into_iter().chain(crate::mcp::browser::read_names()) {
+        for name in crate::mcp::TOOL_NAMES.into_iter().chain(crate::mcp::browser::read_names()).chain(crate::mcp::window::read_names()) {
             assert!(rules.contains(&format!("mcp__kelpie__{name}")), "{name}");
         }
-        for name in crate::mcp::browser::acting_names() {
+        // Starting a program, acting on a window and closing one are never approved by Kelpie's own rule.
+        for name in crate::mcp::browser::acting_names().chain(crate::mcp::window::acting_names()) {
             assert!(!rules.iter().any(|r| r.ends_with(name)), "{name}");
         }
+        for name in ["kelpie_window_launch", "kelpie_window_act", "kelpie_window_close"] {
+            assert!(crate::mcp::window::acting_names().any(|n| n == name), "{name}");
+            assert!(!rules.contains(&format!("mcp__kelpie__{name}")), "{name}");
+        }
+        for name in ["kelpie_window_list", "kelpie_window_tree", "kelpie_window_shot"] {
+            assert!(rules.contains(&format!("mcp__kelpie__{name}")), "{name}");
+        }
         assert!(!rules.contains(&"mcp__kelpie".to_string()), "no rule for the whole server");
-        assert_eq!(rules.len(), crate::mcp::TOOL_NAMES.len() + 6);
+        assert_eq!(rules.len(), crate::mcp::TOOL_NAMES.len() + 6 + 3);
         for name in ["kelpie_spawn", "kelpie_message", "kelpie_open_page", "kelpie_browser_snapshot", "kelpie_browser_screenshot"] {
             assert!(rules.contains(&format!("mcp__kelpie__{name}")), "{name}");
         }
@@ -1249,6 +1258,12 @@ mod sub_tool_tests {
             "mcp_servers.kelpie.tools.kelpie_browser_navigate.approval_mode=\"prompt\"",
             "-c",
             "mcp_servers.kelpie.tools.kelpie_browser_eval.approval_mode=\"prompt\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_window_launch.approval_mode=\"prompt\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_window_act.approval_mode=\"prompt\"",
+            "-c",
+            "mcp_servers.kelpie.tools.kelpie_window_close.approval_mode=\"prompt\"",
             "--model",
             "m",
             "go",
