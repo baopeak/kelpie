@@ -1,7 +1,10 @@
 """Boot check of a built app through the window helper (Windows): the app starts, its interface is there as an accessibility
 outline, the way into the settings opens them, a picture is taken, and closing the window ends everything it started.
 
-    python scripts/e2e/window_boot.py <scratch-dir> <app> <kelpie-window> [--out result.json]
+    python scripts/e2e/window_boot.py <scratch-dir> <app> <kelpie-window> [--owed] [--out result.json]
+
+--owed also opens a check still owed with the daemon, finds it in Activity, closes it with evidence through the window, and asks the
+daemon what it holds.
 
 <app> is a built app binary (`target/release/kelpie.exe`) with `kelpied` next to it; <kelpie-window> is the helper
 (`cargo build --release -p kelpie-window`). No WebDriver is involved: the helper reads the window through UI Automation and presses
@@ -33,6 +36,7 @@ def main():
     ap.add_argument("app")
     ap.add_argument("helper")
     ap.add_argument("--out")
+    ap.add_argument("--owed", action="store_true", help="also open a check still owed, see it in Activity and close it with evidence")
     args = ap.parse_args()
     if sys.platform != "win32":
         raise SystemExit("the window helper runs on Windows")
@@ -54,6 +58,80 @@ def main():
         if ok and r.returncode != 0:
             raise RuntimeError(f"kelpie-window {' '.join(a[:2])}: {r.stderr.strip() or r.stdout.strip()}")
         return r.stdout
+
+    project, owed_what, evidence = "p-window-owed", "Open the settings on the real app", "seen on the runner"
+    if args.owed:
+        # The window knows a project only from its own state file: one is put there before the app starts.
+        repo = os.path.join(scratch, "repo")
+        os.makedirs(repo, exist_ok=True)
+        state = {
+            "version": 3, "projects": [{"id": project, "name": "repo", "path": repo.replace("\\", "/"), "color": "#4f8cff"}], "activeProject": project, "workspaces": {},
+            "settings": {}, "recent": [], "collapsed": {}, "keymap": {}, "approvedSetups": {}, "hibernated": [], "inbox": [],
+            "reviewNotes": {}, "floating": {"sessions": [], "active": None, "open": False},
+        }
+        with open(os.path.join(scratch, "data", "app-state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+
+    def daemon(method, params):
+        r = subprocess.run([kelpied, "call", method, json.dumps(params)], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        return r.returncode, (r.stdout + r.stderr).strip()
+
+    def button(outline, name, after=""):
+        """The id of the first button with this name, looked for after a piece of text when one is given."""
+        # A heading the interface shows in capitals reads in capitals in the outline.
+        start = outline.lower().find(after.lower()) if after else 0
+        found = re.search(r'button "' + re.escape(name) + r'" \[([0-9.\-]+)\]', outline[max(start, 0):])
+        return found.group(1) if found and start >= 0 else None
+
+    def owed_scenario():
+        code, said = daemon("owed.open", {"project": project, "kind": "real_app", "what": owed_what, "closes_by": "a picture of the settings page"})
+        if not check("the daemon takes a check still owed", code == 0, said[:200]):
+            return
+        bell = button(outline_with(['button "Activity and notifications"'], 15), "Activity and notifications")
+        if not check("the Activity bell can be pressed", bell):
+            return
+        kw("act", window, bell, "invoke", ok=False)
+        panel = ""
+        for _ in range(15):
+            panel = kw("tree", window, "--max", "1500", ok=False)
+            if "checks still owed" in panel.lower() and owed_what.lower() in panel.lower():
+                break
+            time.sleep(1)
+        shown = "checks still owed" in panel.lower() and owed_what.lower() in panel.lower()
+        if not shown:
+            with open(os.path.join(scratch, "window-boot-owed-outline.txt"), "w", encoding="utf-8") as f:
+                f.write(panel)
+        kw("shot", window, os.path.join(scratch, "window-boot-owed.png"), ok=False)
+        if not check("Activity shows the check still owed", shown, f"{len(panel.splitlines())} lines"):
+            return
+        # The window's own title bar has a Close button too: the one meant is after the group's heading.
+        close = button(panel, "Close", after="Checks still owed")
+        if not check("the entry can be closed", close):
+            return
+        kw("act", window, close, "invoke", ok=False)
+        asking = outline_with(['button "Close check"'], 10)
+        field = re.search(r'edit "Evidence[^"]*" \[([0-9.\-]+)\]', asking)
+        if not check("closing asks for the evidence", field, asking[max(asking.lower().find("checks still owed"), 0):][:400]):
+            return
+        check("the evidence is taken", "set" in kw("act", window, field.group(1), "set", evidence, ok=False))
+        confirm = button(outline_with(['button "Close check"'], 5), "Close check")
+        said = kw("act", window, confirm, "invoke", ok=False) if confirm else "no button"
+        check("the close is pressed", "invoked" in said, said.strip())
+        gone = False
+        for _ in range(15):
+            time.sleep(1)
+            if owed_what.lower() not in kw("tree", window, "--max", "1500", ok=False).lower():
+                gone = True
+                break
+        check("the entry leaves Activity", gone)
+        kw("shot", window, os.path.join(scratch, "window-boot-owed-closed.png"), ok=False)
+        code, said = daemon("owed.list", {"project": project})
+        check("the daemon holds it as closed with the evidence", code == 0 and evidence in said and '"closed_ms"' in said, said[:300])
+        # The panel is closed again, so that the settings are reached from the main view.
+        bell = button(kw("tree", window, "--max", "1500", ok=False), "Activity and notifications")
+        if bell:
+            kw("act", window, bell, "invoke", ok=False)
+            time.sleep(1)
 
     checks, numbers, window = [], {}, None
 
@@ -86,6 +164,10 @@ def main():
         missing = [w for w in FIRST_SCREEN if w not in first]
         check("the first screen is in the outline", not missing, f"missing {missing}; {len(first.splitlines())} lines")
         kw("shot", window, os.path.join(scratch, "window-boot-first.png"), ok=False)
+
+        if args.owed:
+            owed_scenario()
+            first = kw("tree", window, "--max", "1500", ok=False)
 
         found = re.search(r'button "Settings" \[([0-9.\-]+)\]', first)
         if check("the way into the settings can be pressed", found):

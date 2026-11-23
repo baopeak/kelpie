@@ -132,7 +132,7 @@ jobs:
           set -euo pipefail
           cargo build --release -p kelpie-window
           mkdir -p window-boot
-          python scripts/e2e/window_boot.py window-boot target/release/kelpie.exe target/release/kelpie-window.exe --out window-boot/window-boot.json
+          python scripts/e2e/window_boot.py window-boot target/release/kelpie.exe target/release/kelpie-window.exe --owed --out window-boot/window-boot.json
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Windows'
         with:
