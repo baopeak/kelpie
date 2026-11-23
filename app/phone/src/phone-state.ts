@@ -33,7 +33,9 @@ import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { ScreenSession, type ScreenState } from "./screen";
-import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAKEOVER_API } from "../../src/lib/attention";
+import { NEW_SESSION_API, PR_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAKEOVER_API } from "../../src/lib/attention";
+import { challengeOutcome, DEFAULT_METHOD, mergeBlockWords, mergeOutcome, mergeRequestId, mergeRequestOf, type MergeMethod, type MergeRequest } from "./merge";
+import { pullView, type PullInfo, type PullView } from "./pull-line";
 import { ScreenPeer, type OfferReply } from "./screen-rtc";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
@@ -729,6 +731,89 @@ export async function startSession(projectId: string, kind: string, prompt: stri
   const r = startOutcome(await sendStart(() => link.newSession(req), (ms) => new Promise((done) => setTimeout(done, ms))));
   if (r.ok) openSession(r.id);
   return r;
+}
+
+/** The computer reads a project's pull request for this phone (a daemon that has it). */
+export const canReadPulls = () => daemonApi() >= PR_API;
+/** What the phone last read of each project's pull request, and whether it is looking again now. */
+export const [pullStates, setPullStates] = createSignal<Record<string, { view: PullView; busy: boolean }>>({});
+
+/** Reads a project's pull request from the computer: when its view opens, and when the person asks again. Never on a timer, and never twice at once for
+ *  a project. What was shown stays up while it looks again. */
+export async function loadPull(project: string): Promise<void> {
+  if (!canReadPulls() || !connected() || pullStates()[project]?.busy) return;
+  const before = pullStates()[project]?.view;
+  setPullStates((all) => ({ ...all, [project]: { view: before ?? { kind: "loading" }, busy: true } }));
+  const view = pullView(await link.prGet(project));
+  setPullStates((all) => ({ ...all, [project]: { view, busy: false } }));
+}
+
+/** Why this phone may not merge here, in words; null when it may: control, on the computer's own HTTPS address, the app lock on and unlocked with a passkey (what a
+ *  pane's takeover needs too), at a computer that has the verbs. The computer says which of these is missing (`device.control`). */
+export const mergeBlock = (): string | null => (canReadPulls() ? mergeBlockWords(device()?.control, device()?.permission, lockShown().face === "open") : null);
+
+/** This phone may merge here (`mergeBlock`). */
+export const canMerge = () => canReadPulls() && mergeBlock() === null;
+
+/** A merge being made: the person chooses how, the computer gives its challenge, the passkey signs it, and the answer is shown. Null: none. */
+export type MergeSheet =
+  | { step: "choose"; project: string; pr: PullInfo; method: MergeMethod; busy: boolean; error: string | null }
+  | { step: "verify"; request: MergeRequest; pr: PullInfo; nonce: string; expiry: number; command: string; busy: boolean; error: string | null }
+  | { step: "done"; project: string; ok: boolean; message: string };
+export const [mergeSheet, setMergeSheet] = createSignal<MergeSheet | null>(null);
+
+/** Opens the sheet for the pull request the line shows. Nothing is asked of the computer yet. */
+export function openMerge(project: string, pr: PullInfo) {
+  setMergeSheet({ step: "choose", project, pr, method: DEFAULT_METHOD, busy: false, error: null });
+}
+
+export function chooseMergeMethod(method: MergeMethod) {
+  setMergeSheet((s) => (s?.step === "choose" ? { ...s, method, error: null } : s));
+}
+
+/** Closes the sheet; after an answer, the pull request is read again, so the line says what became of it. */
+export function closeMerge() {
+  const s = mergeSheet();
+  setMergeSheet(null);
+  if (s?.step === "done") void loadPull(s.project);
+}
+
+/** Asks the computer for the challenge of the merge chosen: what the passkey will sign, shown before it is asked. */
+export async function askMerge() {
+  const s = mergeSheet();
+  if (s?.step !== "choose" || s.busy) return;
+  // What the person chose: the pull request and head they were shown, and how. Only the method goes to the computer, which reads the rest itself.
+  const asked = mergeRequestOf(s.project, s.pr, s.method);
+  setMergeSheet({ ...s, busy: true, error: null });
+  const challenge = challengeOutcome(await link.prChallenge(s.project, s.method), asked);
+  // Closed meanwhile: nothing more is done.
+  if (mergeSheet()?.step !== "choose") return;
+  if (!challenge.ok) return setMergeSheet({ ...s, busy: false, error: challenge.message });
+  // From here on the sheet shows what the computer read (it matches what was tapped), and the merge is sent for exactly that.
+  const { request } = challenge;
+  setMergeSheet({
+    step: "verify",
+    request,
+    pr: { ...s.pr, repo: request.repo, number: request.number, head: request.head, title: challenge.title },
+    nonce: challenge.nonce,
+    expiry: challenge.expiry,
+    command: challenge.command,
+    busy: false,
+    error: null,
+  });
+}
+
+/** The passkey signs the challenge's line, and the merge is sent with it. The press of the button is the person's own gesture, which a ceremony needs. */
+export async function confirmMerge() {
+  const s = mergeSheet();
+  if (s?.step !== "verify" || s.busy) return;
+  setMergeSheet({ ...s, busy: true, error: null });
+  const proof = await lock.recheck(mergeRequestId(s.nonce), s.command, s.expiry);
+  // Cancelled while the ceremony was open: nothing is sent.
+  if (mergeSheet()?.step !== "verify") return;
+  if (!proof) return setMergeSheet({ ...s, busy: false, error: lock.error ?? t("Not confirmed, so nothing was merged.") });
+  const result = mergeOutcome(await link.prMerge(s.request, s.nonce, proof));
+  setMergeSheet({ step: "done", project: s.request.project, ok: result.ok, message: result.ok ? t("The pull request was merged. The worktree and its sessions are still here.") : result.message });
 }
 
 /** Answers the prompt a terminal session waits on with one of its keys. */

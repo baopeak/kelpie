@@ -14,7 +14,7 @@
 //!   session's;
 //!   answering a sub-session request (`sub.answer`) is the user's. Admin methods (custom agents, automations, phone access, daemon
 //!   settings, closing sessions, turn checkpoints and their undo, notification channels, timers
-//!   that type into a session, changing a session's account, resolving review notes, listing and stopping a session's processes…) are the user's only. Other sessions' environments are left
+//!   that type into a session, changing a session's account, resolving review notes, listing and stopping a session's processes, reading a project's pull request…) are the user's only. Other sessions' environments are left
 //!   out of what they read.
 //! - **Claimed** (`KELPIE_SESSION_ID` without its token — some agents strip `*TOKEN*` variables
 //!   from the programs they run, hooks included): hook reports for that session only, which is
@@ -480,7 +480,7 @@ mod tests {
         let user = Role::User;
         let s = Role::Session("s".into());
         let claimed = Role::Claimed("s".into());
-        let admin = ["chat.send", "chat.write_turn", "chat.queue_op", "chat.close_stdin", "agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children", "owed.close", "sub.answer", "sub.pending", "sftp.list", "sftp.stat", "sftp.stat_many", "sftp.realpath", "sftp.mkdir", "sftp.create", "sftp.rename", "sftp.chmod", "local.list", "local.home", "xfer.start", "xfer.list", "xfer.control", "xfer.answer", "xfer.clear_finished"];
+        let admin = ["chat.send", "chat.write_turn", "chat.queue_op", "chat.close_stdin", "agent.set_custom", "automation.list", "automation.state", "automation.save", "automation.delete", "automation.run", "automation.approve", "automation.set_paused", "automation.event", "daemon.shutdown", "daemon.set_policy", "mobile.approve", "mobile.set_write", "session.close", "session.kill", "session.restart", "session.update", "session.attach", "session.answer", "run.approve", "run.delete", "agent.run", "checkpoint.status", "checkpoint.set_enabled", "checkpoint.list", "checkpoint.owners", "checkpoint.diff", "checkpoint.blob", "checkpoint.undo_plan", "checkpoint.undo", "checkpoint.drop", "ui.focus", "notify.get", "notify.set", "notify.test", "notify.rotate_topic", "notify.clear", "notify.report", "session.schedule_continue", "session.cancel_scheduled", "session.scheduled", "session.set_env_restart", "note.clear", "note.keys", "process.list", "process.ports", "process.port_owner", "process.kill", "process.kill_children", "owed.close", "sub.answer", "sub.pending", "sftp.list", "sftp.stat", "sftp.stat_many", "sftp.realpath", "sftp.mkdir", "sftp.create", "sftp.rename", "sftp.chmod", "local.list", "local.home", "xfer.start", "xfer.list", "xfer.control", "xfer.answer", "xfer.clear_finished", "pr.status"];
         // Phone-access decisions: the verified app only, never the bare user token or a session.
         for m in APP_ONLY {
             assert!(allowed(&Role::App, false, m), "app: {m}");
@@ -524,6 +524,10 @@ mod tests {
             assert!(allowed(&s, true, m) && allowed(&s, false, m), "session: {m}");
         }
         assert!(!allowed(&s, true, "owed.close") && !allowed(&s, false, "owed.close"));
+        // A project's pull request: the user's and the app's. It names a project's folder through the launch catalogue and runs the user's `gh`,
+        // so no program in a session, scripting or not, claimed or stranger, may call it.
+        assert!(allowed(&user, false, "pr.status") && allowed(&Role::App, false, "pr.status") && user_may(&user, "pr.status").is_ok());
+        assert!(!allowed(&s, true, "pr.status") && !allowed(&s, false, "pr.status") && !allowed(&claimed, true, "pr.status") && !allowed(&Role::Anonymous, false, "pr.status"));
         // Sub-sessions: a session that may script others opens, messages, reports, reads its mail and closes its own;
         // one that may not (or was started restricted) can still report to its parent and read its own mail.
         for m in ["sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close"] {

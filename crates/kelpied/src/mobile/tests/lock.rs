@@ -53,7 +53,7 @@ fn unlock_message(a: &mut Authenticator, challenge: &[u8]) -> Value {
 }
 
 /// The phone with a passkey, unlocked by having just set it up.
-async fn enrolled() -> (Rig, Authenticator) {
+pub(super) async fn enrolled() -> (Rig, Authenticator) {
     let mut r = lock_rig();
     let a = Authenticator::new(ORIGIN);
     let c = challenge(&mut r).await;
@@ -69,7 +69,7 @@ async fn unlock(r: &mut Rig, a: &mut Authenticator) -> Value {
     r.ask_write(unlock_message(a, &c)).await
 }
 
-const NOT_WHILE_LOCKED: [&str; 19] = ["list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test"];
+const NOT_WHILE_LOCKED: [&str; 22] = ["list", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "pr_get", "pr_challenge", "pr_merge"];
 
 #[tokio::test]
 async fn while_locked_only_keeping_the_line_up_and_the_locks_own_verbs_are_answered() {
@@ -897,7 +897,7 @@ fn allow_line(id: &str) -> String {
     json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": {"behavior": "allow"}}}).to_string()
 }
 
-fn proof(a: &mut Authenticator, request: &str, command: &str, expiry: u64) -> Value {
+pub(super) fn proof(a: &mut Authenticator, request: &str, command: &str, expiry: u64) -> Value {
     let (client, auth, signature) = a.get(&webauthn::recheck_challenge(request, command, expiry));
     json!({"expiry": expiry, "auth_data": b(&auth), "client_data": b(&client), "signature": b(&signature)})
 }

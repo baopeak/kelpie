@@ -344,14 +344,14 @@ export class LockModel {
     return this.env.ask({ type: "lock_unlock", auth_data: toB64(got.authData), client_data: toB64(got.clientData), signature: toB64(got.signature) });
   }
 
-  /** The assertion for a dangerous approval. Null when the person did not give it; `error` says why. */
-  async recheck(request: string, command: string): Promise<Proof | null> {
+  /** The assertion for a dangerous approval, or for a merge (`until`: the time the computer gave the merge's challenge, by its clock). Null when the person did not give it; `error` says why. */
+  async recheck(request: string, command: string, until?: number): Promise<Proof | null> {
     const { rp_id: rpId, cred_id: credId } = this.info;
     if (!rpId || !credId || !this.env.credentials.available()) {
       this.error = t("This browser cannot use a passkey here.");
       return null;
     }
-    const expiry = this.env.now() + this.clockOffset + RECHECK_MS;
+    const expiry = until ?? this.env.now() + this.clockOffset + RECHECK_MS;
     this.asking = true;
     this.error = null;
     try {

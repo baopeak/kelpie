@@ -49,6 +49,7 @@ const PATHS: Record<string, () => JSX.Element> = {
       <path d="M3 3l18 18" />
     </>
   ),
+  refresh: () => <path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5" />,
   info: () => (
     <>
       <circle cx="12" cy="12" r="9" />
@@ -57,7 +58,7 @@ const PATHS: Record<string, () => JSX.Element> = {
   ),
 };
 
-export type IconName = "back" | "forward" | "plus" | "close" | "gear" | "lock" | "monitor" | "globe" | "needs" | "working" | "done" | "idle" | "stopped" | "alert" | "offline" | "info";
+export type IconName = "back" | "forward" | "plus" | "close" | "gear" | "lock" | "monitor" | "globe" | "needs" | "working" | "done" | "idle" | "stopped" | "alert" | "offline" | "info" | "refresh";
 
 export function Icon(props: { name: IconName; size?: number; class?: string }): JSX.Element {
   return (

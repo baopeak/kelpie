@@ -62,6 +62,9 @@ export const SCREEN_P2P_API = 42;
 /** Daemon API level that gives TURN through the relay (`sc_rtc_servers`, the `relay_turn` way, TURN's caps in `mobile.status`). */
 export const SCREEN_TURN_API = 43;
 
+/** Daemon API level that reads a project's pull request (`pr.status`, the phone's `pr_get`) and merges it from a phone (`pr_challenge`, `pr_merge`). Below it the phone shows no pull request line and no Merge. */
+export const PR_API = 49;
+
 /** Daemon API level that owns the queue of messages for a chat (`chat.send`, `chat.queue`, a phone's `chat_send`). Below it the window queues and writes its own messages. */
 export const CHAT_QUEUE_API = 21;
 

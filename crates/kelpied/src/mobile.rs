@@ -25,6 +25,7 @@ mod launch;
 mod link;
 mod listen;
 mod lock;
+mod pr;
 pub mod relay;
 pub mod risk;
 mod screen_access;
@@ -468,6 +469,8 @@ pub struct Mobile {
     relay: relay::Runtime,
     /// The app lock's windows, challenges and settings as checked (`lock`).
     lock_memory: LockMemory,
+    /// What phones may read of a project's pull request, and how fast (`pr`).
+    pr: pr::PrMemory,
     /// The screen's ways as checked, and its use of the relay (`screen_access`).
     screen_memory: screen_access::ScreenMemory,
     /// A test on the only address it can bind holds this machine to the limits for an address.
@@ -692,6 +695,7 @@ impl Mobile {
             tailscale_change: tokio::sync::Mutex::new(()),
             relay: relay::Runtime::default(),
             lock_memory: LockMemory::default(),
+            pr: pr::PrMemory::default(),
             screen_memory: screen_access::ScreenMemory::default(),
             #[cfg(test)]
             loopback_is_remote: AtomicBool::new(false),
@@ -2651,6 +2655,7 @@ impl Conn {
         // only: a phone that sees `daemon_epoch` change starts over anyway.
         let window = match Verb::parse(name) {
             Some(v @ (Verb::Input | Verb::Key)) if v.needs() <= granted => Some(INPUT_DEDUPE),
+            // A merge keeps its own turn and reply (`Conn::pr_verb`): it is answered after this returns.
             Some(v @ (Verb::Answer | Verb::ChatAnswer | Verb::NewSession)) if v.needs() <= granted => Some(ANSWER_DEDUPE),
             _ => None,
         };
@@ -2690,7 +2695,8 @@ impl Conn {
             return;
         }
         // Looking at what may be started changes nothing, and a start is noted by its handler (`session_new`), which knows the agent and the project.
-        if matches!(name, "new_options" | "new_session") {
+        // A challenge for a merge changes nothing either, and a merge is noted by its own handler (`pr_merge`), from the thread that carries it out.
+        if matches!(name, "new_options" | "new_session" | "pr_challenge" | "pr_merge") {
             return;
         }
         let id = req["id"].as_str().unwrap_or_default();
@@ -2718,6 +2724,10 @@ impl Conn {
         }
         if name == "sc_rtc_servers" {
             return self.screen_servers(granted, req, tag);
+        }
+        // `git` and `gh` can take minutes: their answers come later, so that this connection goes on with heartbeats and the rest meanwhile.
+        if matches!(name, "pr_get" | "pr_challenge" | "pr_merge") {
+            return self.pr_verb(granted, name, req, tag).await;
         }
         match self.run(granted, name, req).await {
             Ok(Some(mut reply)) => {
@@ -2838,11 +2848,17 @@ impl Conn {
         Ok(())
     }
 
-    /// A control verb (a pane's takeover or the screen) this connection may not use now, and why.
+    /// A control verb (a pane's takeover, the screen or a merge) this connection may not use now, and why.
     fn control_refused(&self, verb: Verb, granted: Permission) -> Result<(), Refusal> {
-        if verb.takeover() && verb.needs() > granted {
+        if verb.needs() == Permission::Control && verb.needs() > granted {
             if self.daemon.mobile.permission(&self.device).is_some_and(|record| record >= Permission::Control) {
-                let what = if verb.screen() { "Seeing the computer's screen" } else { "Taking over a pane" };
+                let what = if verb.screen() {
+                    "Seeing the computer's screen"
+                } else if verb.merge() {
+                    "Merging a pull request"
+                } else {
+                    "Taking over a pane"
+                };
                 return Err(refuse("no_control", format!("{what} needs this computer's HTTPS address through Tailscale (not the relay), with the app lock on and unlocked.")));
             }
             return Err(refuse("no_control", "This device may not take control. Allow it in Kelpie → Settings → Mobile."));
@@ -2926,6 +2942,22 @@ impl Conn {
         crate::screen::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.ctl, media: &self.media, cursor: &self.cursor, browser: self.page_origin.is_some(), relay: self.route == "relay" }
     }
 
+    /// Whether `granted` is enough for `verb`, and whether a request that names a daemon run names this one.
+    fn verb_allowed(&self, verb: Verb, granted: Permission, req: &Value) -> Result<(), Refusal> {
+        if verb.needs() > granted {
+            // What its record allows is another matter from what this connection does: Settings cannot help when it is the address that holds it back.
+            if self.daemon.mobile.permission(&self.device).is_some_and(|record| verb.needs() <= record) {
+                return Err(refuse("read_only", "This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name."));
+            }
+            return Err(refuse("read_only", "This device may read but not type. Allow it in Kelpie → Settings → Mobile."));
+        }
+        // A phone that names the daemon run it talked to: after a restart its ids and positions mean nothing.
+        if verb.needs() >= Permission::Write && req.get("epoch").is_some_and(|e| e.as_str() != Some(&self.daemon.mobile.epoch)) {
+            return Err(refuse("epoch", "Kelpie restarted since this was sent."));
+        }
+        Ok(())
+    }
+
     /// Carries out one request of the verb table; `Some` is a reply with content, `None` a plain ack.
     async fn run(&mut self, granted: Permission, name: &str, req: &Value) -> Result<Option<Value>, Refusal> {
         let verb = Verb::parse(name).ok_or_else(|| refuse("unknown_verb", format!("unknown request {name:?}")))?;
@@ -2940,17 +2972,7 @@ impl Conn {
             let phone = crate::takeover::Phone { device: &self.device, name: &self.name, conn: self.id, out: &self.out };
             return self.daemon.takeover.phone_verb(&self.daemon, phone, name, req).await.map_err(|r| refuse(r.code, r.message));
         }
-        if verb.needs() > granted {
-            // What its record allows is another matter from what this connection does: Settings cannot help when it is the address that holds it back.
-            if self.daemon.mobile.permission(&self.device).is_some_and(|record| verb.needs() <= record) {
-                return Err(refuse("read_only", "This device can only read at this address. To type, pair it through Tailscale or at an HTTPS name."));
-            }
-            return Err(refuse("read_only", "This device may read but not type. Allow it in Kelpie → Settings → Mobile."));
-        }
-        // A phone that names the daemon run it talked to: after a restart its ids and positions mean nothing.
-        if verb.needs() >= Permission::Write && req.get("epoch").is_some_and(|e| e.as_str() != Some(&self.daemon.mobile.epoch)) {
-            return Err(refuse("epoch", "Kelpie restarted since this was sent."));
-        }
+        self.verb_allowed(verb, granted, req)?;
         let enter = req["enter"].as_bool() == Some(true);
         match verb {
             Verb::List => return Ok(self.publish(true)),
@@ -3140,6 +3162,8 @@ impl Conn {
                 return options.map(Some).map_err(|(code, message)| refuse(code, message));
             }
             Verb::NewSession => return self.new_session(req).await.map(Some),
+            // Answered later, off this connection's loop, by `Conn::pr_verb`.
+            Verb::PrGet | Verb::PrChallenge | Verb::PrMerge => return Err(refuse("bad_request", "not here")),
             Verb::PushInfo => {
                 self.secure_transport()?;
                 let (daemon, device) = (self.daemon.clone(), self.device.clone());
@@ -4072,6 +4096,7 @@ mod tests {
 
     mod lock;
     mod new_session;
+    mod pr;
     mod relay;
     mod takeover;
 
@@ -4320,6 +4345,8 @@ mod tests {
         daemon: Arc<Daemon>,
         conn: Conn,
         out: mpsc::Receiver<String>,
+        /// What the connection answers later (`Conn::pr_verb`), on its control queue.
+        ctl: mpsc::Receiver<String>,
         term: Arc<crate::session::Session>,
         typed: crate::session::fake::Typed,
         chat: Arc<crate::chat::ChatSession>,
@@ -4340,18 +4367,26 @@ mod tests {
         daemon.mobile.config.lock().enabled = true;
         let (tx, _rx, overflowed) = bounded_client_channel(8);
         let (out_tx, out) = mpsc::channel(16);
+        let (ctl_tx, ctl) = mpsc::channel(16);
         let conn = Conn {
-            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, cursor: lanes::CursorSlot::default(), ctl: mpsc::channel(4).0, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
+            daemon: daemon.clone(), device: "phone".into(), name: "Phone".into(), id: 1, tx, out: out_tx, media: mpsc::channel(4).0, cursor: lanes::CursorSlot::default(), ctl: ctl_tx, media_locked: Arc::new(AtomicBool::new(false)), followed: HashMap::new(), watched: HashSet::new(), owed: HashSet::new(),
             chat_at: HashMap::new(), waiting: Arc::new(AtomicUsize::new(0)), overflowed, cap: Permission::Control, route: "local", list: None, rev: 0, page_origin: None, legacy: false, lock_path: LockPath::Local, secure_page: None, resume: None, locked: false, lock_told: "none", relay_offer: None, _phone: None,
         };
-        Rig { daemon, conn, out, term, typed, chat, phone }
+        Rig { daemon, conn, out, ctl, term, typed, chat, phone }
     }
 
     impl Rig {
         /// What the phone is told about a request (every request carries `req`, so there is always an answer).
         async fn ask(&mut self, granted: Permission, mut req: Value) -> Value {
             req["req"] = json!(1);
-            self.conn.handle(granted, &req).await.expect("a reply")
+            match self.conn.handle(granted, &req).await {
+                Some(reply) => reply,
+                // A verb that waits for a program answers on the control queue once it is done.
+                None => {
+                    let later = tokio::time::timeout(Duration::from_secs(20), self.ctl.recv()).await.expect("an answer in time").expect("an open queue");
+                    serde_json::from_str(&later).expect("an answer that is JSON")
+                }
+            }
         }
 
         async fn ask_write(&mut self, req: Value) -> Value {
