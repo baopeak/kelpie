@@ -563,7 +563,7 @@ const navHint = commandHint;
 
 const FILTERS = { all: msg("All projects"), running: msg("Projects with running sessions"), attention: msg("Projects that need you") } as const;
 
-export function Sidebar() {
+export function Sidebar(props: { inert?: boolean }) {
   const collapsed = () => store.state.settings.sidebarCollapsed;
   const searchChord = () => {
     const c = commands.find((x) => x.id === "palette");
@@ -597,7 +597,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside class={`sidebar${collapsed() ? " collapsed" : ""}`}>
+    <aside class={`sidebar${collapsed() ? " collapsed" : ""}`} inert={props.inert}>
       <div class="brand">
         <BrandMark />
         <Show when={!collapsed()}>
