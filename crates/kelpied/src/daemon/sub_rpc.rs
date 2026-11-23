@@ -564,7 +564,12 @@ impl Daemon {
         if status != "progress" {
             self.subs.watch.lock().explicit(&sid);
         }
-        Ok(json!({"delivered_to": parent_info.map(|p| self.session_tag(&p))}))
+        let mut out = json!({"delivered_to": parent_info.map(|p| self.session_tag(&p))});
+        // Checks the report says it owes are recorded once it stands: one that is refused is told, and loses nothing.
+        if let Some(owes) = self.report_owes(&sid, params, None) {
+            out["owes"] = owes;
+        }
+        Ok(out)
     }
 
     /// `sub.inbox {take?}`: the caller's mail, which it may remove.

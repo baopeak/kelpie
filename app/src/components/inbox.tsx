@@ -10,6 +10,7 @@ import { waitedFor, waitingSessions } from "../lib/attention";
 import { t } from "../lib/i18n";
 import { subRequests } from "../lib/sub-sessions";
 import { SubRequestCard } from "./sub-request-card";
+import { OwedGroups, anyOwed } from "./owed-group";
 
 const ICON: Record<InboxItem["kind"], string> = { finished: "check", waiting: "bell", automation: "clock", worktree: "branch", error: "close", cost: "alert", phone: "terminal" };
 
@@ -50,6 +51,7 @@ export function InboxPanel(props: { onClose: () => void }) {
           <div class="group-label">{t("Sub-session requests")}</div>
           <For each={subRequests()}>{(r) => <SubRequestCard request={r} inbox />}</For>
         </Show>
+        <OwedGroups />
         <Show when={waiting().length}>
           <div class="group-label">{t("Needs you")}</div>
           <For each={waiting()}>
@@ -76,7 +78,7 @@ export function InboxPanel(props: { onClose: () => void }) {
           </For>
           <div class="group-label">{t("Earlier")}</div>
         </Show>
-        <For each={items()} fallback={<div class="inbox-empty"><Show when={kipShown()}><Kip mood="sleep" size={96} /></Show><div class="muted">{t("Nothing here yet. Agents that finish or need you while you look elsewhere show up here.")}</div></div>}>
+        <For each={items()} fallback={<Show when={!anyOwed()}><div class="inbox-empty"><Show when={kipShown()}><Kip mood="sleep" size={96} /></Show><div class="muted">{t("Nothing here yet. Agents that finish or need you while you look elsewhere show up here.")}</div></div></Show>}>
           {(i) => (
             <div
               class={`inbox-item${i.read ? "" : " unread"} k-${i.kind}`}

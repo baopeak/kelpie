@@ -30,6 +30,7 @@ import { remember } from "./prompt-history";
 import { pulseSession } from "./reveal-pulse";
 import { defaultSettings } from "./default-settings";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
+import { OWED_API, applyOwedChanged, replaceOwed } from "./owed";
 
 export { defaultSettings };
 
@@ -388,6 +389,16 @@ function createAppStore() {
     for (const id of [...requestInbox.keys()]) if (!subRequests().some((r) => r.id === id)) requestGone(id);
   }
 
+  /** The checks still owed, read when the window connects (an older daemon has none). */
+  async function loadOwed() {
+    if (daemonApi() < OWED_API) {
+      replaceOwed([]);
+      return;
+    }
+    const list = await ipc.owedList().catch(() => null);
+    if (list) replaceOwed(list);
+  }
+
   /** What a phone's start says under its title, in Activity and in the desktop notification. */
   const PHONE_START_BODY = () => t("Started from a phone with this computer's settings for the agent.");
 
@@ -579,6 +590,9 @@ function createAppStore() {
       }
       case "notes.changed":
         applyNotes(p.path, p.notes);
+        break;
+      case "owed.changed":
+        if (typeof p.project === "string") applyOwedChanged(p.project, p.owed);
         break;
       case "automation.ran": {
         if (legacyNotify()) {
@@ -1897,6 +1911,7 @@ function createAppStore() {
     void ipc.daemon("daemon.set_priority", { enabled: state.settings.prioritizeVisible ?? true }).catch(() => {});
     void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true }).catch(() => {});
     void loadSubState();
+    void loadOwed();
     void loadPhoneStarts(phoneStartsSeen);
     resumeInterrupted();
   }

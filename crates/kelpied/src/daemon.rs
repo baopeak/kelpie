@@ -31,6 +31,7 @@ use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, tu
 
 mod automation;
 mod browser_rpc;
+mod owed_rpc;
 mod process;
 mod sub_rpc;
 
@@ -206,6 +207,8 @@ pub struct Daemon {
     workspace_meta: Mutex<MetaStore>,
     /// Review notes on worktrees' diffs (see `notes.rs`).
     notes: Mutex<NoteStore>,
+    /// Real-world checks a change still owes (see `owed.rs`).
+    owed: Mutex<crate::owed::OwedStore>,
     automations: Mutex<Automations>,
     /// What the automations that events set off need to remember (see `daemon/automation.rs`).
     auto_rt: automation::Runtime,
@@ -376,6 +379,7 @@ impl Daemon {
                 store: Store::new(&data_dir),
                 workspace_meta: Mutex::new(MetaStore::load(&data_dir)),
                 notes: Mutex::new(NoteStore::load(&data_dir)),
+                owed: Mutex::new(crate::owed::OwedStore::load(&data_dir)),
                 automations: Mutex::new(Automations::load(&data_dir)),
                 auto_rt: automation::Runtime::new(),
                 runs: Mutex::new(Runs::load(&data_dir)),
@@ -1061,10 +1065,15 @@ impl Daemon {
                 }
                 t.summary = summary;
                 t.finished_at = now_millis();
-                let out = json!({"run": r.id, "task": t.id});
+                let mut out = json!({"run": r.id, "task": t.id});
                 let rid = r.id.clone();
+                let run_project = r.project_id.clone();
                 drop(runs);
                 self.runs_changed(&[rid]);
+                // Checks the report says it owes are recorded once it stands: one that is refused is told, and loses nothing.
+                if let Some(owes) = self.report_owes(&sid, params, run_project) {
+                    out["owes"] = owes;
+                }
                 return Ok(out);
             }
             other => bail!("unknown method {other}"),
@@ -2415,6 +2424,7 @@ impl Daemon {
                 out
             }
             m if m.starts_with("note.") => self.note_rpc(m, &params)?,
+            m if m.starts_with("owed.") => self.owed_rpc(m, &params)?,
             m if m.starts_with("process.") => return self.process_rpc(tx, id, m, params),
             // Undo, its preview and drop wait for the repository's snapshots and run git: they
             // answer from their own thread so this client's other requests are not held up.

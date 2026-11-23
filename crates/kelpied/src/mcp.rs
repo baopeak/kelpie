@@ -384,6 +384,20 @@ pub fn tool_list() -> Vec<Value> {
             json!({
                 "status": {"type": "string", "enum": ["progress", "done", "failed", "blocked", "needs_user"], "description": "How things stand."},
                 "summary": {"type": "string", "description": "What you did, the evidence, what is left."},
+                "owes": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "description": "Use it for a check you could not run yourself: on the real app, a real phone, a clean machine, over time, or one only the owner can make. Each entry stays in the project's record of checks still owed until the user closes it with evidence.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["real_app", "phone", "clean_machine", "soak", "owner"], "description": "Which kind of check: real_app, phone, clean_machine, soak (over time) or owner."},
+                            "what": {"type": "string", "description": "What has to be checked."},
+                            "closes_by": {"type": "string", "description": "What proves it: the evidence that closes it."},
+                        },
+                        "required": ["kind", "what", "closes_by"],
+                    },
+                },
             }),
             &["status", "summary"],
             false,
@@ -791,11 +805,22 @@ async fn report<B: Backend>(b: &mut B, args: &Value) -> Result<ToolOut, String> 
     if !["progress", "done", "failed", "blocked", "needs_user"].contains(&status.as_str()) {
         return Err("`status` is progress, done, failed, blocked or needs_user".into());
     }
-    let r = ask(b, "sub.report", json!({"status": status, "summary": req_str(args, "summary")?})).await?;
-    let text = match r["delivered_to"].as_str() {
+    let mut params = json!({"status": status, "summary": req_str(args, "summary")?});
+    if let Some(owes) = args.get("owes").filter(|v| !v.is_null()) {
+        params["owes"] = owes.clone();
+    }
+    let r = ask(b, "sub.report", params).await?;
+    let mut text = match r["delivered_to"].as_str() {
         Some(parent) => format!("Reported {status} to {parent}. It arrives there as a new message."),
         None => format!("Recorded {status} on your row. No session opened you, so no one was told."),
     };
+    if r["owes"].is_object() {
+        let opened = r["owes"]["opened"].as_array().map_or(0, Vec::len);
+        text.push_str(&format!(" Recorded {opened} check(s) still owed."));
+        for refused in r["owes"]["refused"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            text.push_str(&format!("\nNot recorded: {refused}"));
+        }
+    }
     Ok(ToolOut::ok(text, r))
 }
 

@@ -39,6 +39,7 @@ mod mobile;
 mod notes;
 mod notify;
 mod oneshot;
+mod owed;
 mod peer_identity;
 mod persist;
 mod ports;

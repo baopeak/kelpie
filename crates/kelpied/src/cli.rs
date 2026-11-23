@@ -361,7 +361,10 @@ usage: kelpied sub <command> [--json]
   send <session> <text…>                        message a session (delivered when it is idle)
   read <session> [--lines N]                    the end of a session's screen
   wait [<session>…] [--timeout-s N]             until you have mail or a sub-session stops working
-  report <status> <summary…>                    to the session that opened you: progress|done|failed|blocked|needs_user
+  report [--owes kind:what:closes_by]… <status> <summary…>
+                                                to the session that opened you: progress|done|failed|blocked|needs_user.
+                                                --owes (up to 4) records a check you could not run yourself; kind is
+                                                real_app|phone|clean_machine|soak|owner; what is owed has no colon in it
   inbox                                         take the mail waiting for you
   close <session>                               close a sub-session you opened
   open <url> [--title T]                        show an http(s) page to the person in a background tab of your project
@@ -380,7 +383,15 @@ fn text_command(args: &mut Vec<String>, fixed: usize, valued: &[&str], flags: &[
             rest.remove(0);
         } else if valued.contains(&first.as_str()) {
             anyhow::ensure!(rest.len() > 1, "{first} needs a value");
-            opts.insert(first.trim_start_matches('-').into(), json!(rest[1]));
+            if first == "--owes" {
+                // The one option that may repeat: its values are collected, in order.
+                let list = opts.entry("owes").or_insert_with(|| json!([]));
+                if let Some(list) = list.as_array_mut() {
+                    list.push(json!(rest[1]));
+                }
+            } else {
+                opts.insert(first.trim_start_matches('-').into(), json!(rest[1]));
+            }
             rest.drain(..2);
         } else {
             return Ok(false);
@@ -422,6 +433,15 @@ fn text_command(args: &mut Vec<String>, fixed: usize, valued: &[&str], flags: &[
     Ok((lead, rest.join(" "), opts))
 }
 
+/// One `--owes kind:what:closes_by` value: the kind is up to the first colon and what is owed up to the second, so a link
+/// may be the way it closes (`closes_by` takes the rest). The daemon checks the kind and the texts.
+fn parse_owes(spec: &str) -> Result<Value> {
+    let form = "--owes takes kind:what:closes_by (kinds: real_app, phone, clean_machine, soak, owner)";
+    let (kind, rest) = spec.split_once(':').ok_or_else(|| anyhow!("{form}"))?;
+    let (what, closes_by) = rest.split_once(':').ok_or_else(|| anyhow!("{form}"))?;
+    Ok(json!({"kind": kind.trim(), "what": what.trim(), "closes_by": closes_by.trim()}))
+}
+
 /// `kelpied sub …` as the tool and arguments it stands for (`mcp::run_tool`), and whether to print JSON.
 fn parse_sub(args: &[String]) -> Result<(&'static str, Value, bool)> {
     let mut args = args.to_vec();
@@ -455,12 +475,16 @@ fn parse_sub(args: &[String]) -> Result<(&'static str, Value, bool)> {
             ("kelpie_message", json!({"to": lead[0], "text": text}))
         }
         "report" => {
-            let (lead, summary, mut opts) = text_command(&mut args, 1, &[], &["--json"])?;
+            let (lead, summary, mut opts) = text_command(&mut args, 1, &["--owes"], &["--json"])?;
             json_out |= opts.remove("json").is_some();
             if lead.is_empty() || summary.is_empty() {
-                return Err(usage("report <progress|done|failed|blocked|needs_user> <summary…>"));
+                return Err(usage("report [--owes kind:what:closes_by]… <progress|done|failed|blocked|needs_user> <summary…>"));
             }
-            ("kelpie_report", json!({"status": lead[0], "summary": summary}))
+            let mut params = json!({"status": lead[0], "summary": summary});
+            if let Some(owes) = opts.remove("owes") {
+                params["owes"] = json!(owes.as_array().into_iter().flatten().filter_map(Value::as_str).map(parse_owes).collect::<Result<Vec<_>>>()?);
+            }
+            ("kelpie_report", params)
         }
         other => {
             json_out |= take_flag(&mut args, "--json");
@@ -741,6 +765,23 @@ mod tests {
         assert!(words(&["--json", "list"]).unwrap().2);
         assert!(words(&["spawn", "codex", "task", "--name"]).is_ok(), "a lone --name after words is text");
         assert!(words(&["spawn", "--name"]).is_err());
+    }
+
+    #[test]
+    fn report_collects_every_owes_option() {
+        let got = words(&["report", "--owes", "phone:open it on a phone:a photo", "--owes", "owner:look at it:https://example.com/x", "done", "fixed it"]).unwrap();
+        assert_eq!(
+            got.1,
+            json!({"status": "done", "summary": "fixed it", "owes": [
+                {"kind": "phone", "what": "open it on a phone", "closes_by": "a photo"},
+                {"kind": "owner", "what": "look at it", "closes_by": "https://example.com/x"},
+            ]})
+        );
+        // After one quoted summary, too; without the option the arguments are what they were.
+        assert_eq!(words(&["report", "done", "fixed it", "--owes", "soak:a day of use:no crash"]).unwrap().1["owes"][0]["kind"], "soak");
+        assert!(words(&["report", "done", "fixed it"]).unwrap().1.get("owes").is_none());
+        assert!(words(&["report", "--owes", "phone-only", "done", "fixed it"]).is_err());
+        assert!(words(&["report", "--owes", "phone:no way to close it", "done", "fixed it"]).is_err());
     }
 
     #[test]
