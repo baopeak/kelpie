@@ -1,11 +1,13 @@
 //! The running processes as `scope` wants them: id, parent id, creation time.
 
+use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use crate::scope::Proc;
@@ -47,6 +49,24 @@ pub fn created(pid: u32) -> u64 {
         } else {
             0
         }
+    }
+}
+
+/// The path of a process's program, or `None` when it cannot be read (gone, or another user's).
+pub fn image_of(pid: u32) -> Option<String> {
+    unsafe {
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; 1024];
+        let mut len = buf.len() as u32;
+        let got = QueryFullProcessImageNameW(
+            p,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(p);
+        got.ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
     }
 }
 

@@ -1,7 +1,8 @@
 // Searchable index of settings: one entry per row of the settings page. Drives the page's
 // navigation, its search box, and "/" results in the global search.
 import { msg, translated } from "./i18n";
-import { BROWSER_AGENT_API, SCREEN_REMOTE_API } from "./attention";
+import { BROWSER_AGENT_API, SCREEN_REMOTE_API, WINDOW_AGENT_API } from "./attention";
+import { isWindows } from "./platform";
 
 export type SettingsSection = "agents" | "agent-setup" | "accounts" | "integrations" | "automations" | "terminal" | "layouts" | "remote" | "mobile" | "appearance" | "notifications" | "usage" | "commands" | "shortcuts" | "daemon" | "plugins" | "voice" | "about";
 
@@ -38,6 +39,8 @@ export interface SettingEntry {
   phones?: string;
   /** The daemon API level the row needs: below it the row is not shown, nor found by a search. */
   api?: number;
+  /** The row exists on Windows only: elsewhere it is not shown, nor found by a search. */
+  windowsOnly?: boolean;
 }
 
 export const settingsCatalog: SettingEntry[] = [
@@ -48,6 +51,8 @@ export const settingsCatalog: SettingEntry[] = [
   { id: "browser-agents-eval", section: "agents", api: BROWSER_AGENT_API, label: msg("Agents may run scripts in pages"), description: msg("With Read and act, an agent may run its own JavaScript in the panes opened for it, never in a pane you shared. A script can do anything the page can."), keywords: "browser eval javascript script agent" },
   { id: "browser-agents-sites", section: "agents", api: BROWSER_AGENT_API, label: msg("Sites agents may open"), description: msg("A tab opened for an agent is made private when Kelpie creates its page (when the tab is first shown, when an agent first uses it, or after a restart) while Browser panes is not Off, and then it may go to any site. This list is for agent tabs whose page was created while it was Off, or on a WebView2 runtime too old for private sessions: they keep your sign-ins, and besides this computer's own servers (localhost) they may go only to the sites listed. A tab you share stays on the site it showed when you shared it."), keywords: "browser sites allowlist origin domain agent private" },
   { id: "browser-agents-audit", section: "agents", api: BROWSER_AGENT_API, label: msg("Recent agent actions in browser panes"), description: msg("What agents clicked, typed into and opened, as the session daemon logged it. Typed text is never logged."), keywords: "browser audit log history agent actions" },
+  { id: "window-agents", section: "agents", api: WINDOW_AGENT_API, windowsOnly: true, label: msg("Programs agents start"), description: msg("Let agents start a program on this computer (a browser, an editor, an app they built), read what its windows show and press buttons or fill fields in them. They reach only the programs they started themselves, never your own windows. Applies to agents started after the change."), keywords: "window windows program app desktop agent launch start uia automation click type screenshot kelpie_window" },
+  { id: "window-agents-visible", section: "agents", api: WINDOW_AGENT_API, windowsOnly: true, label: msg("Allow the visible desktop"), description: msg("Let agents start programs on your own desktop and use them there, not only on a hidden desktop you never see. Acting on a program's window brings it to the front, which interrupts whatever you are doing."), keywords: "window windows program desktop visible focus front agent hidden" },
   { id: "agent-list", section: "agents", label: msg("Agent CLIs"), description: msg("Agents found on this computer. Shown ones appear in launchers and the new-session menu."), keywords: "gemini cursor opencode copilot aider grok amp qwen droid kimi crush cline kiro devin goose installed enable hide" },
   { id: "ai-agent", section: "agents", label: msg("Agent for AI actions"), description: msg("Writes commit messages and pull request descriptions (runs once, without a terminal)."), keywords: "generate commit message pull request ai" },
   { id: "auto-worktree", section: "agents", label: msg("Worktree for new agent sessions"), description: msg("In a git folder, new agent sessions in the New session dialog can start in their own worktree, named from the first prompt. Ask: a box you tick per session. Always: ticked unless you untick it. Never: not offered."), keywords: "worktree isolate branch new session agent automatic auto parallel" },
@@ -143,8 +148,8 @@ export const settingsCatalog: SettingEntry[] = [
 
 export const catalogEntry = (id: string) => settingsCatalog.find((e) => e.id === id);
 
-/** Whether a row exists with a daemon at API level `api`. */
-export const entryAvailable = (e: SettingEntry, api: number) => api >= (e.api ?? 0);
+/** Whether a row exists with a daemon at API level `api`, on this system. */
+export const entryAvailable = (e: SettingEntry, api: number, windows: boolean = isWindows) => api >= (e.api ?? 0) && (windows || !e.windowsOnly);
 
 /** Every word of `query` appears in what the entry shows or in its keywords. */
 export function entryMatches(e: SettingEntry, query: string): boolean {

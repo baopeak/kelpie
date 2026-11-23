@@ -1,6 +1,7 @@
 //! `kelpied mcp`: Kelpie's sub-session tools as a stdio MCP server (JSON-RPC 2.0, one message per line), and the tool
 //! operations themselves, which `kelpied sub …` (cli.rs) runs with the same wording. The browser tools (`browser.rs`) are listed
-//! only while the user allows browser control (`browser.policy`, asked when the agent lists the tools).
+//! only while the user allows browser control (`browser.policy`, asked when the agent lists the tools), and the window tools (`window.rs`)
+//! while the user allows window control (`window.policy`).
 //!
 //! The server holds no state and keeps no connection: each tool call connects to the daemon as the session it runs in
 //! (`KELPIE_SESSION_ID` / `_TOKEN` / `_ENDPOINT` from the agent's environment) and the daemon decides what is allowed. Outside a
@@ -17,6 +18,7 @@ use crate::client::Client;
 use crate::subs::{self, Named};
 
 pub mod browser;
+pub mod window;
 
 /// Versions of the protocol this server speaks (it uses nothing that differs between them).
 const KNOWN_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -241,7 +243,7 @@ pub async fn handle_message<C: Connector>(message: &Value, connector: &C) -> Opt
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(rpc_error(id, -32602, "missing tool `name`"));
             };
-            if !TOOL_NAMES.contains(&name) && browser::short(name).is_none() {
+            if !TOOL_NAMES.contains(&name) && browser::short(name).is_none() && window::short(name).is_none() {
                 return Some(rpc_error(id, -32602, &format!("unknown tool `{name}`")));
             }
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -258,27 +260,33 @@ pub async fn handle_message<C: Connector>(message: &Value, connector: &C) -> Opt
     })
 }
 
-/// Which groups of tools the user allows now, asked when the agent lists them: (sub-sessions, browser control).
+/// Which groups of tools the user allows now, asked when the agent lists them: (sub-sessions, browser control, window control).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Offered {
     subs: bool,
     browser: bool,
+    window: bool,
 }
 
 /// One `browser.policy` call. A daemon that cannot be reached, or one older than browser control, offers the sub-session tools as before
-/// and no browser tools; one that does not say whether sub-sessions are allowed offers them too.
+/// and no browser tools; one that does not say whether sub-sessions are allowed offers them too. The window tools are offered only when
+/// `window.policy` says so: a daemon without it, or a session it refuses (a restricted one), gets none.
 async fn offered<C: Connector>(connector: &C) -> Offered {
     let asked = async {
         let mut b = connector.connect().await.ok()?;
-        ask(&mut b, "browser.policy", json!({})).await.ok()
+        let browser = ask(&mut b, "browser.policy", json!({})).await.ok();
+        let window = ask(&mut b, "window.policy", json!({})).await.ok();
+        Some((browser, window))
     };
-    let policy = tokio::time::timeout(Duration::from_secs(3), asked).await.ok().flatten().unwrap_or(Value::Null);
+    let (browser, window) = tokio::time::timeout(Duration::from_secs(3), asked).await.ok().flatten().unwrap_or((None, None));
+    let policy = browser.unwrap_or(Value::Null);
     let on = |key: &str, missing: bool| policy.get(key).and_then(Value::as_str).map_or(missing, |m| m != "off");
-    Offered { subs: on("sub_sessions", true), browser: on("mode", false) }
+    let window_on = window.is_some_and(|w| w.get("mode").and_then(Value::as_str).is_some_and(|m| m != "off"));
+    Offered { subs: on("sub_sessions", true), browser: on("mode", false), window: window_on }
 }
 
-/// The tools offered: the sub-session tools while sub-sessions are allowed, the browser tools while browser control is, and
-/// `kelpie_open_page` (where using a page starts) while either is.
+/// The tools offered: the sub-session tools while sub-sessions are allowed, the browser tools while browser control is, the window tools
+/// while window control is, and `kelpie_open_page` (where using a page starts) while sub-sessions or browser control are.
 fn listed(offered: Offered) -> Vec<Value> {
     let mut tools: Vec<Value> = tool_list()
         .into_iter()
@@ -286,6 +294,9 @@ fn listed(offered: Offered) -> Vec<Value> {
         .collect();
     if offered.browser {
         tools.extend(browser::tool_list());
+    }
+    if offered.window {
+        tools.extend(window::tool_list());
     }
     tools
 }
@@ -298,6 +309,9 @@ fn instructions(offered: Offered) -> String {
     }
     if offered.browser {
         parts.push(crate::browser_guide::GUIDE);
+    }
+    if offered.window {
+        parts.push(window::GUIDE);
     }
     if parts.is_empty() {
         return "Kelpie's tools are turned off in Kelpie's settings (Agents).".into();
@@ -488,7 +502,10 @@ async fn dispatch<B: Backend>(b: &mut B, name: &str, args: &Value) -> Result<Too
         "kelpie_inbox" => inbox(b).await,
         other => match browser::short(other) {
             Some(tool) => browser::run(b, tool, args).await,
-            None => Err(format!("unknown tool `{other}`")),
+            None => match window::short(other) {
+                Some(tool) => window::run(b, tool, args).await,
+                None => Err(format!("unknown tool `{other}`")),
+            },
         },
     }
 }

@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/kelpied", "binaries/kelpie-stt", "binaries/kelpie-screen", "binaries/kelpie-window"]
+  }
+}

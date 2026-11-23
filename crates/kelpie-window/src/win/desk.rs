@@ -13,8 +13,11 @@ use windows::Win32::System::StationsAndDesktops::{
     CreateDesktopW, SetThreadDesktop, DESKTOP_CONTROL_FLAGS,
 };
 use windows::Win32::System::Threading::{
-    CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+    CreateProcessW, ResumeThread, TerminateProcess, CREATE_SUSPENDED, PROCESS_CREATION_FLAGS,
+    PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
 };
+
+use super::job::Job;
 
 pub const NAME: &str = "kelpie-agent";
 /// `SW_SHOWNOACTIVATE`: the program's first window shows without taking the focus from the person (a program may still take it).
@@ -66,7 +69,10 @@ pub fn rejoin() {
 /// What comes back is the
 /// process id and its creation time, read while the process's handle is still open: read after, a program that ended at once could have
 /// left its id to another process, which would then be taken for it.
-pub fn start(command_line: &str, hidden: bool) -> Result<(u32, u64), String> {
+///
+/// With a `job`, the process is created suspended, put in the job, and only then let run: it never runs a line of its own code, nor
+/// starts a child, outside the job. A process that cannot be put in it is ended and the start fails.
+pub fn start(command_line: &str, hidden: bool, job: Option<&Job>) -> Result<(u32, u64), String> {
     let mut line = wide(command_line);
     let mut desktop = wide(NAME);
     let mut info = STARTUPINFOW {
@@ -87,13 +93,31 @@ pub fn start(command_line: &str, hidden: bool) -> Result<(u32, u64), String> {
             None,
             None,
             false,
-            PROCESS_CREATION_FLAGS(0),
+            if job.is_some() {
+                CREATE_SUSPENDED
+            } else {
+                PROCESS_CREATION_FLAGS(0)
+            },
             None,
             PCWSTR::null(),
             &info,
             &mut made,
         )
         .map_err(|e| format!("it could not be started: {}", e.message()))?;
+        if let Some(job) = job {
+            let in_job = job.assign(made.hProcess);
+            // `ResumeThread` answers the count before it, or -1 when it failed.
+            let resumed = in_job.is_ok() && ResumeThread(made.hThread) != u32::MAX;
+            if !resumed {
+                let _ = TerminateProcess(made.hProcess, 1);
+                let _ = CloseHandle(made.hThread);
+                let _ = CloseHandle(made.hProcess);
+                return Err(match in_job {
+                    Err(why) => why,
+                    Ok(()) => "it could not be let run".to_string(),
+                });
+            }
+        }
         let created = super::procs::created_of(made.hProcess);
         let _ = CloseHandle(made.hThread);
         let _ = CloseHandle(made.hProcess);

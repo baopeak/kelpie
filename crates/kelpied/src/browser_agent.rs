@@ -460,7 +460,12 @@ pub struct Audit {
 
 impl Audit {
     pub fn new(data_dir: &Path) -> Audit {
-        Audit { path: data_dir.join(AUDIT_FILE), writing: Mutex::new(()) }
+        Audit::named(data_dir, AUDIT_FILE)
+    }
+
+    /// An audit in `<data>/<file>` (`file` ends in `.jsonl`; the one before is kept beside it in `.1`).
+    pub fn named(data_dir: &Path, file: &str) -> Audit {
+        Audit { path: data_dir.join(file), writing: Mutex::new(()) }
     }
 
     fn older(&self) -> PathBuf {

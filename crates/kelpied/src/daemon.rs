@@ -34,6 +34,7 @@ mod browser_rpc;
 mod owed_rpc;
 mod process;
 mod sub_rpc;
+mod window_rpc;
 
 pub(crate) use sub_rpc::{existing_folder, page_url, MAX_PAGE_URL};
 
@@ -241,6 +242,8 @@ pub struct Daemon {
     pub providers: crate::provider::Providers,
     /// Agents using browser panes: the policy, a rate per session, the audit (`browser.*`, `browser_agent`).
     pub browser: crate::browser_agent::State,
+    /// Agents using the windows of programs they started: the policy, the rates, the audit (`window.*`, `window_agent`).
+    pub window: Arc<crate::window_agent::State>,
     /// Phones that took over a browser pane (`takeover`).
     pub takeover: crate::takeover::Broker,
     /// Phones that see this computer's screen (`screen`).
@@ -398,6 +401,7 @@ impl Daemon {
                 files,
                 providers: crate::provider::Providers::default(),
                 browser: crate::browser_agent::State::new(policy.browser, &data_dir),
+                window: Arc::new(crate::window_agent::State::new(policy.window, &data_dir)),
                 takeover: crate::takeover::Broker::default(),
                 screen: crate::screen::Broker::default(),
                 me: weak,
@@ -1453,6 +1457,11 @@ impl Daemon {
         // Waits for a snapshot of its repository that is running: not on this request's worker.
         let (checkpoints, id, now) = (self.checkpoints.clone(), entry.spec().id, now_millis());
         let _ = std::thread::Builder::new().name("kelpie-checkpoint-drop".into()).spawn(move || checkpoints.close_session(&id, now));
+        // The windows of the programs it started are asked to close; the helper runs on a thread of its own, never on this request's worker.
+        if self.window.has_session(&entry.spec().id) {
+            let (window, id) = (self.window.clone(), entry.spec().id);
+            let _ = std::thread::Builder::new().name("kelpie-window-close".into()).spawn(move || crate::window_agent::end_session(&window, &id));
+        }
         self.meta_dirty.store(true, Ordering::Relaxed);
         self.broadcast_event("session.closed", json!({"handle": handle}), Some(&entry.spec().id));
         Ok(())
@@ -1935,6 +1944,7 @@ impl Daemon {
                 // The sub-session and browser settings are checked before anything is applied: a bad value changes nothing.
                 let sub = self.requested_sub_policy(&params)?;
                 let browser = crate::browser_agent::Policy::requested(&params, &self.browser.policy.read())?;
+                let window = crate::window_agent::Policy::requested(&params, &self.window.policy.read())?;
                 if let Some(on) = params.get("agents_control_others").and_then(Value::as_bool) {
                     self.agents_control_others.store(on, Ordering::Relaxed);
                 }
@@ -1943,6 +1953,9 @@ impl Daemon {
                 }
                 if let Some(browser) = browser {
                     *self.browser.policy.write() = browser;
+                }
+                if let Some(window) = window {
+                    *self.window.policy.write() = window;
                 }
                 self.persist_policy();
                 self.policy_json()
@@ -1954,6 +1967,12 @@ impl Daemon {
             "browser.policy" => self.browser_policy(),
             "browser.audit" => {
                 self.browser_audit(tx, id, &params);
+                return Ok(None);
+            }
+            "window.call" => return self.window_call(tx, id, &params),
+            "window.policy" => self.window_policy(),
+            "window.audit" => {
+                self.window_audit(tx, id, &params);
                 return Ok(None);
             }
             "daemon.set_theme" => {
@@ -2604,6 +2623,8 @@ struct Policy {
     sub: crate::subs::SubPolicy,
     /// Agents using browser panes (off unless the user turned it on).
     browser: crate::browser_agent::Policy,
+    /// Agents using the windows of programs they started (off unless the user turned it on).
+    window: crate::window_agent::Policy,
 }
 
 /// `policy.json` as a JSON object; anything else is damaged (its previous version is used instead).
@@ -2625,6 +2646,7 @@ fn load_policy(data_dir: &std::path::Path) -> Policy {
             max: get("sub_max").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(crate::subs::MAX_SUB_CAP)) as u32),
         },
         browser: crate::browser_agent::Policy::from_file(file.as_ref()),
+        window: crate::window_agent::Policy::from_file(file.as_ref()),
     }
 }
 
@@ -2648,6 +2670,7 @@ fn save_policy(data_dir: &std::path::Path, policy: &Policy) {
     file["sub_sessions"] = json!(policy.sub.mode.as_str());
     file["sub_max"] = json!(policy.sub.max);
     policy.browser.write_into(&mut file);
+    policy.window.write_into(&mut file);
     if let Err(e) = crate::persist::save_state(&path, file.to_string().as_bytes()) {
         tracing::warn!("save {POLICY_FILE}: {e:#}");
     }

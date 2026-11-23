@@ -29,6 +29,8 @@ export const owedClose = (id: string, evidence: string) => daemon<unknown>("owed
 export const policyGet = () => daemon<unknown>("daemon.policy");
 export const subPolicySet = (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => daemon<unknown>("daemon.set_policy", patch);
 export const browserPolicySet = (patch: { browser_agents?: "off" | "read" | "act"; browser_eval?: boolean; browser_sites?: string[] }) => daemon<unknown>("daemon.set_policy", patch);
+/** The window-tools part of the policy: `window_agents` off|on, `window_visible` (agents may use the person's own desktop). */
+export const windowPolicySet = (patch: { window_agents?: "off" | "on"; window_visible?: boolean }) => daemon<unknown>("daemon.set_policy", patch);
 /** The latest things agents did in browser panes, as the daemon logged them: `{entries: [{at, session, label, tool, host, target, ok, error}]}`. */
 export const browserAudit = (limit: number) => daemon<unknown>("browser.audit", { limit });
 
