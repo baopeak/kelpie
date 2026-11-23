@@ -186,7 +186,7 @@ anything but `daemon.info` answers:
   (settings, custom agents, automations, phone access, closing sessions) is the user's.
   Sub-sessions add `sub.spawn|message|report|inbox|close` to the scripting surface and only
   `sub.report|inbox` to a restricted session's; `owed.list|open` (API 47) are on both; `page.open` (API 35) and `browser.call|policy` (API 39) are on both; `authorize` overwrites their `session_id` (`browser.call`'s too) with the caller's,
-  and `sub.answer|pending` are the user's. From a session, `session.create` and `run.create` are not
+  and `sub.answer|pending` are the user's, as is `pr.status` (API 48). From a session, `session.create` and `run.create` are not
   the old direct calls: they pass the same gate as `sub.spawn` (see "Sub-sessions"): a linked child,
   the policy (`off` refuses, `ask` asks the user, `allow`), the caps, only installed agent kinds
   (`shell`/`custom` refused: a shell could run anything, so a child could exceed its parent), `args`
@@ -492,7 +492,7 @@ Turning access off is therefore not how to cut a phone off: `mobile.enable` stay
 
 - **Verb table** (`mobile/verbs.rs`, closed; least permission each): `list`, `hb`, `ack`, `sub`, `unsub`, `chat_sub`, and
   `push_info`, `push_sub`, `push_unsub`, `push_prefs`, `push_test` (refused `insecure` where `transport_cap` would not let a page type), and
-  `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch` need
+  `lock_challenge`, `lock_enrol`, `lock_unlock`, `lock_now`, `lock_touch`, `pr_get` (API 48) need
   *read*; `input`, `key`, `answer`, `chat_answer`, `chat_send`, `chat_cancel`, `chat_stop`, `chat_resume`, `new_options`, `new_session` need *write*;
   anything else is `unknown_verb`. The
   permission is read from the device's record on every message, so a revoked or downgraded device is
@@ -633,6 +633,20 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   live event) to Activity once, without a popup (`app/src/lib/phone-starts.ts`). When the answer says older lines were left out (`from`: past
   the limit, or in the rotated file) and begins after that time, one Activity line says some starts may not be listed and points to
   Settings → Mobile → What phones did.
+- **A project's pull request** (API 48; `pulls.rs`, `daemon/pr_rpc.rs`, `mobile/pr.rs`): the daemon reads it through the user's own `gh`, which holds the
+  sign-in; it keeps no token. The project's folder is the one in the launch catalogue the window pushed (`mobile.set_launch`), which lives in memory
+  only: a project the window has not told the daemon about since the daemon started is refused (`not_ready`, `no_project`) until the window
+  connects. From the folder, `git remote get-url origin` and `git rev-parse --abbrev-ref HEAD` run the way the commit watcher runs git (hooks off,
+  no prompts, 10 s); only a `github.com` remote counts, and credentials in its URL are dropped. Then `gh pr view <branch> -R github.com/<owner>/<name>
+  --json …` and `gh pr checks <number> -R … --required --json name` (an error there means none required) run from the daemon's data folder, never from
+  a project's folder (a program in a session can change a worktree's git configuration), with prompts and colour off, no input, 60 s and the process
+  killed on timeout. `gh` missing or signed out is a plain message. `pulls::merge_line` turns what was read into `{can, reason, detail}` from GitHub's
+  own merge state (`mergeable`, `mergeStateStatus`): the reasons are `unknown`, `not_open`, `draft`, `conflicts`, `checks_failing`, `checks_running`
+  and `blocked`, in that order; a check counts only when branch protection requires it, and with none known as required GitHub's state decides. A read
+  that failed or that GitHub has not finished is `unknown`, never "can merge". `pr.status {project}` (the user and the app; a session may not
+  call it) answers `{repo, number, title, url, base, head, line}` or `{none: true}`, from a thread of its own. The phone's `pr_get {project}` (read)
+  calls the same code, at most 4 at once and then one every 5 s per device, and answers `ack {pr}`; the reply never holds the project's folder, and a
+  message from `git` or `gh` has it taken out. The phone asks when a session's view opens and when the person asks again, never on a timer.
 - **One-shot approvals**: a phone's answer holds for this one request. For a chat the daemon keeps a list of the answer shapes
   known to be one-shot for each kind of request (`chat::answer_is_one_shot`: Claude's allow or deny, Codex's `accept`, `decline`,
   `cancel` or a permission grant for this `turn`, ACP's `allow_once` and `reject_once`, a form's answers) and refuses anything else as

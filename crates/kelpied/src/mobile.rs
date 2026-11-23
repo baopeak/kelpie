@@ -25,6 +25,7 @@ mod launch;
 mod link;
 mod listen;
 mod lock;
+mod pr;
 pub mod relay;
 pub mod risk;
 mod screen_access;
@@ -468,6 +469,8 @@ pub struct Mobile {
     relay: relay::Runtime,
     /// The app lock's windows, challenges and settings as checked (`lock`).
     lock_memory: LockMemory,
+    /// What phones may read of a project's pull request, and how fast (`pr`).
+    pr: pr::PrMemory,
     /// The screen's ways as checked, and its use of the relay (`screen_access`).
     screen_memory: screen_access::ScreenMemory,
     /// A test on the only address it can bind holds this machine to the limits for an address.
@@ -692,6 +695,7 @@ impl Mobile {
             tailscale_change: tokio::sync::Mutex::new(()),
             relay: relay::Runtime::default(),
             lock_memory: LockMemory::default(),
+            pr: pr::PrMemory::default(),
             screen_memory: screen_access::ScreenMemory::default(),
             #[cfg(test)]
             loopback_is_remote: AtomicBool::new(false),
@@ -3140,6 +3144,7 @@ impl Conn {
                 return options.map(Some).map_err(|(code, message)| refuse(code, message));
             }
             Verb::NewSession => return self.new_session(req).await.map(Some),
+            Verb::PrGet => return self.pr_get(req).await.map(Some),
             Verb::PushInfo => {
                 self.secure_transport()?;
                 let (daemon, device) = (self.daemon.clone(), self.device.clone());
@@ -4072,6 +4077,7 @@ mod tests {
 
     mod lock;
     mod new_session;
+    mod pr;
     mod relay;
     mod takeover;
 

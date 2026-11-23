@@ -32,6 +32,7 @@ use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, tu
 mod automation;
 mod browser_rpc;
 mod owed_rpc;
+mod pr_rpc;
 mod process;
 mod sub_rpc;
 
@@ -2425,6 +2426,7 @@ impl Daemon {
             }
             m if m.starts_with("note.") => self.note_rpc(m, &params)?,
             m if m.starts_with("owed.") => self.owed_rpc(m, &params)?,
+            m if m.starts_with("pr.") => return self.pr_rpc(tx, id, m, params),
             m if m.starts_with("process.") => return self.process_rpc(tx, id, m, params),
             // Undo, its preview and drop wait for the repository's snapshots and run git: they
             // answer from their own thread so this client's other requests are not held up.

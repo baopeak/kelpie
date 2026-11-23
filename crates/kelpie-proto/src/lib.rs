@@ -113,7 +113,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `owed.close {id, evidence}` (the user's; a session lists and opens its own project's and never closes), the `owed.changed {project, owed}`
 /// event, and an optional `owes` list on `sub.report` and `run.report`, answered as `owes: {opened, refused}`. An older daemon has none of
 /// them, so a client offers the record only at 47.
-pub const API_LEVEL: u32 = 47;
+/// 48: a project's pull request: `pr.status {project}` (the user and the app; the project's folder is the one the window pushed with `mobile.set_launch`) answered
+/// `{repo, number, title, url, base, head, line: {can, reason, detail}}` or `{none: true}`, and the phone's `pr_get {project}` (read), answered `pr` with the
+/// same. An older daemon has neither, so the phone shows a pull request's line only at 48.
+pub const API_LEVEL: u32 = 48;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

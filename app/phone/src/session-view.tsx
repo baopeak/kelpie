@@ -7,6 +7,7 @@ import { ago, clock } from "./conn-text";
 import { Composer } from "./composer";
 import { KeyBar } from "./key-bar";
 import { PromptCard } from "./prompt-card";
+import { PullLine } from "./pull-line-view";
 import { TerminalText } from "./terminal-text";
 import { canSeeScreen, canTakeOver, canType, connected, dataState, device, dismissNotice, lastLiveAt, notice as sessionNotice, now, openScreenPicker, openTakeoverPicker, paintedFrom, screen, sessions, stateBannerShown } from "./phone-state";
 import { Icon } from "./icons";
@@ -45,11 +46,12 @@ export function SessionView(props: { id: string }) {
       {(s) => (
         <Show
           when={!s().chat}
-          fallback={<><TakeOverButton project={s().project_id} /><ChatView row={s()} dim={stale()} /></>}
+          fallback={<><TakeOverButton project={s().project_id} /><PullLine project={s().project_id} /><ChatView row={s()} dim={stale()} /></>}
         >
           <div class="session" data-id={props.id} classList={{ dim: stale() }}>
             <AgeChip />
             <TakeOverButton project={s().project_id} />
+            <PullLine project={s().project_id} />
             {/* The banner says it already, when it shows. */}
             <Show when={stale() && !stateBannerShown() && (paintedFrom() ?? lastLiveAt())}>
               <div class="asof">{t("As of {time} ({ago})", { time: clock((paintedFrom() ?? lastLiveAt())!, true), ago: ago((paintedFrom() ?? lastLiveAt())!, now()) })}</div>

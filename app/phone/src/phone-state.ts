@@ -33,7 +33,8 @@ import { Alerts, browserAlerts, readAlertLink, type AlertsState } from "./push";
 import { locale, t } from "./i18n";
 import { TakeoverSession, type FrameMeta, type TakeoverState } from "./takeover";
 import { ScreenSession, type ScreenState } from "./screen";
-import { NEW_SESSION_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAKEOVER_API } from "../../src/lib/attention";
+import { NEW_SESSION_API, PR_API, SCREEN_API, SCREEN_FLOW_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAKEOVER_API } from "../../src/lib/attention";
+import { pullView, type PullView } from "./pull-line";
 import { ScreenPeer, type OfferReply } from "./screen-rtc";
 import { newSessionRequest, optionsOutcome, sendStart, startOutcome, type OptionsResult, type StartResult } from "./start-session";
 
@@ -729,6 +730,21 @@ export async function startSession(projectId: string, kind: string, prompt: stri
   const r = startOutcome(await sendStart(() => link.newSession(req), (ms) => new Promise((done) => setTimeout(done, ms))));
   if (r.ok) openSession(r.id);
   return r;
+}
+
+/** The computer reads a project's pull request for this phone (a daemon that has it). */
+export const canReadPulls = () => daemonApi() >= PR_API;
+/** What the phone last read of each project's pull request, and whether it is looking again now. */
+export const [pullStates, setPullStates] = createSignal<Record<string, { view: PullView; busy: boolean }>>({});
+
+/** Reads a project's pull request from the computer: when its view opens, and when the person asks again. Never on a timer, and never twice at once for
+ *  a project. What was shown stays up while it looks again. */
+export async function loadPull(project: string): Promise<void> {
+  if (!canReadPulls() || !connected() || pullStates()[project]?.busy) return;
+  const before = pullStates()[project]?.view;
+  setPullStates((all) => ({ ...all, [project]: { view: before ?? { kind: "loading" }, busy: true } }));
+  const view = pullView(await link.prGet(project));
+  setPullStates((all) => ({ ...all, [project]: { view, busy: false } }));
 }
 
 /** Answers the prompt a terminal session waits on with one of its keys. */

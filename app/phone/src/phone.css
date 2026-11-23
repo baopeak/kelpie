@@ -252,6 +252,11 @@ a.btn { text-decoration: none; }
 .takeover-entry { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); }
 /* Offline, the ways to the computer cannot be used: the screen keeps the room until they can. */
 .takeover-entry:has(.btn:disabled) { display: none; }
+/* A project's pull request: whether GitHub would merge it, and which one it is. */
+.pull-line { display: flex; align-items: center; gap: var(--s2); padding: var(--s1) var(--s1) var(--s1) var(--s3); border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.pull-line .pull-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pull-line .pull-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pull-line.can strong { color: var(--ok); }
 .takeover-entry .btn { flex: none; white-space: nowrap; min-height: var(--tap); padding: 0 var(--s3); font-size: var(--fs-sm); border-radius: var(--r-pill); }
 
 /* ---------- chat ---------- */
