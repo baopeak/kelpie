@@ -1928,9 +1928,10 @@ mod tests {
         format!("{dir}/{}", partial_name(name, &tag(id)))
     }
 
-    /// The journal is written off the async workers: read it once it says what is expected.
+    /// The journal is written off the async workers, behind other writes to disk: read it once it says what is expected. Half a minute,
+    /// because two seconds were not enough on a loaded Windows runner.
     async fn journal_until(r: &Rig, ok: impl Fn(&Value) -> bool) -> Value {
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if let Some(v) = std::fs::read(r.dir.join("transfers.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).filter(|v| ok(v)) {
                 return v;
             }
