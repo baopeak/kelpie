@@ -664,6 +664,15 @@ commit offers **Fix with AI**; *Amend* rewrites the last commit.
 **Pull requests** (GitHub, through your `gh`): the branch's PR shows with its state and
 checks (also as a chip in the sidebar); *Create pull request…* pushes and opens one, with
 **Generate with AI** for the title and description. Failing checks offer *Fix with AI*.
+Next to them a **merge line** says *can merge* or *cannot merge* and why: GitHub's own answer
+(a draft, conflicts, required checks failing or still running, a rule that blocks it), plus one
+thing Kelpie adds. A change *needs a look* when it touches what decides the checks (a workflow, a
+check script, a baseline) or removes or switches off tests, judged from the file names and the
+changed lines against the base branch, so it is a hint and not a proof. Those files are listed
+under the line; click one to see its diff, and **Accept for this commit** once you have looked.
+The acceptance holds for that commit only, so a new commit asks again, and it stays in the
+chip's tooltip as *accepted for this commit*. When the change cannot be read, the line is shown
+without this check and the tooltip says why.
 
 **Review notes**: in a diff, click the gutter (`+`) to note a line; notes on all files of
 the project collect in a bar above the diff. **Send to agent ▾** sends them as one prompt to

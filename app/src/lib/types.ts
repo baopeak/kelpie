@@ -549,6 +549,8 @@ export interface AppState {
   /** The newest phone start (the audit log's time) already in Activity or seen: those newer are added when the window connects
    *  (`phone-starts.ts`). Unset until it is first remembered. */
   phoneStartsSeen?: number;
+  /** Changes of pull requests a person accepted for one head commit (a new commit asks again); the oldest are dropped. */
+  acceptedFlags?: FlagAcceptance[];
   /** Tabs of sub-sessions were folded into their parent's tab (done once, when sub-sessions moved into the parent's pane). */
   subTabsFolded?: boolean;
   /** The sidebar place (a creation time, ms) of a session that took over another's conversation (a switch between terminal and
@@ -800,3 +802,6 @@ export interface XferStart {
   expect?: { size: number; mtime: number };
   route?: XferRoute;
 }
+
+/** One flagged file of a pull request's change that a person accepted, for one head commit of one project. */
+export interface FlagAcceptance { project: string; head: string; path: string; what: string }

@@ -214,7 +214,9 @@ export const gitLog = (root: string) => invoke<GitCommit[]>("git_log", { root })
 export const gitStashes = (root: string) => invoke<GitStash[]>("git_stashes", { root });
 /** `oid` is the stash's commit from the list: the action is refused when `stash` points elsewhere now. */
 export const gitStashAction = (root: string, stash: string, oid: string, action: "apply" | "drop") => invoke<string>("git_stash_action", { root, stash, oid, action });
-export interface PullRequest { number: number; title: string; url: string; state: "OPEN" | "CLOSED" | "MERGED"; draft: boolean; base: string; checks: "passing" | "failing" | "pending" | "none"; provider?: "github" | "gitlab" }
+export interface PullRequest { number: number; title: string; url: string; state: "OPEN" | "CLOSED" | "MERGED"; draft: boolean; base: string; checks: "passing" | "failing" | "pending" | "none"; provider?: "github" | "gitlab";
+  /** GitHub only: its own merge state, the head commit, and each check with whether the base branch requires it. */
+  mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"; merge_state?: string; head?: string; check_list?: { name: string; state: "passing" | "failing" | "pending"; required: boolean }[] }
 export const ghPrStatus = (root: string) => invoke<PullRequest | null>("gh_pr_status", { root });
 export const ghDefaultBranch = (root: string) => invoke<string | null>("gh_default_branch", { root });
 export const ghPrCreate = (root: string, title: string, body: string, base: string, draft: boolean) => invoke<string>("gh_pr_create", { root, title, body, base, draft });
