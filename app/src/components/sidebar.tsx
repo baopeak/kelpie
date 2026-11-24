@@ -364,12 +364,6 @@ function SessionRow(props: { s: SessionInfo; kids: number }) {
       onContextMenu={(e) => openContextMenu(e, sessionMenu(props.s))}
       title={[props.s.title, props.s.model, props.s.cwd, relTimeShort(props.s.last_activity || props.s.created_at, now())].filter(Boolean).join("\n")}
     >
-      <Show when={hasKids()}>
-        <button class="chev sub-chev" title={foldedParents[props.s.id] ? t("Show sub-sessions") : t("Hide sub-sessions")} aria-expanded={!foldedParents[props.s.id]}
-          onClick={(e) => { e.stopPropagation(); toggleParentFold(props.s.id); }}>
-          <Icon name={foldedParents[props.s.id] ? "chevronRight" : "chevronDown"} size={10} />
-        </button>
-      </Show>
       <StatusDot s={props.s} />
       <KindGlyph kind={props.s.kind} size={14} />
       <span class="session-text">
@@ -381,7 +375,14 @@ function SessionRow(props: { s: SessionInfo; kids: number }) {
           <span class="model">{modelLine() || " "}</span>
         </Show>
       </span>
-      <Show when={hasKids()}><SubBadge id={props.s.id} /></Show>
+      {/* The fold arrow sits with the count, at the right: a parent's dot, icon and name line up with the rows beside it. */}
+      <Show when={hasKids()}>
+        <SubBadge id={props.s.id} />
+        <button class="chev sub-chev" title={foldedParents[props.s.id] ? t("Show sub-sessions") : t("Hide sub-sessions")} aria-expanded={!foldedParents[props.s.id]}
+          onClick={(e) => { e.stopPropagation(); toggleParentFold(props.s.id); }}>
+          <Icon name={foldedParents[props.s.id] ? "chevronRight" : "chevronDown"} size={10} />
+        </button>
+      </Show>
       <ContextRing s={props.s} />
       <Show when={continueAt(props.s)} fallback={
         <Show when={LABEL[state()]} fallback={<span class="age">{relTimeShort(props.s.last_activity || props.s.created_at, now())}</span>}>

@@ -1671,11 +1671,13 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .session-family { margin: 3px 0; padding-bottom: 2px; border-radius: 8px; background: color-mix(in srgb, var(--text) 3.5%, transparent); box-shadow: inset 0 0 0 1px var(--border); }
 .session-family:has(.session-row:is(.selected, .holds-selected)) { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .session-solo { display: contents; }
-/* Sessions an agent opened sit under its row on tree lines (├ └), the line starting under the parent's fold arrow; each level
-   indents the same. A node is a grid: elbow | row, then rail | its own children, so the elbow meets the middle of its row whatever
-   the row's height (one line or two, compact or not). */
-.sub-list { margin: 0 0 0 10px; }
-.sub-node .sub-list { margin-left: 7px; }
+/* Sessions an agent opened sit under its row on tree lines (├ └), the line starting under the parent's status dot; each level
+   indents the same, and only children indent: a parent's row lines up with the top-level rows beside it. A node is a grid:
+   elbow | row, then rail | its own children, so the elbow meets the middle of its row whatever the row's height (one line or
+   two, compact or not). The line sits 5px into the elbow column: a top-level dot's middle is 8px (row padding) + 5px, a child's
+   is 12px (elbow column) + 5px (its padding) + 5px. */
+.sub-list { margin: 0 0 0 8px; }
+.sub-node .sub-list { margin-left: 5px; }
 .sub-node { --tree-line: var(--border-strong); display: grid; grid-template-columns: 12px minmax(0, 1fr); }
 .sub-node > .session-row, .sub-node > .sub-list { grid-column: 2; }
 .sub-node > .sub-list { grid-row: 2; }
@@ -1685,7 +1687,7 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .sub-elbow::after { content: ""; position: absolute; left: 5px; top: 50%; width: 9px; border-top: 1px solid var(--tree-line); }
 .sub-rail { grid-column: 1; grid-row: 2; }
 .sub-node:not(:last-child) > .sub-rail { margin-left: 5px; border-left: 1px solid var(--tree-line); }
-.sub-chev { width: 14px; height: 16px; margin-right: -6px; padding: 0; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; display: inline-grid; place-items: center; flex: none; }
+.sub-chev { width: 14px; height: 16px; margin-left: -5px; padding: 0; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; display: inline-grid; place-items: center; flex: none; }
 .sub-chev:hover { color: var(--text); }
 .sub-badge { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--on-status); background: var(--exited); }
 .sub-badge.waiting { background: var(--waiting); }
