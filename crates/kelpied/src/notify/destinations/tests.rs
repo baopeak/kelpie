@@ -28,6 +28,10 @@ struct Request {
     at: Instant,
 }
 
+/// How long a first send may take to reach the test's service. An upper bound, not a wait: `wait_for` returns as soon as the
+/// request is there. Three seconds were not enough on a loaded Windows runner (the whole suite took three minutes there).
+const FIRST: Duration = Duration::from_secs(15);
+
 /// A local server that takes a push service's place: real requests over a real socket, answered as scripted, 201 once the script is out.
 #[derive(Clone)]
 struct PushService {
@@ -568,7 +572,7 @@ fn several_after_an_outage_are_one_summary_in_the_phones_language() {
     let (r, service) = (rig(), PushService::start(&[Answer::Status(503), Answer::Status(503), Answer::Status(503)]));
     let phone = r.phone("d1", &service, "vi");
     r.notifier.send(&waiting("a"), &Context::default());
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     r.notifier.send(&waiting("b"), &Context::default());
     r.notifier.send(&Raised { session: Some("c".into()), ..Raised::bare(Kind::Finished) }, &Context::default());
     let got = service.wait_for(4, Duration::from_secs(12));
@@ -589,7 +593,7 @@ fn one_failed_attempt_leaves_each_message_with_its_own_text_and_link() {
     r.notifier.update(Some(c), &Value::Null).unwrap();
     let telling_of = |title: &str| Context { project: Some("Proj".into()), title: Some(title.into()), phone_url: Some("http://192.168.1.5:4817/".into()), ..Default::default() };
     r.notifier.send(&waiting("a"), &telling_of("first"));
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     r.notifier.send(&waiting("b"), &telling_of("second"));
     let got = service.wait_for(3, Duration::from_secs(6));
     let bodies: Vec<Value> = got.iter().map(|g| serde_json::from_slice(&g.body).unwrap()).collect();
@@ -761,7 +765,7 @@ fn a_channel_switched_off_and_on_during_a_request_has_one_writer() {
     c.ntfy.server = service.base.clone();
     r.notifier.update(Some(c.clone()), &Value::Null).unwrap();
     r.notifier.send(&waiting("old"), &Context::default());
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     let mut off = c.clone();
     off.ntfy.enabled = false;
     r.notifier.update(Some(off), &Value::Null).unwrap();
@@ -779,7 +783,7 @@ fn a_late_answer_about_an_address_the_phone_left_keeps_what_it_has_to_send() {
     let (r, service) = (rig(), PushService::start(&[Answer::After(500, 410)]));
     let phone = r.phone("d1", &service, "en");
     r.notifier.send(&waiting("s1"), &Context::default());
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     // The phone subscribed again while that request was out.
     let phone2 = {
         let (secret, p256dh, auth) = web_push::test_subscription();
@@ -815,7 +819,7 @@ fn a_channel_says_the_summary_too_after_an_outage() {
     c.webhook.enabled = true;
     r.notifier.update(Some(c), &serde_json::json!({"webhook_url": format!("{}/hook", service.base)})).unwrap();
     r.notifier.send(&waiting("a"), &Context::default());
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     r.notifier.send(&waiting("b"), &Context::default());
     let got = service.wait_for(4, Duration::from_secs(12));
     let body: Value = serde_json::from_slice(&got[3].body).unwrap();
@@ -1020,7 +1024,7 @@ fn switching_a_channel_off_ends_what_it_had_to_send() {
     c.ntfy.server = service.base.clone();
     r.notifier.update(Some(c.clone()), &Value::Null).unwrap();
     r.notifier.send(&waiting("a"), &Context::default());
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     std::thread::sleep(Duration::from_millis(50));
     c.ntfy.enabled = false;
     r.notifier.update(Some(c), &Value::Null).unwrap();
@@ -1037,7 +1041,7 @@ fn handing_a_message_over_takes_well_under_a_millisecond() {
     let (r, service) = (rig(), PushService::start(&[Answer::Hang]));
     r.phone("d1", &service, "en");
     r.notifier.send(&waiting("first"), &Context::default());
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     let start = Instant::now();
     for i in 0..200 {
         r.notifier.send(&waiting(&format!("s{i}")), &Context::default());
@@ -1051,7 +1055,7 @@ fn a_full_queue_says_so() {
     let (r, service) = (rig(), PushService::start(&[Answer::Hang]));
     r.phone("d1", &service, "en");
     r.notifier.send(&waiting("first"), &Context::default());
-    service.wait_for(1, Duration::from_secs(3));
+    service.wait_for(1, FIRST);
     for i in 0..(QUEUE + 10) {
         r.notifier.send(&waiting(&format!("s{i}")), &Context::default());
     }
