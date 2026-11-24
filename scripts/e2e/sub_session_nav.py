@@ -12,7 +12,8 @@ calls no model. The set-up is the owner's report: a parent "Claude" with two sub
 tab of its own.
 
 Checks, with WebDriver clicks on the sidebar rows (not store calls): the parent and its children are one group, children oldest
-first, the unrelated session outside it; each click shows the clicked session (pane, tab title, active chip, breadcrumb for a
+first, the unrelated session outside it; the parent's row lines up with the unrelated one (edges, dot, height) and only the
+children indent, under a tree line that starts below the parent's dot; each click shows the clicked session (pane, tab title, active chip, breadcrumb for a
 child), marks its row and only its row, pulses its row and pane, and leaves the keyboard in its terminal; showing a child never
 reorders the sidebar; a chip and the breadcrumb's link do the same; a folded parent shows its count and stands in for its hidden
 child on screen.
@@ -256,6 +257,25 @@ def scenario(run, d):
           [r["family"] for r in start] == [True, True, True, False] and start[0]["familyFirst"], start)
     if not BEFORE:
         check("each row names its session", all(r["id"] == which(r) for r in start), start)
+
+    # Where each row and its status dot sit on screen: rows side by side line up and match, only children indent.
+    g = w.js("""
+      const out = {};
+      for (const el of document.querySelectorAll('[data-row-session]')) {
+        const r = el.getBoundingClientRect(), d = el.querySelector('.dot').getBoundingClientRect();
+        out[el.dataset.rowSession] = {left: r.left, right: r.right, height: r.height, dot: d.left + d.width / 2};
+      }
+      const elbow = document.querySelector('.session-family .sub-node > .sub-elbow');
+      out.line = elbow ? elbow.getBoundingClientRect().left + parseFloat(getComputedStyle(elbow, '::before').left) + 0.5 : null;
+      return out;""")
+    near = lambda a, b: abs(a - b) <= 1  # noqa: E731
+    p, o, c1, c2 = (g[s["id"]] for s in (parent, other, one, two))
+    check("the parent's row and the other top-level row have the same left and right edges",
+          near(p["left"], o["left"]) and near(p["right"], o["right"]), (p, o))
+    check("the parent's dot, icon and name line up with the other top-level row's", near(p["dot"], o["dot"]), (p["dot"], o["dot"]))
+    check("the parent's row is as tall as the other top-level row", near(p["height"], o["height"]), (p["height"], o["height"]))
+    check("the children indent, both by the same amount", c1["dot"] > p["dot"] + 8 and near(c1["dot"], c2["dot"]), (p["dot"], c1["dot"], c2["dot"]))
+    check("the tree line runs under the parent's dot", g["line"] is not None and near(g["line"], p["dot"]), (g["line"], p["dot"]))
 
     def row_element(sid):
         i = next(i for i, r in enumerate(rows()) if which(r) == sid)
