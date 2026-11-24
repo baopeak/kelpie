@@ -790,3 +790,89 @@ describe("a message cancelled by the other side", () => {
     expect(ctrl.state.items.filter((i) => i.kind === "system")).toHaveLength(0);
   });
 });
+
+describe("a first message given before the view attached", () => {
+  /** `logs`: what each attach replays, in turn (null: that attach fails); after them, a started session. */
+  function unattached(opts: { daemon?: boolean; logs?: (object[] | null)[] } = {}) {
+    const enqueued: string[] = [];
+    const written: string[] = [];
+    let replaying: boolean | null = null;
+    let ctrl!: ChatController;
+    const logs = [...(opts.logs ?? [])];
+    const transport: ChatTransport = {
+      send: (line) => void written.push(line),
+      attach: async () => {
+        const log = logs.length ? logs.shift()! : [{ type: "system", subtype: "init" }];
+        if (!log) throw new Error("the daemon went away");
+        return new TextEncoder().encode(log.map((l) => JSON.stringify(l)).join("\n") + "\n");
+      },
+      enqueue: async (_cid, text) => {
+        enqueued.push(text);
+        replaying = (ctrl as unknown as { isReplaying: boolean }).isReplaying;
+        return { qid: `q${enqueued.length}`, state: "queued", ahead: 0 };
+      },
+      writeTurn: async () => {},
+      queueOp: async () => {},
+    };
+    ctrl = new ChatController("s1", "/work", null, createClaudeAdapter, { transport, daemonQueue: () => opts.daemon ?? true });
+    return { ctrl, enqueued, written, replaying: () => replaying };
+  }
+
+  it("goes to the daemon's queue once the log is replayed, and only once", async () => {
+    const { ctrl, enqueued, replaying } = unattached();
+    ctrl.sendWhenAttached("fix the build");
+    await tick();
+    expect(enqueued).toEqual([]);
+    await ctrl.attach(1);
+    await tick();
+    expect(enqueued).toEqual(["fix the build"]);
+    expect(replaying()).toBe(false);
+    // A re-attach (the daemon connection came back, the pane remounted) replays the log: nothing is sent again.
+    await ctrl.attach(1);
+    await tick();
+    expect(enqueued).toEqual(["fix the build"]);
+  });
+
+  it("is sent at once when the view is already attached, and an empty prompt is no message", async () => {
+    const { ctrl, enqueued } = unattached();
+    await ctrl.attach(1);
+    ctrl.sendWhenAttached("   ");
+    ctrl.sendWhenAttached("go");
+    await tick();
+    expect(enqueued).toEqual(["go"]);
+  });
+
+  it("waits through an attach that failed, and goes with the next one", async () => {
+    const { ctrl, enqueued } = unattached({ logs: [null] });
+    ctrl.sendWhenAttached("after the retry");
+    await ctrl.attach(1);
+    await tick();
+    expect(enqueued).toEqual([]);
+    await ctrl.attach(1);
+    await tick();
+    expect(enqueued).toEqual(["after the retry"]);
+  });
+
+  it("without the daemon's queue (an older daemon) it is written to the agent once", async () => {
+    const { ctrl, enqueued, written } = unattached({ daemon: false });
+    ctrl.sendWhenAttached("old daemon");
+    await ctrl.attach(1);
+    await tick();
+    const prompts = () => written.filter((l) => l.includes('"type":"user"') && l.includes("old daemon"));
+    expect(enqueued).toEqual([]);
+    expect(prompts()).toHaveLength(1);
+    await ctrl.attach(1);
+    await tick();
+    expect(prompts()).toHaveLength(1);
+  });
+
+  it("shows as not sent when the agent stopped before the view attached", async () => {
+    const { ctrl, enqueued, written } = unattached({ logs: [[{ type: "kelpie_exit", code: 1 }]] });
+    ctrl.sendWhenAttached("too late");
+    await ctrl.attach(1);
+    await tick();
+    expect(enqueued).toEqual([]);
+    expect(written.filter((l) => l.includes("too late"))).toEqual([]);
+    expect(ctrl.state.items.some((i) => i.kind === "system" && i.text.includes("Not sent") && i.text.includes("too late"))).toBe(true);
+  });
+});

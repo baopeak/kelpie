@@ -299,6 +299,9 @@ export class ChatController {
    *  replay or a new request that reuses the id, and asks until its own answer comes. `own`: the person's answer here. */
   private resolved = new Map<string, { label: string; answered?: CardAnswer; fromLog?: boolean; own?: boolean }>();
   private started = false;
+  /** A first message given before the view attached (the New session dialog's prompt): sent once the first attach has
+   *  replayed the log, as if typed in the composer. It lives in this window only, so a reload never sends it a second time. */
+  private firstMessage: string | null = null;
   private flushing = false;
   private queuedCount = 0;
   /** When the log or transcript being replayed says its next line came (unix ms). */
@@ -674,6 +677,19 @@ export class ChatController {
       this.started = true;
       this.adapter.start();
     }
+    // Live from here on: the replay above never sends it.
+    const first = this.firstMessage;
+    this.firstMessage = null;
+    // An agent that stopped before it could read it: the person sees what did not go.
+    if (first && this.state.exited) this.unsentItem([{ text: first }], "");
+    else if (first) this.send(first, true);
+  }
+
+  /** Sends `text` as the conversation's first message once this view has attached (now, if it has). */
+  sendWhenAttached(text: string) {
+    if (this.observer || !text.trim()) return;
+    if (this.live) return this.send(text, true);
+    this.firstMessage = text;
   }
 
   detach() {
