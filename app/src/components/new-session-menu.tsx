@@ -94,14 +94,15 @@ export function NewSessionMenu() {
     }
     const target = chat ? undefined : await resolveRunOn(project, runOn(), kind());
     if (target === null) return;
+    const firstPrompt = isAgentKind(kind()) ? prompt().trim() || undefined : undefined;
     if (w === "grid") {
       // The same agent in every cell; the first prompt (if any) goes to each of them.
-      return void store.launchGrid(project.id, grid(), Array(cellCount(grid())).fill(kind()), { args: argv, account: chosenAccount(), target, prompt: isAgentKind(kind()) ? prompt().trim() || undefined : undefined });
+      return void store.launchGrid(project.id, grid(), Array(cellCount(grid())).fill(kind()), { args: argv, account: chosenAccount(), target, prompt: firstPrompt });
     }
     // "This pane" falls back to a new tab if the empty pane was closed meanwhile (and a new project has no such pane).
     place = w === "pane" ? { where: "tab" as const, into: projectId === project.id ? into ?? undefined : undefined } : { where: w, into: undefined };
-    if (chat) return void newChat(projectId, kind(), place.where, { account: chosenAccount(), into: place.into });
-    void store.newSession(projectId, kind(), { ...place, args: argv, account: chosenAccount(), target, name: name().trim() || undefined, prompt: isAgentKind(kind()) ? prompt().trim() || undefined : undefined });
+    if (chat) return void newChat(projectId, kind(), place.where, { account: chosenAccount(), into: place.into, prompt: firstPrompt });
+    void store.newSession(projectId, kind(), { ...place, args: argv, account: chosenAccount(), target, name: name().trim() || undefined, prompt: firstPrompt });
   };
 
   return (
@@ -131,7 +132,7 @@ export function NewSessionMenu() {
           <label>{kind() === "custom" ? t("Command") : kind() === "shell" ? t("Shell (empty = default)") : t("Extra arguments")}</label>
           <input ref={argsInput} class="text-input" value={args()} onInput={(e) => setArgs(e.currentTarget.value)} placeholder={kind() === "custom" ? "npm run dev" : kind() === "claude" ? "--model opus" : ""} />
         </div>
-        <Show when={isAgentKind(kind()) && ui() === "terminal"}>
+        <Show when={isAgentKind(kind())}>
           <div class="form-row">
             <label>{t("First prompt (optional)")}</label>
             <textarea class="text-input" rows={2} value={prompt()} placeholder={t("What should the agent do? (Ctrl+Enter to start)")} onInput={(e) => setPrompt(e.currentTarget.value)} />

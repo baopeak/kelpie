@@ -143,8 +143,8 @@ export function disposeController(sessionId: string) {
 }
 
 /** Starts a conversation directly in chat mode: a new one, or `resume` (an agent conversation
- *  id) in that conversation's own folder `cwd`. */
-export async function newChat(projectId: string, kind: SessionKind, where: "tab" | "right" | "down" = "tab", opts: { resume?: string; cwd?: string; account?: string; home?: string | null; into?: PaneTarget } = {}) {
+ *  id) in that conversation's own folder `cwd`. `prompt`: its first message, sent as the person's own once the view is attached. */
+export async function newChat(projectId: string, kind: SessionKind, where: "tab" | "right" | "down" = "tab", opts: { resume?: string; cwd?: string; account?: string; home?: string | null; into?: PaneTarget; prompt?: string } = {}) {
   const project = store.state.projects.find((p) => p.id === projectId);
   if (!project) return;
   try {
@@ -156,6 +156,7 @@ export async function newChat(projectId: string, kind: SessionKind, where: "tab"
       env: chatEnv(kind, opts),
     });
     store.setSessions(info.id, info);
+    if (opts.prompt) getController(info).sendWhenAttached(opts.prompt);
     store.placePane(projectId, { id: uid(), kind: "chat", sessionId: info.id }, where, opts.into);
     return info;
   } catch (e) {
