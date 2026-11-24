@@ -1429,7 +1429,7 @@ export class Link {
       const { code, reason, message, result, answered_by, at, busy } = m;
       p.resolve({ t: "error", code, reason, message, result, answered_by, at, busy });
     } else {
-      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers, turn: m.turn, pr: m.pr, expiry: m.expiry, command: m.command });
+      p.resolve({ t: "ack", entered: m.entered, result: m.result, qid: m.qid, state: m.state, ahead: m.ahead, vapid: m.vapid, prefs: m.prefs, lock: m.lock, resume: m.resume, tk: m.tk, title: m.title, host: m.host, panes: m.panes, sc: m.sc, kind: m.kind, w: m.w, h: m.h, encoder: m.encoder, t0: m.t0, targets: m.targets, paths: m.paths, relay: m.relay, via: m.via, ready: m.ready, projects: m.projects, agents: m.agents, why: m.why, id: m.id, dup: m.dup, sdp: m.sdp, nonce: m.nonce, ice_servers: m.ice_servers, turn: m.turn, pr: m.pr, expiry: m.expiry, command: m.command, repo: m.repo, number: m.number, head: m.head, method: m.method });
     }
     this.h.changed();
     return true;

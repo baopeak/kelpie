@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PHONE_API } from "../../src/lib/attention";
 import { canAct, deriveConn, type Reach } from "./conn-state";
 import { DIRECT_PROBE_MS, DIRECT_STABLE_MS, Link, linkCodec, PING_AFTER_MS, PROBE_MS, RELAY_STAGGER_MS, RETRY_WINDOW_MS, tokenHash, type Codec, type Env, type Hello, type LinkHandlers, type Outcome, type SocketLike } from "./link";
+import { challengeOutcome } from "./merge";
 import { FIRST_HEADER, Initiator, keypair, MODE_RECONNECT } from "./noise";
 import { readPairing, relayUrl, type Pairing } from "./pairing-store";
 import vectors from "../../../relay/test/vectors.json";
+
+// merge.ts words its refusals through i18n, whose catalogue is a Vite virtual module; the words are not what these tests check.
+vi.mock("./i18n", () => ({ t: (s: string) => s }));
 
 /** Plain JSON, no handshake: what the link does is tested apart from kelpie-link (noise.test.ts, and the codec test below). */
 const jsonCodec = (): Codec => ({
@@ -938,6 +942,21 @@ describe("Link requests: nothing is queued while offline", () => {
     r.last().say({ type: "new_options", req: asked.req, ready: true, projects: [{ id: "p1", name: "Shop" }], agents: [{ kind: "claude", label: "Claude Code", skips: false }] });
     await Promise.resolve();
     expect(out).toMatchObject({ t: "ack", ready: true, projects: [{ id: "p1", name: "Shop" }], agents: [{ kind: "claude", label: "Claude Code", skips: false }] });
+  });
+
+  it("a merge's challenge carries every field the sheet checks: the pull request it binds, its head and method, and what to sign", async () => {
+    r.connect();
+    let out: Outcome | null = null;
+    void r.link.prChallenge("p1", "squash").then((o) => (out = o));
+    const asked = r.last().sent.at(-1)!;
+    expect(asked).toMatchObject({ type: "pr_challenge", project: "p1", method: "squash" });
+    const head = "a".repeat(40);
+    const command = `merge github.com o/n #12 ${head} squash`;
+    r.last().say({ type: "ack", req: asked.req, result: "ok", nonce: "n1", expiry: 99, command, repo: "o/n", number: 12, head, method: "squash", title: "Fix it" });
+    await Promise.resolve();
+    expect(out).toMatchObject({ t: "ack", nonce: "n1", expiry: 99, command, repo: "o/n", number: 12, head, method: "squash", title: "Fix it" });
+    const asked2 = { project: "p1", repo: "o/n", number: 12, head, method: "squash" as const };
+    expect(challengeOutcome(out!, asked2)).toMatchObject({ ok: true, nonce: "n1", command, request: asked2, title: "Fix it" });
   });
 
   it("a chat message is not sent again into another run of the daemon, or after a second loss", async () => {
