@@ -187,7 +187,7 @@ mod tests {
         assert!(t.schedule("s", 1, None, 1, 4_000, "meter", 5_000).is_err(), "in the past");
         assert!(t.schedule("s", 1, None, 1, 5_000, "meter", 5_000).is_err(), "now is not ahead");
         assert!(t.schedule("s", 1, None, 1, 10_000, "guess", 5_000).is_err(), "unknown source");
-        assert!(t.schedule("s", 1, None, 1, 10_000, "message", 5_000).is_ok(), "read from the limit message");
+        assert!(t.schedule("m", 1, None, 1, 10_000, "message", 5_000).is_ok(), "read from the limit message");
         assert!(t.schedule("s", 1, None, 1, 5_000 + MAX_AHEAD_MS + 1, "confirmed", 5_000).is_err());
         assert!(t.schedule("s", 1, None, 1, 5_000 + MAX_AHEAD_MS, "confirmed", 5_000).is_ok());
     }
