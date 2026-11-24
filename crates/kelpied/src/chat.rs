@@ -829,6 +829,7 @@ impl ChatSession {
         let now = Instant::now();
         let mut derived = classify(&line);
         let title = conversation_title(&line);
+        let run_model = claude_run_model(&line);
         let ask = ask_of(&line);
         let echo = steers::echo_text(&line);
         let run_start = steers::starts_run(&line);
@@ -859,6 +860,13 @@ impl ChatSession {
         self.note_agent_line(&mut g, &line, derived);
         if title.is_some() {
             g.title = title;
+        }
+        // The next broadcast (`tick` compares the whole info) carries it to the sidebar and the phones.
+        if let Some(model) = run_model.filter(|_| g.dialect == Dialect::Claude) {
+            let mut spec = self.spec.lock();
+            if spec.model.as_deref() != Some(model.as_str()) {
+                spec.model = Some(model);
+            }
         }
         let asked = ask.as_ref().map(|a| a.key.clone());
         if let Some(Ask { key, id, method, once, allows, request, input }) = ask {
@@ -2073,6 +2081,21 @@ fn conversation_title(line: &str) -> Option<String> {
     (!title.is_empty()).then(|| title.chars().take(120).collect())
 }
 
+/// The model a Claude run says it uses (`system/init`, sent at the start of every run). A chat has no
+/// `SessionStart` hook to say it, so without this the session's model stays unknown.
+fn claude_run_model(line: &str) -> Option<String> {
+    if !line.contains("\"init\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("system") || v.get("subtype").and_then(Value::as_str) != Some("init") {
+        return None;
+    }
+    let model = v.get("model").and_then(Value::as_str)?.trim();
+    // Claude names a turn it made up itself `<synthetic>`: that is no model.
+    (!model.is_empty() && model != "<synthetic>").then(|| model.chars().take(120).collect())
+}
+
 /// Cheap, dialect-aware status hint from one stdout line.
 fn classify(line: &str) -> Option<Status> {
     // Avoid a full parse for the bulk of streaming deltas.
@@ -2179,6 +2202,26 @@ mod tests {
         assert_eq!(conversation_title(line).as_deref(), Some("Fix the login bug"));
         assert_eq!(conversation_title(r#"{"method":"session/update","params":{"update":{"sessionUpdate":"session_info_update","title":""}}}"#), None);
         assert_eq!(conversation_title(r#"{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"session_info_update"}}}}"#), None);
+    }
+
+    #[test]
+    fn a_claude_runs_init_names_the_sessions_model() {
+        let init = |model: Value| json!({"type": "system", "subtype": "init", "session_id": "s", "model": model}).to_string();
+        assert_eq!(claude_run_model(&init(json!(" claude-opus-5-5 "))).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(claude_run_model(&init(json!("<synthetic>"))), None);
+        assert_eq!(claude_run_model(&init(json!(""))), None);
+        assert_eq!(claude_run_model(r#"{"type":"system","subtype":"status","model":"x","note":"init"}"#), None);
+        assert_eq!(claude_run_model(r#"{"type":"assistant","message":{"content":[{"text":"\"init\""}]},"model":"x"}"#), None);
+
+        let (c, _stdin) = chat();
+        assert_eq!(c.info().spec.model, None);
+        c.ingest_line(init(json!("claude-opus-5-5")));
+        assert_eq!(c.info().spec.model.as_deref(), Some("claude-opus-5-5"));
+        // A model switched during the conversation shows with the next run.
+        c.ingest_line(init(json!("claude-fable-5-2")));
+        assert_eq!(c.info().spec.model.as_deref(), Some("claude-fable-5-2"));
+        c.ingest_line(init(json!("<synthetic>")));
+        assert_eq!(c.info().spec.model.as_deref(), Some("claude-fable-5-2"));
     }
 
     #[test]

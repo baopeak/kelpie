@@ -15,6 +15,7 @@ import { ContextRing } from "./context-ring";
 import { BrandMark, BrandWordmark, KipCompanion, kipShown } from "./brand";
 import { findPane } from "../lib/layout";
 import { sessionAccount } from "../lib/accounts";
+import { isAgentKind } from "../lib/agents";
 import { hostLabel } from "../lib/remote";
 import { canGoBack, canGoForward, navBack, navForward } from "../lib/nav-history";
 import { addExistingWorktrees, checkRemoval, removeWorktree } from "../lib/worktrees";
@@ -340,6 +341,7 @@ function SessionNode(props: { s: SessionInfo; nested?: boolean }) {
 function SessionRow(props: { s: SessionInfo; kids: number }) {
   const state = () => reportedState(props.s);
   const hasKids = () => props.kids > 0;
+  const modelLine = () => [props.s.model && shortModel(props.s.model), sessionAccount(props.s)?.label].filter(Boolean).join(" · ");
   const selected = () => store.focusedSession() === props.s.id;
   /** Folded, with the session on screen somewhere below it: the row stands in for the hidden one. */
   const holdsSelected = () => {
@@ -371,8 +373,9 @@ function SessionRow(props: { s: SessionInfo; kids: number }) {
         <Show when={renaming() === `s:${props.s.id}`} fallback={<span class="name">{sessionLabel(props.s)}</span>}>
           <RenameInput value={props.s.name ?? sessionLabel(props.s)} onDone={(v) => v !== null && void store.renameSession(props.s.id, v.trim() || null)} />
         </Show>
-        <Show when={props.s.model || sessionAccount(props.s)}>
-          <span class="model">{[props.s.model && shortModel(props.s.model), sessionAccount(props.s)?.label].filter(Boolean).join(" · ")}</span>
+        {/* An agent keeps the line while its model is not known yet, so its row is as tall as its neighbours' and does not grow later. */}
+        <Show when={isAgentKind(props.s.kind) || modelLine()}>
+          <span class="model">{modelLine() || " "}</span>
         </Show>
       </span>
       <Show when={hasKids()}><SubBadge id={props.s.id} /></Show>
