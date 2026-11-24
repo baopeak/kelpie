@@ -921,7 +921,9 @@ fn a_blip_where_nothing_was_there_reaches_the_receiver_after_it() {
     assert_eq!(r.notifier.describe(false)["status"]["ntfy"]["error"], "connection failed");
     assert_eq!(r.notifier.describe(false)["dropped"], 0, "still to go");
     let service = PushService::start_at(addr);
-    let got = service.wait_for(1, Duration::from_secs(16));
+    // The retries back off with full jitter, up to a minute once a few have failed (outbox.rs), and four seconds of refusals can be that many:
+    // the wait allows the longest backoff and ends as soon as the message arrives.
+    let got = service.wait_for(1, Duration::from_secs(65));
     assert_eq!(got.len(), 1);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(service.count(), 1, "once");
