@@ -186,6 +186,7 @@ impl Daemon {
         let window = *self.window.policy.read();
         json!({
             "agents_control_others": self.agents_control_others(),
+            "auto_continue": self.auto_continue.load(std::sync::atomic::Ordering::Relaxed),
             "sub_sessions": sub.mode.as_str(),
             "sub_max": sub.max,
             // What 0 means on this computer, for the settings page to show.
@@ -201,7 +202,7 @@ impl Daemon {
     pub(super) fn persist_policy(&self) {
         // One writer at a time, each taking its snapshot inside the lock: the last write is the newest.
         let _writing = self.subs.policy_file.lock();
-        save_policy(&self.data_dir, &Policy { agents_control_others: self.agents_control_others(), sub: *self.subs.policy.read(), browser: self.browser.policy.read().clone(), window: *self.window.policy.read() });
+        save_policy(&self.data_dir, &Policy { agents_control_others: self.agents_control_others(), auto_continue: self.auto_continue.load(std::sync::atomic::Ordering::Relaxed), sub: *self.subs.policy.read(), browser: self.browser.policy.read().clone(), window: *self.window.policy.read() });
     }
 
     /// The sub-session policy `daemon.set_policy` asks for, checked as a whole; `None` when it names neither key.

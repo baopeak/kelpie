@@ -39,3 +39,46 @@ describe("loadScheduled", () => {
     expect(inbox[0].sessionId).toBe("s1");
   });
 });
+
+const { sessionState } = await import("./session-state");
+const { isLimited } = await import("./limits");
+const { continueAt, continueTime } = await import("./continue-timers");
+
+describe("a session waiting on its timer", () => {
+  const limited = (id: string, chat: boolean) =>
+    ({ id, alive: true, status: "idle", failed: true, limited: true, unread: false, chat }) as unknown as import("./types").SessionInfo;
+
+  it("is no failure while a timer will continue it, and is one again once the timer goes", async () => {
+    for (const chat of [false, true]) {
+      const s = limited(chat ? "c1" : "t1", chat);
+      expect(isLimited(s), "terminals and chats get the banner").toBe(true);
+      reply.current = { timers: [{ session: s.id, fire_at: 42 }], lost: [] };
+      await loadScheduled();
+      expect(continueAt(s)).toBe(42);
+      expect(sessionState(s)).toBe("idle");
+      reply.current = { timers: [], lost: [] };
+      await loadScheduled();
+      expect(continueAt(s)).toBeUndefined();
+      expect(sessionState(s)).toBe("error");
+    }
+  });
+
+  it("only a session the limit stopped and that still runs has a time to show", async () => {
+    reply.current = { timers: [{ session: "x", fire_at: 7 }], lost: [] };
+    await loadScheduled();
+    expect(continueAt({ ...limited("x", false), limited: false })).toBeUndefined();
+    expect(continueAt({ ...limited("x", false), alive: false })).toBeUndefined();
+    expect(sessionState({ ...limited("x", false), limited: false })).toBe("error");
+  });
+});
+
+describe("continueTime", () => {
+  it("is the time today, and names the day when it is another day (a weekly limit)", () => {
+    const now = new Date(2026, 10, 24, 10, 0).getTime();
+    const later = new Date(2026, 10, 24, 15, 20).getTime();
+    const friday = new Date(2026, 10, 27, 12, 0).getTime();
+    expect(continueTime(later, now)).not.toMatch(/[A-Za-z]{3}/);
+    expect(continueTime(later, now)).toMatch(/15:20|3:20/);
+    expect(continueTime(friday, now)).toMatch(/Fri/);
+  });
+});

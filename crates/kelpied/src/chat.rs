@@ -132,6 +132,68 @@ struct Inner {
     steers: steers::Steers,
     /// Claude: a stop was written during the run going on, so its `error_during_execution` is that stop and no failure.
     stop_asked: bool,
+    /// Which run of the process this is: it grows with every spawn (a "continue" timer is for one run).
+    run: u64,
+    /// Claude: the conversation its lines last named (`session_id` of its `init` and of a limit message).
+    claude_session: Option<String>,
+    /// Claude: the running turn printed the usage-limit message; the reset its words name, if any. Taken when the turn ends.
+    limit_seen: Option<Option<u64>>,
+    /// Claude: when the limit that refuses its requests lifts (`rate_limit_event`, wall-clock ms), while one does.
+    limit_rejected_until: Option<u64>,
+    /// A turn just ended on the usage limit: the daemon takes it once, to set the "continue" timer.
+    limit_new: Option<ChatLimit>,
+}
+
+/// A chat turn that ended on the subscription's usage limit, and what a "continue" for it must still find.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatLimit {
+    pub run: u64,
+    pub conversation: Option<String>,
+    /// `turn_count` when the limit stopped it: any message sent since makes the timer void.
+    pub turn: u64,
+    /// When the limit lifts (wall-clock ms), when the agent said.
+    pub reset_at: Option<u64>,
+}
+
+/// What a Claude line says about the usage limit.
+#[derive(Debug, PartialEq)]
+enum LimitLine {
+    /// The turn stopped on it (an `assistant` line with `error: rate_limit`): its conversation and the reset its text names.
+    Stopped { session: Option<String>, reset_at: Option<u64> },
+    /// A `rate_limit_event`: the limit refuses requests until then (ms), or it does not (`None`).
+    Event(Option<u64>),
+}
+
+/// Reads a Claude stream-json line for the usage limit. Only lines that mention it are parsed.
+fn limit_line(line: &str) -> Option<LimitLine> {
+    if !line.contains("rate_limit") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    match v.get("type").and_then(Value::as_str)? {
+        "assistant" if v.get("error").and_then(Value::as_str) == Some("rate_limit") => {
+            let blocks = v.pointer("/message/content").and_then(Value::as_array);
+            let text: Vec<&str> = blocks.into_iter().flatten().filter_map(|b| b.get("text").and_then(Value::as_str)).collect();
+            let session = v.get("session_id").and_then(Value::as_str).map(str::to_string);
+            Some(LimitLine::Stopped { session, reset_at: crate::limit_reset::reset_at_ms(&text.join("\n")) })
+        }
+        "rate_limit_event" => {
+            let info = v.get("rate_limit_info")?;
+            let rejected = info.get("status").and_then(Value::as_str) == Some("rejected");
+            Some(LimitLine::Event(info.get("resetsAt").and_then(Value::as_u64).filter(|_| rejected).map(|s| s.saturating_mul(1000))))
+        }
+        _ => None,
+    }
+}
+
+/// The conversation a Claude `system/init` line names.
+fn init_session(line: &str) -> Option<String> {
+    if !line.contains("\"init\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    let init = v.get("type").and_then(Value::as_str) == Some("system") && v.get("subtype").and_then(Value::as_str) == Some("init");
+    init.then(|| v.get("session_id").and_then(Value::as_str).map(str::to_string)).flatten()
 }
 
 /// The ACP calls that open a conversation and carry the agent's `mcpServers`.
@@ -694,6 +756,11 @@ impl ChatSession {
                 turn_count: 0,
                 steers: steers::Steers::default(),
                 stop_asked: false,
+                run: 0,
+                claude_session: None,
+                limit_seen: None,
+                limit_rejected_until: None,
+                limit_new: None,
             }),
         })
     }
@@ -767,6 +834,11 @@ impl ChatSession {
             g.q.flight = None;
             g.steers.clear();
             g.stop_asked = false;
+            g.run += 1;
+            g.claude_session = None;
+            g.limit_seen = None;
+            g.limit_rejected_until = None;
+            g.limit_new = None;
         }
         tokio::spawn(async move {
             while let Some(bytes) = in_rx.recv().await {
@@ -834,6 +906,23 @@ impl ChatSession {
         let echo = steers::echo_text(&line);
         let run_start = steers::starts_run(&line);
         let mut g = self.inner.lock();
+        if g.dialect == Dialect::Claude {
+            if let Some(id) = init_session(&line) {
+                g.claude_session = Some(id);
+            }
+            match limit_line(&line) {
+                Some(LimitLine::Stopped { session, reset_at }) => {
+                    if session.is_some() {
+                        g.claude_session = session;
+                    }
+                    // Another computer's agent prints that computer's clock, which this one cannot read.
+                    let remote = self.spec.lock().remote.is_some();
+                    g.limit_seen = Some(reset_at.filter(|_| !remote));
+                }
+                Some(LimitLine::Event(until)) => g.limit_rejected_until = until,
+                None => {}
+            }
+        }
         let before = Self::shape(&g);
         // A run the person stopped ends in `error_during_execution`: that is the stop, not a failure.
         let mut failed_turn = derived == Some(Status::Idle) && turn_failed(&line) && !(g.stop_asked && stop_result(&line));
@@ -881,10 +970,78 @@ impl ChatSession {
         g.last_activity = crate::session::now_millis();
         if let Some(status) = derived {
             g.activity.on_hook(status, failed_turn, now);
+            if status == Status::Idle {
+                Self::note_limit(&mut g, failed_turn);
+            }
         }
         // The line may have ended the turn the next message waits for.
         let dropped = self.pump(&mut g, now);
         self.announce_if(&mut g, before, &dropped);
+    }
+
+    /// A turn ended: if it failed after the usage-limit message, the chat is stopped by the limit, and the daemon is told once.
+    fn note_limit(g: &mut Inner, failed_turn: bool) {
+        let Some(said) = g.limit_seen.take() else { return };
+        if !failed_turn {
+            return;
+        }
+        // The exact time of the event that refused the request (it may come before or after the words), while it is still
+        // ahead; else what the words say.
+        let now = crate::session::now_millis();
+        let reset_at = g.limit_rejected_until.filter(|t| *t > now).or(said);
+        g.activity.on_limit();
+        if g.activity.limited {
+            g.limit_new = Some(ChatLimit { run: g.run, conversation: g.claude_session.clone(), turn: g.turn_count, reset_at });
+        }
+    }
+
+    /// A message went to the agent: whatever limit stopped the last turn is the person's to handle now.
+    fn limit_over(g: &mut Inner) {
+        g.activity.limited = false;
+        g.limit_seen = None;
+        g.limit_new = None;
+    }
+
+    /// What a "continue" timer set now must still find, while the usage limit stops the chat.
+    pub fn limited_now(&self) -> Option<ChatLimit> {
+        let g = self.inner.lock();
+        let limited = g.alive && g.activity.failed && g.activity.limited;
+        limited.then(|| ChatLimit { run: g.run, conversation: g.claude_session.clone(), turn: g.turn_count, reset_at: None })
+    }
+
+    /// The turn that just ended on the usage limit, once (see [`ChatLimit`]).
+    pub fn take_limit(&self) -> Option<ChatLimit> {
+        self.inner.lock().limit_new.take()
+    }
+
+    /// Sends `text` as a message for a timer that waits out the usage limit: only into the same run of the process and the same
+    /// conversation that the limit stopped, while that is still so and nothing was sent or queued since. It goes through the
+    /// queue like any message. Checked and queued under one lock.
+    pub fn continue_if_limited(&self, limit: &ChatLimit, text: &str) -> Result<(), crate::session::Refused> {
+        use crate::session::Refused as R;
+        let now = Instant::now();
+        let mut g = self.inner.lock();
+        if !g.alive || g.stdin.is_none() {
+            return Err(R::Exited);
+        }
+        if g.run != limit.run {
+            return Err(R::Restarted);
+        }
+        if g.claude_session != limit.conversation {
+            return Err(R::Conversation);
+        }
+        if g.turn_count != limit.turn || !g.q.items.is_empty() || g.q.paused || g.q.held {
+            return Err(R::InputSince);
+        }
+        if !(g.activity.failed && g.activity.limited) || g.q.flight.is_some() || !Self::idle(&g, now) {
+            return Err(R::NotLimited);
+        }
+        let before = Self::shape(&g);
+        let new = NewEntry { cid: format!("kelpie-continue-{}-{}", limit.run, limit.turn), by: By::kelpie(), text: text.into(), images: Vec::new(), origin: Origin::Kelpie };
+        g.q.push(new, now, crate::session::now_millis()).map_err(|_| R::InputSince)?;
+        let dropped = self.pump(&mut g, now);
+        self.announce_if(&mut g, before, &dropped);
+        Ok(())
     }
 
     /// Adds a line to the log and sends it to everyone attached.
@@ -1054,6 +1211,7 @@ impl ChatSession {
             match turns::written(dialect, &v) {
                 Written::Turn { req } => {
                     g.turn_count += 1;
+                    Self::limit_over(g);
                     // Somebody else's message (the queue's own are committed elsewhere): the user is talking to it again.
                     g.q.mail_hold = false;
                     if g.q.flight.is_none() {
@@ -1211,6 +1369,7 @@ impl ChatSession {
         // line and whether or not the agent echoes it. A command the window runs itself is not a message.
         if turn || turn_line {
             g.turn_count += 1;
+            Self::limit_over(g);
             let sent = json!({
                 "type": "kelpie_sent", "qid": entry.qid, "cid": entry.cid, "by": kind(&entry.by), "name": entry.by.name,
                 "text": queue::clip(&entry.text, SENT_TEXT_MAX), "images": entry.images,
@@ -1961,7 +2120,7 @@ impl ChatSession {
             unread: g.unread,
             alive: g.alive,
             exit_code: g.exit_code,
-            limited: false,
+            limited: g.alive && g.exit_code.is_none() && g.activity.failed && g.activity.limited,
             failed: match g.exit_code {
                 Some(code) => !g.stopped && exit_failed(code),
                 None => g.activity.failed,
@@ -2022,6 +2181,7 @@ impl ChatSession {
             g.steers.clear();
             g.q.flight = None;
             g.activity.on_hook(Status::Idle, failed, now);
+            Self::note_limit(&mut g, failed);
         }
         // Offers that timed out, and a queue that can go on.
         let dropped = self.pump(&mut g, now);
@@ -4437,5 +4597,63 @@ mod tests {
         let lines = sent(&mut rx);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["params"]["mcpServers"], json!([kelpie_server()]));
+    }
+
+    #[test]
+    fn the_usage_limit_is_read_from_claude_s_own_lines() {
+        let stopped = json!({"type": "assistant", "error": "rate_limit", "session_id": "conv", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "You've hit your 5-hour limit · resets 3:20am (Asia/Ho_Chi_Minh)"}]}});
+        assert!(matches!(limit_line(&stopped.to_string()), Some(LimitLine::Stopped { session: Some(s), reset_at: Some(_) }) if s == "conv"));
+        let no_time = json!({"type": "assistant", "error": "rate_limit", "message": {"content": [{"type": "text", "text": "You've hit your limit"}]}});
+        assert_eq!(limit_line(&no_time.to_string()), Some(LimitLine::Stopped { session: None, reset_at: None }));
+        let event = |status: &str| json!({"type": "rate_limit_event", "rate_limit_info": {"status": status, "resetsAt": 1_795_669_200u64}}).to_string();
+        assert_eq!(limit_line(&event("rejected")), Some(LimitLine::Event(Some(1_795_669_200_000))));
+        assert_eq!(limit_line(&event("allowed")), Some(LimitLine::Event(None)), "a limit that lets requests through lifts nothing");
+        // Other errors, and text that only talks about limits, are not the usage limit.
+        assert_eq!(limit_line(&json!({"type": "assistant", "error": "server_error", "message": {"content": "rate_limit"}}).to_string()), None);
+        assert_eq!(limit_line(&json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "about rate_limit"}]}}).to_string()), None);
+        assert_eq!(init_session(&json!({"type": "system", "subtype": "init", "session_id": "conv"}).to_string()).as_deref(), Some("conv"));
+    }
+
+    #[test]
+    fn only_a_turn_that_fails_on_the_limit_stops_the_chat_and_the_next_message_ends_that() {
+        let stopped = json!({"type": "assistant", "error": "rate_limit", "message": {"content": [{"type": "text", "text": "You've hit your limit"}]}}).to_string();
+        // A failure that is not the limit.
+        let (c, _stdin) = live();
+        c.ingest_for_test(json!({"type": "assistant", "message": {"content": []}}).to_string());
+        c.ingest_for_test(json!({"type": "result", "is_error": true}).to_string());
+        assert!(c.info().failed && !c.info().limited && c.take_limit().is_none());
+        // The limit message in a turn that did not fail (Claude went on) is no stop.
+        let (c, _stdin) = live();
+        c.ingest_for_test(stopped.clone());
+        c.ingest_for_test(json!({"type": "result", "is_error": false}).to_string());
+        assert!(!c.info().limited && c.take_limit().is_none());
+        // The limit: the chat is stopped by it, the daemon hears of it once, and a message from the person ends it.
+        let (c, _stdin) = live();
+        c.ingest_for_test(stopped);
+        c.ingest_for_test(json!({"type": "result", "is_error": true}).to_string());
+        assert!(c.info().limited && c.info().failed);
+        assert_eq!(c.take_limit(), Some(ChatLimit { run: 0, conversation: None, turn: 0, reset_at: None }));
+        assert!(c.take_limit().is_none(), "once");
+        c.enqueue(from_desktop(1, "m1", "go on", false)).unwrap();
+        assert!(!c.info().limited, "the person sent something");
+    }
+
+    #[test]
+    fn the_reset_is_the_refusing_event_s_while_it_is_ahead_whatever_order_the_lines_come_in() {
+        let stopped = json!({"type": "assistant", "error": "rate_limit", "message": {"content": [{"type": "text", "text": "You've hit your limit"}]}}).to_string();
+        let event = |at_ms: u64| json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": at_ms / 1000}}).to_string();
+        let ahead = (crate::session::now_millis() + 3_600_000) / 1000 * 1000;
+        // The event after the words.
+        let (c, _stdin) = live();
+        c.ingest_for_test(stopped.clone());
+        c.ingest_for_test(event(ahead));
+        c.ingest_for_test(json!({"type": "result", "is_error": true}).to_string());
+        assert_eq!(c.take_limit().and_then(|l| l.reset_at), Some(ahead));
+        // An event from long ago that nothing cleared is not this stop's time.
+        let (c, _stdin) = live();
+        c.ingest_for_test(event(crate::session::now_millis() - 3_600_000));
+        c.ingest_for_test(stopped);
+        c.ingest_for_test(json!({"type": "result", "is_error": true}).to_string());
+        assert_eq!(c.take_limit().map(|l| l.reset_at), Some(None));
     }
 }

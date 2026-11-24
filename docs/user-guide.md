@@ -644,12 +644,17 @@ is kept there until it is sent, and a phone's entries hold no text.
 
 #### When an agent hits the usage limit
 
-A Claude Code session stopped by its subscription's usage limit shows a strip above its pane:
-**Continue at reset** (the time comes from the usage meter; when the meter cannot say, type the time
-and confirm it), **Switch account…** and **Hand off to…**. The daemon keeps the timer, so it works with
+A Claude Code session, in a terminal or a chat, stopped by its subscription's usage limit continues by
+itself once the limit lifts: Kelpie reads the reset time from Claude's message ("resets 3:20am"), and the
+sidebar row shows **continues 03:20** instead of an error. The strip above the pane says when and has
+**Cancel**. When the message names no time, the usage meter's is used. To decide yourself, turn off
+Settings → Agents → **Continue after a usage limit**: the strip then offers **Continue at reset** (the
+time comes from the usage meter; when the meter cannot say, type the time and confirm it). Either way it
+also has **Switch account…** and **Hand off to…**. The daemon keeps the timer, so it works with
 the window closed. When the time comes it types `continue` only if the session is still stopped by
 that limit, in the same conversation and the same run, and nothing was typed since its last prompt was sent (a half-written message would otherwise be submitted); otherwise it
-cancels and leaves a note in the inbox saying why. Other agents do not report their limits, so they
+cancels and leaves a note in the inbox saying why. In a chat, `continue` is sent as a message through the
+chat's queue, and only if nothing was sent or queued since the turn the limit stopped. Other agents do not report their limits, so they
 have no strip.
 
 ### Source control and review

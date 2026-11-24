@@ -3,19 +3,19 @@
 // fires with the window closed; it types only into the same run of the same conversation, and
 // only if nobody typed since (see crates/kelpied/src/scheduled_input.rs).
 import { createEffect } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+import { reconcile } from "solid-js/store";
 import { store, sessionLabel } from "./store";
 import { daemon, usageFetch } from "./ipc";
 import { sessionHome } from "./accounts";
 import { NOTIFY_API, describeCancelled } from "./notify-events";
 import { errorText, t } from "./i18n";
 import type { ProviderUsage, SessionInfo } from "./types";
+import { setScheduled } from "./continue-timers";
 
-/** Fire time (wall-clock ms) of each session's "continue" timer, by session id. */
-export const [scheduled, setScheduled] = createStore<Record<string, number>>({});
+export { scheduled, continueAt, continueTime } from "./continue-timers";
 
-/** A session the banner is for: a terminal agent the daemon says the usage limit stopped. */
-export const isLimited = (s: SessionInfo | undefined): s is SessionInfo => !!s && !!s.limited && s.alive && !s.chat;
+/** A session the banner is for: an agent (terminal or chat) the daemon says the usage limit stopped. */
+export const isLimited = (s: SessionInfo | undefined): s is SessionInfo => !!s && !!s.limited && s.alive;
 
 /** The usage windows of the account this session runs on. */
 export async function usageFor(s: SessionInfo): Promise<ProviderUsage | null> {
@@ -25,11 +25,12 @@ export async function usageFor(s: SessionInfo): Promise<ProviderUsage | null> {
   return report[s.kind];
 }
 
-export async function scheduleContinue(s: SessionInfo, at: number, source: "meter" | "confirmed") {
+/** `meter-auto`: the banner fills in the meter's time by itself; the daemon may refuse it (see limit-banner.tsx), quietly. */
+export async function scheduleContinue(s: SessionInfo, at: number, source: "meter" | "confirmed" | "meter-auto") {
   try {
     await daemon("session.schedule_continue", { handle: s.handle, at, source });
   } catch (e) {
-    store.notify(errorText(e));
+    if (source !== "meter-auto") store.notify(errorText(e));
   }
 }
 
@@ -63,7 +64,8 @@ function onScheduled(p: ScheduledEvent) {
   setScheduled(p.session, p.at ?? undefined!);
   if (p.result === "sent") {
     const s = store.sessions[p.session];
-    store.notify(t("Typed “continue” in {name}", { name: s ? sessionLabel(s) : "" }));
+    const name = s ? sessionLabel(s) : "";
+    store.notify(s?.chat ? t("Sent “continue” to {name}", { name }) : t("Typed “continue” in {name}", { name }));
   } else if (p.result === "cancelled") {
     noteCancelled(p.session, p.reason ?? "");
   }

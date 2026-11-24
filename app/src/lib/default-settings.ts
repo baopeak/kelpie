@@ -39,6 +39,7 @@ export const defaultSettings: Settings = {
   phoneGroups: {},
   checkpoints: false,
   agentsScripting: true,
+  autoContinue: true,
   notificationSound: false,
   updateChecks: true,
   terminalTheme: "default",

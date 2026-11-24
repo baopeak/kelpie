@@ -32,6 +32,7 @@ mod client;
 mod daemon;
 mod echo_bench;
 mod files;
+mod limit_reset;
 mod load;
 mod mcp;
 mod meta;

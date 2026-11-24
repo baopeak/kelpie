@@ -1916,7 +1916,7 @@ function createAppStore() {
     if (useDaemonNotes()) void loadNotes().then(moveNotesToDaemon);
     void ipc.daemon("daemon.set_awake", { mode: state.settings.keepAwake ?? "off" }).catch(() => {});
     void ipc.daemon("daemon.set_priority", { enabled: state.settings.prioritizeVisible ?? true }).catch(() => {});
-    void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true }).catch(() => {});
+    void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true, auto_continue: state.settings.autoContinue ?? true }).catch(() => {});
     void loadSubState();
     void loadOwed();
     void loadPhoneStarts(phoneStartsSeen);

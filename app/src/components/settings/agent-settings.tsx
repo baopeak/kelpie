@@ -339,6 +339,9 @@ export function AgentSettings() {
       <SettingRow id="turn-checkpoints">
         <Toggle on={s().checkpoints ?? false} onChange={(on) => store.setSettings({ checkpoints: on })} />
       </SettingRow>
+      <SettingRow id="auto-continue">
+        <Toggle on={s().autoContinue ?? true} onChange={(on) => store.setSettings({ autoContinue: on })} />
+      </SettingRow>
       <SettingRow id="agents-scripting">
         <Toggle on={s().agentsScripting ?? true} onChange={(on) => store.setSettings({ agentsScripting: on })} />
       </SettingRow>

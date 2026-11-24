@@ -1,6 +1,7 @@
 // What a session shows at a glance, and whether it needs the user. Pure, so the sidebar, the status bar, the attention list, the
 // palette and the board all decide it the same way.
 import { stateWithReport } from "./sub-sessions";
+import { continueAt } from "./continue-timers";
 import type { SessionInfo } from "./types";
 
 /** Each state has its own shape in the sidebar, so colour is never the only cue. */
@@ -10,7 +11,8 @@ export function sessionState(s: SessionInfo): SessionState {
   if (!s.alive) return s.failed ? "error" : "exited";
   if (s.status === "waiting") return "waiting";
   if (s.status === "working") return "working";
-  if (s.failed) return "error";
+  // Stopped by the usage limit with a timer to continue it: it waits, and needs nobody.
+  if (s.failed && !continueAt(s)) return "error";
   return s.unread ? "done" : "idle";
 }
 

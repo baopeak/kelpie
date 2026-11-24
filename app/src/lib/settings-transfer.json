@@ -3,7 +3,7 @@
     "fontFamily", "fontSize", "lineHeight", "scrollback", "cursorBlink", "cursorStyle", "webgl", "shellArgs", "rightPanelWidth", "sidebarWidth",
     "sidebarCollapsed", "notifications", "notifyFinished", "shortcutHints", "projectFilter", "projectSort", "usageMeters", "memoryMeter", "costCap",
     "costCapEsc", "theme", "density", "uiScale", "tips", "tipsSeen", "agentPermissions", "hiddenAgents", "hibernate",
-    "hibernateMinutes", "keepAwake", "prioritizeVisible", "checkpoints", "agentsScripting", "notificationSound", "updateChecks",
+    "hibernateMinutes", "keepAwake", "prioritizeVisible", "checkpoints", "agentsScripting", "autoContinue", "notificationSound", "updateChecks",
     "terminalTheme", "customThemes", "wordWrap", "aiAgent", "autoWorktree", "floatingTerminal", "mascot", "mascotMotion", "resumeSessions", "daemonOnClose", "askBeforeStop",
     "integrations", "localhostInBrowser", "agentWebTabs", "voice", "language", "screenStopHotkey", "screenCrispText"
   ],

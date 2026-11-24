@@ -36,6 +36,8 @@ mod pr_rpc;
 mod process;
 mod sub_rpc;
 mod window_rpc;
+#[cfg(test)]
+mod auto_continue_tests;
 
 pub(crate) use sub_rpc::{existing_folder, page_url, MAX_PAGE_URL};
 
@@ -225,6 +227,9 @@ pub struct Daemon {
     /// Programs in a session may script other sessions (`daemon.set_policy`, saved in
     /// `policy.json` so it holds while the app is closed).
     agents_control_others: AtomicBool,
+    /// A session the usage limit stops gets its "continue" timer by itself, from the reset its limit message names
+    /// (`daemon.set_policy` `auto_continue`, saved in `policy.json` so it holds while the app is closed; on unless turned off).
+    auto_continue: AtomicBool,
     /// Per-turn snapshots of the sessions' working folders (see `checkpoints.rs`).
     checkpoints: Arc<Checkpoints>,
     /// Sessions of automations that deliver to review: session id -> folder, until their turn ends.
@@ -393,6 +398,7 @@ impl Daemon {
                 awake_mode: Mutex::new(awake::Mode::Off),
                 prioritize: AtomicBool::new(true),
                 agents_control_others: AtomicBool::new(policy.agents_control_others),
+                auto_continue: AtomicBool::new(policy.auto_continue),
                 checkpoints: Arc::new(Checkpoints::new(&data_dir, emit)),
                 deliver_review: Mutex::new(HashMap::new()),
                 notifier: Notifier::with_destinations(&data_dir, secrets, destinations),
@@ -646,7 +652,17 @@ impl Daemon {
             Some(Entry::Term(s)) => s
                 .continue_if_limited(item.generation, item.agent_session_id.as_deref(), item.turn, crate::session::typed_text(CONTINUE_TEXT).into_bytes())
                 .map(|written| (s, written)),
-            _ => Err(crate::session::Refused::Exited),
+            // A chat gets it as a message, through its queue: nothing is left to confirm afterwards.
+            Some(Entry::Chat(c)) => {
+                let limit = crate::chat::ChatLimit { run: item.generation, conversation: item.agent_session_id.clone(), turn: item.turn, reset_at: None };
+                let event = match c.continue_if_limited(&limit, CONTINUE_TEXT) {
+                    Ok(()) => json!({"session": item.session, "at": null, "result": "sent"}),
+                    Err(why) => json!({"session": item.session, "at": null, "result": "cancelled", "reason": why.code()}),
+                };
+                self.broadcast("scheduled.updated", event);
+                return;
+            }
+            None => Err(crate::session::Refused::Exited),
         };
         match result {
             Ok((s, written)) => {
@@ -663,6 +679,31 @@ impl Daemon {
                 });
             }
             Err(why) => self.broadcast("scheduled.updated", json!({"session": item.session, "at": null, "result": "cancelled", "reason": why.code()})),
+        }
+    }
+
+    /// A session just stopped on the usage limit. With `auto_continue` on and a reset time the agent named, the daemon sets
+    /// the timer itself, with the same guards as one the person sets: it types only into that run, conversation and turn.
+    /// Without a time nothing is set here (the app may fill one in from the usage meter).
+    fn auto_continue(&self, session: &str, generation: u64, conversation: Option<String>, turn: u64, reset_at: Option<u64>) {
+        if !self.auto_continue.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(at) = reset_at else {
+            tracing::info!("session {session} stopped on the usage limit, and its message names no reset time");
+            return;
+        };
+        match self.scheduled.schedule(session, generation, conversation, turn, at, "message", now_millis()) {
+            Ok(item) => self.broadcast("scheduled.updated", json!({"session": session, "at": item.fire_at, "source": item.source})),
+            Err(e) => tracing::info!("session {session}: no continue timer: {e:#}"),
+        }
+    }
+
+    /// A chat whose turn ended on the usage limit (read from its lines; a terminal's comes from its hook).
+    fn chat_limit(&self, chat: &ChatSession) {
+        if let Some(limit) = chat.take_limit() {
+            let sid = chat.spec.lock().id.clone();
+            self.auto_continue(&sid, limit.run, limit.conversation, limit.turn, limit.reset_at);
         }
     }
 
@@ -1562,6 +1603,16 @@ impl Daemon {
             session.set_hook_status(status, hook_event_failed(event));
             if hook_event_limited(event, &payload) {
                 session.set_limited();
+                if session.info().limited {
+                    let text: Vec<&str> = ["last_assistant_message", "error_details"].iter().filter_map(|k| payload.get(*k).and_then(Value::as_str)).collect();
+                    let (conversation, remote) = {
+                        let spec = session.spec.lock();
+                        (spec.agent_session_id.clone(), spec.remote.is_some())
+                    };
+                    // Another computer's agent prints that computer's clock, which this one cannot read.
+                    let reset_at = if remote { None } else { crate::limit_reset::reset_at_ms(&text.join("\n")) };
+                    self.auto_continue(session_id, session.generation(), conversation, session.turn_seq(), reset_at);
+                }
             }
             // The one signal that a sub-session's turn really ended.
             if matches!((agent, event), ("claude", "Stop" | "StopFailure") | ("codex", "agent-turn-complete")) {
@@ -1845,6 +1896,9 @@ impl Daemon {
                     Entry::Term(s) => s.tick(now),
                     Entry::Chat(c) => c.tick(now),
                 };
+                if let Entry::Chat(c) = &entry {
+                    self.chat_limit(c);
+                }
                 if let Some(info) = changed {
                     // Started or stopped: `sessions.json` records which sessions were running,
                     // so a later restart resumes only those (see `restore`).
@@ -1948,6 +2002,14 @@ impl Daemon {
                 let window = crate::window_agent::Policy::requested(&params, &self.window.policy.read())?;
                 if let Some(on) = params.get("agents_control_others").and_then(Value::as_bool) {
                     self.agents_control_others.store(on, Ordering::Relaxed);
+                }
+                if let Some(on) = params.get("auto_continue").and_then(Value::as_bool) {
+                    // Turned off: what Kelpie set by itself goes too; a timer the person set stays.
+                    if self.auto_continue.swap(on, Ordering::Relaxed) && !on {
+                        for sid in self.scheduled.cancel_auto() {
+                            self.broadcast("scheduled.updated", json!({"session": sid, "at": null, "result": "cancelled", "reason": "user"}));
+                        }
+                    }
                 }
                 if let Some(sub) = sub {
                     *self.subs.policy.write() = sub;
@@ -2053,21 +2115,30 @@ impl Daemon {
                 json!(true)
             }
             "session.schedule_continue" => {
-                let Entry::Term(s) = self.entry(handle_of(&params)?)? else { bail!("only terminal sessions can continue at reset") };
-                anyhow::ensure!(s.info().limited, "the session is not stopped by a usage limit");
                 let at = param(&params, "at")?.as_u64().ok_or_else(|| anyhow!("bad reset time"))?;
                 let source = param(&params, "source")?.as_str().unwrap_or_default();
-                let (sid, conversation) = {
-                    let spec = s.spec.lock();
-                    (spec.id.clone(), spec.agent_session_id.clone())
+                // The limit message's time is the daemon's own reading: the app gives the meter's or the person's.
+                anyhow::ensure!(source != "message", "the reset time comes from the usage meter or is confirmed by the user");
+                // The app fills in the meter's time by itself only while the person lets Kelpie continue by itself.
+                anyhow::ensure!(source != "meter-auto" || self.auto_continue.load(Ordering::Relaxed), "continuing by itself is turned off");
+                let (sid, generation, conversation, turn) = match self.entry(handle_of(&params)?)? {
+                    Entry::Term(s) => {
+                        anyhow::ensure!(s.info().limited, "the session is not stopped by a usage limit");
+                        let spec = s.spec.lock();
+                        (spec.id.clone(), s.generation(), spec.agent_session_id.clone(), s.turn_seq())
+                    }
+                    Entry::Chat(c) => {
+                        let limit = c.limited_now().ok_or_else(|| anyhow!("the session is not stopped by a usage limit"))?;
+                        (c.spec.lock().id.clone(), limit.run, limit.conversation, limit.turn)
+                    }
                 };
-                let item = self.scheduled.schedule(&sid, s.generation(), conversation, s.turn_seq(), at, source, now_millis())?;
+                let item = self.scheduled.schedule(&sid, generation, conversation, turn, at, source, now_millis())?;
                 self.broadcast("scheduled.updated", json!({"session": sid, "at": item.fire_at, "source": item.source}));
                 json!(item)
             }
             "session.cancel_scheduled" => {
                 let sid = self.session_id_of(handle_of(&params)?).ok_or_else(|| anyhow!("no such session"))?;
-                let cancelled = self.scheduled.cancel(&sid);
+                let cancelled = self.scheduled.decline(&sid);
                 if cancelled {
                     self.broadcast("scheduled.updated", json!({"session": sid, "at": null, "result": "cancelled", "reason": "user"}));
                 }
@@ -2622,6 +2693,8 @@ const POLICY_FILE: &str = "policy.json";
 struct Policy {
     /// Programs in a session may script other sessions (on unless the user turned it off).
     agents_control_others: bool,
+    /// Continue a session the usage limit stopped once it lifts (on unless the user turned it off).
+    auto_continue: bool,
     sub: crate::subs::SubPolicy,
     /// Agents using browser panes (off unless the user turned it on).
     browser: crate::browser_agent::Policy,
@@ -2643,6 +2716,7 @@ fn load_policy(data_dir: &std::path::Path) -> Policy {
     let get = |key: &str| file.as_ref().and_then(|v| v.get(key));
     Policy {
         agents_control_others: get("agents_control_others").and_then(Value::as_bool).unwrap_or(true),
+        auto_continue: get("auto_continue").and_then(Value::as_bool).unwrap_or(true),
         sub: crate::subs::SubPolicy {
             mode: get("sub_sessions").and_then(Value::as_str).and_then(crate::subs::Mode::parse).unwrap_or_default(),
             max: get("sub_max").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(crate::subs::MAX_SUB_CAP)) as u32),
@@ -2669,6 +2743,7 @@ fn save_policy(data_dir: &std::path::Path, policy: &Policy) {
     };
     let mut file = parsed.unwrap_or_else(|| json!({}));
     file["agents_control_others"] = json!(policy.agents_control_others);
+    file["auto_continue"] = json!(policy.auto_continue);
     file["sub_sessions"] = json!(policy.sub.mode.as_str());
     file["sub_max"] = json!(policy.sub.max);
     policy.browser.write_into(&mut file);
