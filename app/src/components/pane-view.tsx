@@ -129,8 +129,8 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
       <Show when={props.pane.kind === "terminal" || props.pane.kind === "chat" ? props.pane.sessionId : undefined}>
         {(id) => <SubSessionsBar sessionId={id()} projectId={props.project.id} tabId={props.tab.id} paneId={props.pane.id} />}
       </Show>
-      {/* The usage limit stopped this agent (the daemon says so for Claude Code). */}
-      <Show when={props.pane.kind === "terminal" ? session() : undefined} keyed>
+      {/* The usage limit stopped this agent (the daemon says so for Claude Code, in a terminal or a chat). */}
+      <Show when={props.pane.kind === "terminal" || props.pane.kind === "chat" ? session() : undefined} keyed>
         {(s) => <Show when={isLimited(s)}><LimitBanner s={s} /></Show>}
       </Show>
       <Show when={composing() && session() ? composerRequest() : null} keyed>

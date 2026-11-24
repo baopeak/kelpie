@@ -269,6 +269,9 @@ export interface Settings {
   /** Programs in a session (agents, scripts) may drive other sessions through `kelpied`
    *  (`terminal send`, `call session.create`…). Off: only their own session. */
   agentsScripting: boolean;
+  /** A session the subscription's usage limit stopped types (or sends) “continue” by itself once the limit lifts. The daemon
+   *  keeps it (`daemon.set_policy` `auto_continue`), so it works with the window closed. Off: the banner's button does it. */
+  autoContinue: boolean;
   /** A short chime with desktop notifications. */
   notificationSound: boolean;
   /** Look for a newer Kelpie on GitHub Releases (30 s after start, then every 6 hours). */

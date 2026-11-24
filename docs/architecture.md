@@ -446,8 +446,17 @@ person had chosen goes, and approvals end, which fails safe. `disable_web_page_p
   `error`) and reads `telegram` in `notify.get`.
 
 **Continue at reset.** Claude Code's `StopFailure` hook with error `rate_limit` marks the session
-`limited` (a `limited` field of `session.list`, cleared when the agent works again); other agents report
-no structured limit, so they never show the banner. The pane shows a banner with *Continue at reset*,
+`limited` (a `limited` field of `session.list`, cleared when the agent works again). A Claude chat is
+marked when a turn that printed the `assistant` line with `error: rate_limit` ends in a failed `result`
+(`chat.rs`), and cleared when any message is written to it; other agents report no structured limit, so
+they never show the banner. With `daemon.set_policy {auto_continue}` on (the default, saved in
+`policy.json`) the daemon sets the timer itself at that moment, `source: message`: the reset is the
+chat's `rate_limit_event` `resetsAt` when one refused the request, else the time the message names
+(`limit_reset.rs`: "resets 3:20am", "resets 6pm", "resets Nov 26, 12pm", read in local time, refused past
+or more than 8 days ahead). With none, the app may fill it in once from the usage meter. A chat's timer is
+`{generation: run of the process, agent_session_id: Claude's session_id, turn: messages written}` and fires
+through the chat's queue (`ChatSession::continue_if_limited`: same run, conversation and turn, nothing
+queued, still limited). The pane shows a banner with *Continue at reset*,
 *Switch account…* and *Hand off to…*. The reset time comes only from the usage meter (a full window's
 `resets_at`, read for the session's own account) or is typed in and confirmed by the user;
 `session.schedule_continue {handle, at, source: meter|confirmed}` stores `{session, generation,

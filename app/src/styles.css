@@ -282,6 +282,7 @@ input, textarea, select { font: inherit; color: var(--text); }
 .session-row .state-label { font-weight: 600; }
 .session-row .state-label.waiting { color: var(--waiting); }
 .session-row .state-label.error { color: var(--danger); }
+.session-row .state-label.limit-wait { font-weight: 500; color: var(--text-dim); }
 /* The session on screen (the focused pane's): an accent wash and edge, the name in bold. A folded parent whose hidden child is on
    screen keeps the edge only. */
 .session-row { position: relative; isolation: isolate; }

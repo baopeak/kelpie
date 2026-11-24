@@ -1,7 +1,11 @@
 // The strip above a pane whose agent the subscription's usage limit stopped: continue by itself
 // when the limit lifts, move to another account, or hand the work to another agent. Shown only
-// then (the daemon sets `limited`), and loaded on first use.
-import { Show, createSignal, onCleanup, onMount } from "solid-js";
+// then (the daemon sets `limited`, for terminals and chats), and loaded on first use.
+//
+// With "Continue after a usage limit" on, the daemon sets the timer itself from the time the limit
+// message names; when it names none, the usage meter's time is used, once. Cancel stops it, and
+// nothing sets it again for this stop.
+import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { store, sessionLabel } from "../lib/store";
 import { accountsOf, isAccountAgent, switchSessionAccount, sessionAccount } from "../lib/accounts";
 import { cancelContinue, scheduleContinue, scheduled, usageFor } from "../lib/limits";
@@ -19,6 +23,17 @@ export default function LimitBanner(props: { s: SessionInfo }) {
   const [reset, setReset] = createSignal<number | null | undefined>(undefined);
   const [clock, setClock] = createSignal("");
   const timer = () => scheduled[props.s.id];
+  // A timer was set for this stop (by the daemon, the meter or the person): one that goes is not set again by itself.
+  let hadTimer = false;
+  createEffect(() => {
+    if (timer()) hadTimer = true;
+  });
+  createEffect(() => {
+    const at = reset();
+    if (!at || hadTimer || !(store.state.settings.autoContinue ?? true)) return;
+    hadTimer = true;
+    void scheduleContinue(props.s, at, "meter");
+  });
 
   const check = async () => {
     setReset(undefined);
@@ -62,7 +77,7 @@ export default function LimitBanner(props: { s: SessionInfo }) {
       <Icon name="alert" size={13} />
       <span class="limit-text">
         <Show when={timer()} fallback={t("{name} hit a usage or rate limit.", { name: sessionLabel(props.s) })}>
-          {t("Will type “continue” at {time}.", { time: formatTime(timer()!) })}
+          {props.s.chat ? t("Will send “continue” at {time}.", { time: formatTime(timer()!) }) : t("Will type “continue” at {time}.", { time: formatTime(timer()!) })}
         </Show>
       </span>
       <span class="limit-actions">

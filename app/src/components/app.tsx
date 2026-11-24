@@ -140,6 +140,10 @@ export function App() {
     const on = store.state.settings.agentsScripting ?? true;
     if (store.connected()) void daemon("daemon.set_policy", { agents_control_others: on }).catch(() => {});
   });
+  createEffect(() => {
+    const on = store.state.settings.autoContinue ?? true;
+    if (store.connected()) void daemon("daemon.set_policy", { auto_continue: on }).catch(() => {});
+  });
   // The person's own themes join every theme list (a damaged entry in the state file is left out).
   createEffect(() => setCustomThemes(checkThemes(store.state.settings.customThemes)));
   // A host's appearance, a pane's own theme or one of the person's themes changed: repaint the terminals

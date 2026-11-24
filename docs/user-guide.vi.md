@@ -75,7 +75,7 @@ Chi tiết nằm ở các phần [Everyday use](user-guide.md#everyday-use) và 
 
 **Duy trì cuộc hội thoại.** Menu của phiên có *Hand off to…* để mở agent khác với phần cuối bản ghi hội thoại làm bối cảnh. Menu này còn có *Compact*, *Clear* và *Restart*, và cả ba đều giữ nguyên cuộc hội thoại. Ngoài ra, khi bật *Hibernation*, Kelpie dừng những agent đã xong và nằm yên trong một project chạy nền quá N phút, rồi cho agent tiếp tục khi bạn mở lại.
 
-**Nhiều tài khoản.** Bạn thêm tài khoản Claude Code hoặc Codex trong Settings → Accounts. Khi một phiên Claude Code chạm giới hạn sử dụng, dải thông báo phía trên khung cho bạn ba lựa chọn: *Continue at reset*, *Switch account…* hoặc *Hand off to…*.
+**Nhiều tài khoản.** Bạn thêm tài khoản Claude Code hoặc Codex trong Settings → Accounts. Khi một phiên Claude Code chạm giới hạn sử dụng, Kelpie đọc giờ giới hạn được gỡ trong thông báo của Claude và tự gõ (hoặc, với phiên chat, tự gửi) `continue` vào lúc đó, kể cả khi cửa sổ đã đóng. Trong lúc chờ, hàng của phiên ở thanh bên hiện giờ sẽ tiếp tục thay cho chữ lỗi, còn dải thông báo phía trên khung có nút *Cancel*. Nếu bạn tắt *Continue after a usage limit* trong Settings → Agents, dải thông báo sẽ cho bạn ba lựa chọn: *Continue at reset*, *Switch account…* hoặc *Hand off to…*.
 
 **Context và chi phí.** Mỗi phiên Claude Code, Codex và OMP có một vòng tròn context cho biết cửa sổ ngữ cảnh đã dùng bao nhiêu. Trang *Usage & cost* thống kê chi phí và token theo ngày, project, agent hoặc model, còn Settings → Usage & Resources cho phép đặt giới hạn chi phí cho mỗi phiên.
 

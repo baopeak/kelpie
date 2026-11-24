@@ -43,7 +43,8 @@ pub struct Scheduled {
     pub turn: u64,
     /// When it fires (wall-clock ms): the reset time plus [`RESET_MARGIN_MS`].
     pub fire_at: u64,
-    /// Where the reset time came from: the usage meter, or the user typed it in.
+    /// Where the reset time came from: the usage meter, the user typed it in, or the agent's own limit message
+    /// (`message`, set by the daemon itself when the session stopped on the limit).
     pub source: String,
 }
 
@@ -79,12 +80,12 @@ impl ScheduledInputs {
         }
     }
 
-    /// Sets (or replaces) the session's timer. `reset_at` must come from the usage meter or be
-    /// confirmed by the user, and lie ahead.
+    /// Sets (or replaces) the session's timer. `reset_at` must come from the usage meter, be
+    /// confirmed by the user or be read from the agent's limit message, and lie ahead.
     #[allow(clippy::too_many_arguments)] // one value per guard of the timer
     pub fn schedule(&self, session: &str, generation: u64, agent_session_id: Option<String>, turn: u64, reset_at: u64, source: &str, now: u64) -> Result<Scheduled> {
-        if !matches!(source, "meter" | "confirmed") {
-            bail!("the reset time comes from the usage meter or is confirmed by the user");
+        if !matches!(source, "meter" | "confirmed" | "message") {
+            bail!("the reset time comes from the usage meter, the agent's limit message, or is confirmed by the user");
         }
         if reset_at <= now {
             bail!("that reset time has passed");
@@ -151,6 +152,7 @@ mod tests {
         assert!(t.schedule("s", 1, None, 1, 4_000, "meter", 5_000).is_err(), "in the past");
         assert!(t.schedule("s", 1, None, 1, 5_000, "meter", 5_000).is_err(), "now is not ahead");
         assert!(t.schedule("s", 1, None, 1, 10_000, "guess", 5_000).is_err(), "unknown source");
+        assert!(t.schedule("s", 1, None, 1, 10_000, "message", 5_000).is_ok(), "read from the limit message");
         assert!(t.schedule("s", 1, None, 1, 5_000 + MAX_AHEAD_MS + 1, "confirmed", 5_000).is_err());
         assert!(t.schedule("s", 1, None, 1, 5_000 + MAX_AHEAD_MS, "confirmed", 5_000).is_ok());
     }
