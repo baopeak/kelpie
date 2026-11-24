@@ -54,14 +54,21 @@ pub struct ScheduledInputs {
     items: Mutex<Vec<Scheduled>>,
     /// Timers a previous daemon run left behind: reported once, never fired.
     lost: Mutex<Vec<Scheduled>>,
+    /// The stops the person cancelled the timer of, `(session, generation, turn)`, one per session: nothing sets a timer for
+    /// that stop by itself again (a Cancel sticks through a reopened window). Kept in memory: a new daemon runs new processes.
+    declined: Mutex<Vec<(String, u64, u64)>>,
 }
+
+/// Sources of a timer Kelpie sets by itself: from the agent's limit message (the daemon) or the usage meter (the app, when the
+/// message named no time). They give way to the person: a stop whose timer was cancelled, or that has one, is left alone.
+pub const AUTO_SOURCES: [&str; 2] = ["message", "meter-auto"];
 
 impl ScheduledInputs {
     /// Reads what an earlier run left in `<dir>/scheduled.json` as lost, and starts empty.
     pub fn open(dir: &std::path::Path) -> ScheduledInputs {
         let path = dir.join("scheduled.json");
         let lost: Vec<Scheduled> = crate::persist::load_state_or_default(&path);
-        ScheduledInputs { path: Some(path), items: Mutex::new(Vec::new()), lost: Mutex::new(lost) }
+        ScheduledInputs { path: Some(path), items: Mutex::new(Vec::new()), lost: Mutex::new(lost), declined: Mutex::new(Vec::new()) }
     }
 
     fn save(&self, items: &[Scheduled]) {
@@ -84,7 +91,7 @@ impl ScheduledInputs {
     /// confirmed by the user or be read from the agent's limit message, and lie ahead.
     #[allow(clippy::too_many_arguments)] // one value per guard of the timer
     pub fn schedule(&self, session: &str, generation: u64, agent_session_id: Option<String>, turn: u64, reset_at: u64, source: &str, now: u64) -> Result<Scheduled> {
-        if !matches!(source, "meter" | "confirmed" | "message") {
+        if !matches!(source, "meter" | "confirmed") && !AUTO_SOURCES.contains(&source) {
             bail!("the reset time comes from the usage meter, the agent's limit message, or is confirmed by the user");
         }
         if reset_at <= now {
@@ -95,10 +102,38 @@ impl ScheduledInputs {
         }
         let item = Scheduled { session: session.into(), generation, agent_session_id, turn, fire_at: reset_at + reset_margin_ms(), source: source.into() };
         let mut items = self.items.lock();
+        if AUTO_SOURCES.contains(&source) {
+            if self.declined.lock().iter().any(|(s, g, t)| s == session && *g == generation && *t == turn) {
+                bail!("the timer for this stop was cancelled");
+            }
+            if items.iter().any(|i| i.session == session && i.generation == generation && i.turn == turn) {
+                bail!("this stop already has a timer");
+            }
+        }
         items.retain(|i| i.session != session);
         items.push(item.clone());
         self.save(&items);
         Ok(item)
+    }
+
+    /// The person cancelled the session's timer: it goes, and Kelpie sets none by itself for that stop again.
+    pub fn decline(&self, session: &str) -> bool {
+        let found = self.items.lock().iter().find(|i| i.session == session).map(|i| (i.generation, i.turn));
+        if let Some((generation, turn)) = found {
+            let mut declined = self.declined.lock();
+            declined.retain(|(s, ..)| s != session);
+            declined.push((session.to_string(), generation, turn));
+        }
+        self.cancel(session)
+    }
+
+    /// The timers Kelpie set by itself go (the setting was turned off); their sessions are returned.
+    pub fn cancel_auto(&self) -> Vec<String> {
+        let gone: Vec<String> = self.items.lock().iter().filter(|i| AUTO_SOURCES.contains(&i.source.as_str())).map(|i| i.session.clone()).collect();
+        for session in &gone {
+            self.cancel(session);
+        }
+        gone
     }
 
     pub fn cancel(&self, session: &str) -> bool {
@@ -170,6 +205,24 @@ mod tests {
         assert_eq!((due[0].session.as_str(), due[0].fire_at), ("b", 12_000 + RESET_MARGIN_MS));
         assert!(t.take_due(u64::MAX / 2).iter().all(|i| i.session == "a" && i.generation == 4));
         assert!(t.take_due(u64::MAX / 2).is_empty(), "taken once");
+    }
+
+    #[test]
+    fn a_cancelled_stop_is_not_set_again_by_itself_and_an_automatic_time_never_replaces_another() {
+        let t = ScheduledInputs::default();
+        t.schedule("a", 1, None, 4, 10_000, "message", 0).unwrap();
+        assert!(t.schedule("a", 1, None, 4, 20_000, "meter-auto", 0).is_err(), "the meter does not replace the message's time");
+        assert!(t.decline("a"));
+        for source in AUTO_SOURCES {
+            assert!(t.schedule("a", 1, None, 4, 10_000, source, 0).is_err(), "{source}: the person said no for this stop");
+        }
+        assert!(t.schedule("a", 1, None, 5, 10_000, "message", 0).is_ok(), "a later stop is a new stop");
+        assert!(t.schedule("a", 1, None, 6, 10_000, "meter-auto", 0).is_ok(), "and a timer left from an earlier stop gives way");
+        t.cancel("a");
+        assert!(t.schedule("a", 1, None, 4, 10_000, "confirmed", 0).is_ok(), "the person may still set one");
+        t.schedule("b", 1, None, 1, 10_000, "meter-auto", 0).unwrap();
+        assert_eq!(t.cancel_auto(), vec!["b".to_string()], "turning the setting off drops what Kelpie set, not what the person set");
+        assert_eq!(t.list().len(), 1);
     }
 
     #[test]

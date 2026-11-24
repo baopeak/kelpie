@@ -25,8 +25,8 @@ import { openWorktreeDialog } from "./worktree-dialog";
 import { openFinish, overlapsOf } from "../lib/review-queue";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import type { Project, SessionInfo } from "../lib/types";
-import { t, msg, formatTime } from "../lib/i18n";
-import { continueAt } from "../lib/continue-timers";
+import { t, msg } from "../lib/i18n";
+import { continueAt, continueTime } from "../lib/continue-timers";
 import { openHosts } from "./hosts-page";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { ancestorsOf, childrenOfSession, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
@@ -44,7 +44,7 @@ const LABEL: Partial<Record<SessionState, string>> = { waiting: msg("needs you")
 
 function stateTitle(s: SessionInfo) {
   const at = continueAt(s);
-  if (at) return t("Stopped by the usage limit: continues by itself at {time}", { time: formatTime(at) });
+  if (at) return t("Stopped by the usage limit: continues by itself at {time}", { time: continueTime(at) });
   switch (sessionState(s)) {
     case "waiting": return t("Needs you");
     case "error": return s.alive ? t("Last turn failed") : t("Exited with code {code}", { code: s.exit_code ?? "" });
@@ -388,7 +388,7 @@ function SessionRow(props: { s: SessionInfo; kids: number }) {
           {(label) => <span class={`age state-label ${state()}`}>{t(label())}</span>}
         </Show>
       }>
-        {(at) => <span class="age state-label limit-wait" data-continue-at={at()}>{t("continues {time}", { time: formatTime(at()) })}</span>}
+        {(at) => <span class="age state-label limit-wait" data-continue-at={at()}>{t("continues {time}", { time: continueTime(at()) })}</span>}
       </Show>
     </div>
   );

@@ -12,7 +12,7 @@ import { errorText, t } from "./i18n";
 import type { ProviderUsage, SessionInfo } from "./types";
 import { setScheduled } from "./continue-timers";
 
-export { scheduled, continueAt } from "./continue-timers";
+export { scheduled, continueAt, continueTime } from "./continue-timers";
 
 /** A session the banner is for: an agent (terminal or chat) the daemon says the usage limit stopped. */
 export const isLimited = (s: SessionInfo | undefined): s is SessionInfo => !!s && !!s.limited && s.alive;
@@ -25,11 +25,12 @@ export async function usageFor(s: SessionInfo): Promise<ProviderUsage | null> {
   return report[s.kind];
 }
 
-export async function scheduleContinue(s: SessionInfo, at: number, source: "meter" | "confirmed") {
+/** `meter-auto`: the banner fills in the meter's time by itself; the daemon may refuse it (see limit-banner.tsx), quietly. */
+export async function scheduleContinue(s: SessionInfo, at: number, source: "meter" | "confirmed" | "meter-auto") {
   try {
     await daemon("session.schedule_continue", { handle: s.handle, at, source });
   } catch (e) {
-    store.notify(errorText(e));
+    if (source !== "meter-auto") store.notify(errorText(e));
   }
 }
 

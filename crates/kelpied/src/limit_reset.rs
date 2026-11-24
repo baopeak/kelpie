@@ -66,10 +66,13 @@ pub fn reset_at<Tz: TimeZone>(text: &str, now: DateTime<Tz>) -> Option<DateTime<
             }
         }
         (None, None) => {
-            // A time alone: the next time the clock shows it.
+            // A time alone: the next time the clock shows it. One that passed within the hour is a reset that is (or was
+            // just) due, read late or rounded down ("resets 3:20am" at 3:20:31): tomorrow's would wait a day for nothing.
             let today = local_now.date().and_time(time);
             if today > local_now {
                 today
+            } else if local_now - today < Duration::hours(1) {
+                return None;
             } else {
                 today + Duration::days(1)
             }
@@ -137,6 +140,16 @@ mod tests {
         ] {
             assert_eq!(at(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn a_time_just_past_is_not_taken_for_tomorrow() {
+        let zone = FixedOffset::east_opt(7 * 3600).unwrap();
+        let at = |h, m, s| zone.with_ymd_and_hms(2026, 11, 24, h, m, s).unwrap();
+        assert_eq!(reset_at("resets 3:20am", at(3, 20, 31)), None, "the reset is due: rounded down to the minute");
+        assert_eq!(reset_at("resets 3:20am", at(3, 25, 0)), None);
+        assert_eq!(reset_at("resets 3:20am", at(3, 20, 0)), None, "now is not ahead");
+        assert_eq!(reset_at("resets 3:20am", at(4, 21, 0)).map(|t| t.format("%d %H:%M").to_string()).as_deref(), Some("25 03:20"));
     }
 
     #[test]

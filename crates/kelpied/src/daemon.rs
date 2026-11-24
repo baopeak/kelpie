@@ -1605,8 +1605,13 @@ impl Daemon {
                 session.set_limited();
                 if session.info().limited {
                     let text: Vec<&str> = ["last_assistant_message", "error_details"].iter().filter_map(|k| payload.get(*k).and_then(Value::as_str)).collect();
-                    let conversation = session.spec.lock().agent_session_id.clone();
-                    self.auto_continue(session_id, session.generation(), conversation, session.turn_seq(), crate::limit_reset::reset_at_ms(&text.join("\n")));
+                    let (conversation, remote) = {
+                        let spec = session.spec.lock();
+                        (spec.agent_session_id.clone(), spec.remote.is_some())
+                    };
+                    // Another computer's agent prints that computer's clock, which this one cannot read.
+                    let reset_at = if remote { None } else { crate::limit_reset::reset_at_ms(&text.join("\n")) };
+                    self.auto_continue(session_id, session.generation(), conversation, session.turn_seq(), reset_at);
                 }
             }
             // The one signal that a sub-session's turn really ended.
@@ -1999,7 +2004,12 @@ impl Daemon {
                     self.agents_control_others.store(on, Ordering::Relaxed);
                 }
                 if let Some(on) = params.get("auto_continue").and_then(Value::as_bool) {
-                    self.auto_continue.store(on, Ordering::Relaxed);
+                    // Turned off: what Kelpie set by itself goes too; a timer the person set stays.
+                    if self.auto_continue.swap(on, Ordering::Relaxed) && !on {
+                        for sid in self.scheduled.cancel_auto() {
+                            self.broadcast("scheduled.updated", json!({"session": sid, "at": null, "result": "cancelled", "reason": "user"}));
+                        }
+                    }
                 }
                 if let Some(sub) = sub {
                     *self.subs.policy.write() = sub;
@@ -2109,6 +2119,8 @@ impl Daemon {
                 let source = param(&params, "source")?.as_str().unwrap_or_default();
                 // The limit message's time is the daemon's own reading: the app gives the meter's or the person's.
                 anyhow::ensure!(source != "message", "the reset time comes from the usage meter or is confirmed by the user");
+                // The app fills in the meter's time by itself only while the person lets Kelpie continue by itself.
+                anyhow::ensure!(source != "meter-auto" || self.auto_continue.load(Ordering::Relaxed), "continuing by itself is turned off");
                 let (sid, generation, conversation, turn) = match self.entry(handle_of(&params)?)? {
                     Entry::Term(s) => {
                         anyhow::ensure!(s.info().limited, "the session is not stopped by a usage limit");
@@ -2126,7 +2138,7 @@ impl Daemon {
             }
             "session.cancel_scheduled" => {
                 let sid = self.session_id_of(handle_of(&params)?).ok_or_else(|| anyhow!("no such session"))?;
-                let cancelled = self.scheduled.cancel(&sid);
+                let cancelled = self.scheduled.decline(&sid);
                 if cancelled {
                     self.broadcast("scheduled.updated", json!({"session": sid, "at": null, "result": "cancelled", "reason": "user"}));
                 }

@@ -8,13 +8,13 @@
 import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { store, sessionLabel } from "../lib/store";
 import { accountsOf, isAccountAgent, switchSessionAccount, sessionAccount } from "../lib/accounts";
-import { cancelContinue, scheduleContinue, scheduled, usageFor } from "../lib/limits";
+import { cancelContinue, continueTime, scheduleContinue, scheduled, usageFor } from "../lib/limits";
 import { nextClockTime, resetTime } from "../lib/limit-time";
 import { handOffSession } from "../lib/agent-actions";
 import { isAgentKind, kindInfo, launchableAgents } from "../lib/agents";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import { Icon } from "./icons";
-import { formatTime, t } from "../lib/i18n";
+import { t } from "../lib/i18n";
 import type { SessionInfo } from "../lib/types";
 import "./limit-banner.css";
 
@@ -23,16 +23,14 @@ export default function LimitBanner(props: { s: SessionInfo }) {
   const [reset, setReset] = createSignal<number | null | undefined>(undefined);
   const [clock, setClock] = createSignal("");
   const timer = () => scheduled[props.s.id];
-  // A timer was set for this stop (by the daemon, the meter or the person): one that goes is not set again by itself.
-  let hadTimer = false;
-  createEffect(() => {
-    if (timer()) hadTimer = true;
-  });
+  // The limit message named no time: the meter's fills it in, once. The daemon refuses it when the person cancelled a timer
+  // for this stop, when this stop already has one, or when the setting is off, so a reopened window cannot undo a Cancel.
+  let tried = false;
   createEffect(() => {
     const at = reset();
-    if (!at || hadTimer || !(store.state.settings.autoContinue ?? true)) return;
-    hadTimer = true;
-    void scheduleContinue(props.s, at, "meter");
+    if (!at || tried || timer() || !(store.state.settings.autoContinue ?? true)) return;
+    tried = true;
+    void scheduleContinue(props.s, at, "meter-auto");
   });
 
   const check = async () => {
@@ -77,7 +75,7 @@ export default function LimitBanner(props: { s: SessionInfo }) {
       <Icon name="alert" size={13} />
       <span class="limit-text">
         <Show when={timer()} fallback={t("{name} hit a usage or rate limit.", { name: sessionLabel(props.s) })}>
-          {props.s.chat ? t("Will send “continue” at {time}.", { time: formatTime(timer()!) }) : t("Will type “continue” at {time}.", { time: formatTime(timer()!) })}
+          {props.s.chat ? t("Will send “continue” at {time}.", { time: continueTime(timer()!) }) : t("Will type “continue” at {time}.", { time: continueTime(timer()!) })}
         </Show>
       </span>
       <span class="limit-actions">
@@ -93,7 +91,7 @@ export default function LimitBanner(props: { s: SessionInfo }) {
                 </Show>
               }
             >
-              {(at) => <button class="btn mini primary" data-continue-at-reset onClick={() => void scheduleContinue(props.s, at(), "meter")}>{t("Continue at reset ({time})", { time: formatTime(at()) })}</button>}
+              {(at) => <button class="btn mini primary" data-continue-at-reset onClick={() => void scheduleContinue(props.s, at(), "meter")}>{t("Continue at reset ({time})", { time: continueTime(at()) })}</button>}
             </Show>
           }
         >

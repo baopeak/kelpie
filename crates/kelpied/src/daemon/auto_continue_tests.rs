@@ -150,3 +150,32 @@ fn a_chat_the_person_wrote_to_or_that_moved_on_is_never_continued() {
     assert!(call(&d, "session.schedule_continue", json!({"handle": 2, "at": now_millis() + 60_000, "source": "message"})).is_err(), "only the daemon reads the message");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_cancel_sticks_for_that_stop_and_turning_the_setting_off_drops_what_kelpie_set() {
+    let (d, dir) = daemon("auto-continue-cancel");
+    let session = limited_terminal(&d, "t1");
+    let handle = session.handle;
+    assert_eq!(d.scheduled.list().len(), 1);
+    assert_eq!(call(&d, "session.cancel_scheduled", json!({"handle": handle})).unwrap(), true);
+    // The window comes back and its banner would fill in the meter's time by itself, or the agent reports the same stop again.
+    let soon = now_millis() + 60_000;
+    assert!(call(&d, "session.schedule_continue", json!({"handle": handle, "at": soon, "source": "meter-auto"})).is_err(), "cancelled for this stop");
+    d.hook(&json!({"session_id": "t1", "agent": "claude", "payload": {"hook_event_name": "StopFailure", "session_id": "conv-1", "error": "rate_limit", "last_assistant_message": limit_text().0}})).unwrap();
+    assert!(d.scheduled.list().is_empty(), "a repeated report does not set it again");
+    // The person may still set one.
+    call(&d, "session.schedule_continue", json!({"handle": handle, "at": soon, "source": "meter"})).unwrap();
+    assert_eq!(d.scheduled.list()[0].source, "meter");
+    // Turning the setting off drops only what Kelpie set by itself, and the banner's fill-in is refused.
+    let (other, _typed) = fake::running(2, "t2", "claude");
+    d.insert_for_test(Entry::Term(other.clone()));
+    let hook = |payload: Value| d.hook(&json!({"session_id": "t2", "agent": "claude", "payload": payload})).unwrap();
+    hook(json!({"hook_event_name": "UserPromptSubmit"}));
+    hook(json!({"hook_event_name": "StopFailure", "error": "rate_limit", "last_assistant_message": limit_text().0}));
+    assert_eq!(d.scheduled.list().len(), 2);
+    call(&d, "daemon.set_policy", json!({"auto_continue": false})).unwrap();
+    let left = d.scheduled.list();
+    assert_eq!((left.len(), left[0].session.as_str()), (1, "t1"), "{left:?}");
+    assert!(call(&d, "session.schedule_continue", json!({"handle": 2, "at": soon, "source": "meter-auto"})).is_err(), "off: nothing by itself");
+    let _ = std::fs::remove_dir_all(dir);
+}

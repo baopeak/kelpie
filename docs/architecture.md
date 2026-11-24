@@ -453,7 +453,11 @@ they never show the banner. With `daemon.set_policy {auto_continue}` on (the def
 `policy.json`) the daemon sets the timer itself at that moment, `source: message`: the reset is the
 chat's `rate_limit_event` `resetsAt` when one refused the request, else the time the message names
 (`limit_reset.rs`: "resets 3:20am", "resets 6pm", "resets Nov 26, 12pm", read in local time, refused past
-or more than 8 days ahead). With none, the app may fill it in once from the usage meter. A chat's timer is
+or more than 8 days ahead; a clock time passed within the hour gives none; a remote session's text is not
+read). With none, the app may fill it in once from the usage meter (`source: meter-auto`, refused while the
+setting is off). Automatic timers give way to the person: a Cancel (`session.cancel_scheduled`) is remembered
+for that stop (session, generation, turn), so neither source sets it again, an automatic time never
+replaces a timer the stop already has, and turning the setting off drops the automatic ones. A chat's timer is
 `{generation: run of the process, agent_session_id: Claude's session_id, turn: messages written}` and fires
 through the chat's queue (`ChatSession::continue_if_limited`: same run, conversation and turn, nothing
 queued, still limited). The pane shows a banner with *Continue at reset*,
