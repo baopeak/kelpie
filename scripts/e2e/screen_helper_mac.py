@@ -173,7 +173,7 @@ def display_stream(h, display, seconds, out):
     stats = [m for m in h.seen if m.get("event") == "stats" and m.get("sc") == sc]
     if stats:
         s = stats[-1]
-        print("        last stats: " + json.dumps({k: s.get(k) for k in ("fps", "kbps", "w", "h", "encode_ms", "level", "software")}))
+        print("        last stats: " + json.dumps(s)[:900])
     # The stop hotkey, pressed through the helper's own input (a display target takes any key).
     h.send({"cmd": "input", "sc": sc, "ops": [{"k": "key", "key": "K", "mods": ["ctrl", "alt", "shift"]}], "t": now_ms()})
     ended = h.wait(lambda m: m.get("event") == "ended" and m.get("sc") == sc, 5)
