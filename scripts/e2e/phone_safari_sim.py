@@ -200,10 +200,15 @@ def pair(d, ph, port):
     t = threading.Thread(target=faces, daemon=True)
     t.start()
     try:
-        ph.tap("[data-lock-go]")
+        # A finger tap through safaridriver lands as a press that selects the button's text on iOS (the loupe), so the button is
+        # pressed from the page; WebKit counts what the automation runs as the person's gesture, which a passkey needs.
+        ph.click("[data-lock-go]")
         time.sleep(3)
         ph.shot("passkey-sheet")
-        ph.wait("[data-lock-screen]", 60, gone=True)
+        try:
+            ph.wait("[data-lock-screen]", 60, gone=True)
+        except TimeoutError:
+            raise RuntimeError(f"the app lock was not set up: {ph.text('[data-lock-error]') or ph.text('[data-lock-screen]')[:300]}; errors {ph.errors()}")
     finally:
         stop.set()
     return next(x for x in d.call("mobile.status")["devices"] if x["name"] == name)
