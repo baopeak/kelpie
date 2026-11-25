@@ -144,6 +144,9 @@ def display_stream(h, display, seconds, out):
     vids = h.videos(sc)
     check(len(vids) > 0, "video frames come", f"{len(vids)} frames")
     if not vids:
+        for m in h.seen:
+            if m.get("sc") == sc:
+                print("        " + json.dumps(m)[:400])
         return
     check(vids[0][2] & 1 == 1, "the first frame is a keyframe")
     path = os.path.join(out, "display.h264")
