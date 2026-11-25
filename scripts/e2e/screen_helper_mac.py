@@ -21,9 +21,11 @@ on PATH and nothing else at the Mac's keyboard. Every check prints ok or FAILED;
 """
 
 import argparse
+import ctypes
 import json
 import os
 import queue
+import re
 import struct
 import subprocess
 import sys
@@ -139,24 +141,60 @@ def front_app():
     return sh("lsappinfo", "info", "-only", "name", sh("lsappinfo", "front").stdout.strip()).stdout
 
 
-def textedit(script, name):
-    """Runs one AppleScript line on TextEdit's document `name` (passed as an argument, never spliced into the script)."""
-    return sh("osascript", "-e", "on run argv", "-e", f'tell application "TextEdit" to {script}', "-e", "end run", name)
+def press_stop_hotkey():
+    """Ctrl+Option+Shift+K pressed at the HID tap from this process (a key press the helper did not post), through Core Graphics."""
+    cg = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+    cg.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+    cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+    cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    control, option, shift, k = 0x40000, 0x80000, 0x20000, 0x28
+    for down in (True, False):
+        ev = cg.CGEventCreateKeyboardEvent(None, k, down)
+        cg.CGEventSetFlags(ev, control | option | shift)
+        cg.CGEventPost(0, ev)
+        cf.CFRelease(ev)
 
 
-def doc_text(name):
-    r = textedit("get text of document (item 1 of argv)", name)
-    return r.stdout.rstrip("\n") if r.returncode == 0 else None
+def find_window(h, name):
+    for _ in range(20):
+        r = h.ask({"cmd": "targets"})
+        ts = (r or {}).get("ok", {}).get("targets", [])
+        target = next((t for t in ts if t["kind"] == "window" and t["title"] == name), None)
+        if target:
+            return target
+        time.sleep(0.5)
+    return None
 
 
-def close_doc(name):
-    """Closes only this script's own document, unsaved; the person's other documents and TextEdit itself stay."""
-    textedit("close (every document whose name is (item 1 of argv)) saving no", name)
+def saved(h, sc, path):
+    """The document's text as TextEdit has it now: saved with Cmd+S through the stream (which brings the window to the front), then read."""
+    h.send({"cmd": "input", "sc": sc, "ops": [{"k": "key", "key": "S", "mods": ["meta"]}], "t": now_ms()})
+    acknowledge(h, sc, 1.5)
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
 
-def count_in(name, ch):
-    text = doc_text(name)
-    return -1 if text is None else text.count(ch)
+def close_doc(h, name, path):
+    """Saves and closes only this script's own document, through a stream on its window; the person's documents and TextEdit stay."""
+    target = find_window(h, name)
+    if not target:
+        return
+    sc = "smoke-close-" + name
+    if start_window(h, sc, target) is None:
+        return
+    saved(h, sc, path)
+    h.send({"cmd": "input", "sc": sc, "ops": [{"k": "key", "key": "W", "mods": ["meta"]}], "t": now_ms()})
+    if ended_of(h, sc, 5) is None:
+        h.send({"cmd": "stop", "sc": sc, "reason": "stop"})
+
+
+def cut_after(r):
+    """How many characters a cut text's reply says were typed."""
+    m = re.search(r"after (\d+) characters", str((r or {}).get("err", "")))
+    return int(m.group(1)) if m else -1
 
 
 def display_stream(h, display, seconds, out):
@@ -228,20 +266,24 @@ def ended_of(h, sc, timeout=10):
     return next((m for m in h.seen if m.get("event") == "ended" and m.get("sc") == sc), None) or h.wait(lambda m: m.get("event") == "ended" and m.get("sc") == sc, timeout)
 
 
-def stops_typing(h, sc, name, ch, how, stop, reason):
-    """Typing a long text, the stream is stopped `how` (by `stop()`) part way: it ends with `reason`, the text's reply says it was cut, and
-    nothing more reaches the document once it has ended."""
+def stops_typing(h, sc, target, path, ch, how, stop, reason):
+    """Typing a long text, the stream is stopped `how` (by `stop()`) part way: it ends with `reason`, the text's reply says how much was
+    typed, and once it ended nothing more reaches the document (read again a while later, through a new stream)."""
     id_ = type_long(h, sc, ch)
     time.sleep(1.0)
     stop()
     ended = ended_of(h, sc)
     check(ended is not None and ended.get("reason") == reason, f"{how} ends the stream while text is typed", json.dumps(ended))
     r = reply(h, id_)
-    check(r is not None and "the screen was stopped" in str(r.get("err")), f"{how}: the text says it was cut", json.dumps(r)[:200])
-    at_end = count_in(name, ch)
+    n = cut_after(r)
+    check(r is not None and "the screen was stopped" in str(r.get("err")) and 0 < n < LONG, f"{how}: the text says it was cut", json.dumps(r)[:200])
     time.sleep(1.5)
-    later = count_in(name, ch)
-    check(0 < at_end < LONG and later == at_end, f"{how}: nothing is typed after the stream ended", f"{at_end} at the end, {later} later, of {LONG}")
+    again = sc + "-again"
+    if not check(start_window(h, again, target) is not None, f"{how}: the window can be shared again"):
+        return None
+    got = saved(h, again, path).count(ch)
+    check(got == n, f"{how}: nothing is typed after the stream ended", f"{got} in the document, {n} said typed, of {LONG}")
+    return again
 
 
 def window_stream(h, out):
@@ -255,19 +297,12 @@ def window_stream(h, out):
     try:
         window_checks(h, name, path, other, other_path)
     finally:
-        close_doc(name)
-        close_doc(other)
+        for n, p in ((other, other_path), (name, path)):
+            close_doc(h, n, p)
 
 
 def window_checks(h, name, path, other, other_path):
-    target = None
-    for _ in range(20):
-        time.sleep(0.5)
-        r = h.ask({"cmd": "targets"})
-        ts = (r or {}).get("ok", {}).get("targets", [])
-        target = next((t for t in ts if t["kind"] == "window" and name in t["title"]), None)
-        if target:
-            break
+    target = find_window(h, name)
     if not check(target is not None, "the TextEdit window is offered", json.dumps(target)):
         return
     sc = "smoke-window"
@@ -287,44 +322,39 @@ def window_checks(h, name, path, other, other_path):
     typed = "hello from kelpie é😀"
     r = h.ask({"cmd": "text", "sc": sc, "text": typed, "t": now_ms()}, 10)
     check(r is not None and r.get("ok") is True, "typed text is taken", json.dumps(r))
-    h.send({"cmd": "input", "sc": sc, "ops": [{"k": "key", "key": "S", "mods": ["meta"]}], "t": now_ms()})
-    acknowledge(h, sc, 2)
-    with open(path, encoding="utf-8") as f:
-        saved = f.read()
-    check(typed in saved, "the text and Cmd+S reach TextEdit (the saved file holds the text)", repr(saved[:80]))
+    text = saved(h, sc, path)
+    check(typed in text, "the text and Cmd+S reach TextEdit (the saved file holds the text)", repr(text[:80]))
     refused = [m for m in h.seen if m.get("sc") == sc and m.get("event") in ("input_refused", "input_blocked")]
     check(not refused, "no input was refused", json.dumps(refused)[:200])
     check(len(h.videos(sc)) > 0, "the window's frames come", f"{len(h.videos(sc))} frames")
 
-    # Keys go only to the shared window: another window of the same app taking the focus part way stops the typing, and it gets nothing.
-    id_ = type_long(h, sc, "a")
-    time.sleep(1.0)
-    sh("open", "-a", "TextEdit", other_path)
-    r = reply(h, id_)
-    check(r is not None and str(r.get("err", "")).startswith("not_front_partial"), "typing stops when another window takes the focus", json.dumps(r)[:200])
-    got_a, other_text = count_in(name, "a"), doc_text(other)
-    check(0 < got_a < LONG and other_text == "", "the other window got none of it", f"{got_a} of {LONG} typed in the shared window, other window {other_text!r}")
-    # Another app in front part way: refused the same, nothing more typed.
-    id_ = type_long(h, sc, "b")
-    time.sleep(1.0)
-    sh("open", "-a", "Finder")
-    r = reply(h, id_)
-    check(r is not None and str(r.get("err", "")).startswith("not_front_partial"), "typing stops when another app comes in front", json.dumps(r)[:200])
-    got_b = count_in(name, "b")
-    time.sleep(1.0)
-    check(0 < got_b < LONG and count_in(name, "b") == got_b, "keys are refused while another app is in front", f"{got_b} of {LONG} typed before it came in front")
+    # Keys go only to the shared window: another window of the same app, or another app, taking the focus part way stops the typing, and
+    # every character said typed is in the shared document.
+    for ch, how, take_focus in (("a", "another window takes the focus", lambda: sh("open", "-a", "TextEdit", other_path)), ("b", "another app comes in front", lambda: sh("open", "-a", "Finder"))):
+        id_ = type_long(h, sc, ch)
+        time.sleep(1.0)
+        take_focus()
+        r = reply(h, id_)
+        n = cut_after(r)
+        check(r is not None and str(r.get("err", "")).startswith("not_front_partial") and 0 < n < LONG, f"typing stops when {how}", json.dumps(r)[:200])
+        got = saved(h, sc, path).count(ch)
+        check(got == n, f"when {how}, keys are refused: only what was said typed reached the shared window", f"{got} in the document, {n} said typed")
 
-    # `stop` and the stop hotkey both end typing that is under way.
-    stops_typing(h, sc, name, "c", "stop", lambda: h.send({"cmd": "stop", "sc": sc, "reason": "stop"}), "stop")
-    sc = "smoke-window-hotkey"
-    if not check(start_window(h, sc, target) is not None, "the window stream starts again", json.dumps(h.seen[-1:])[:300]):
+    # `stop` and the stop hotkey (a real key press, from another process) both end typing that is under way.
+    sc = stops_typing(h, sc, target, path, "c", "stop", lambda: h.send({"cmd": "stop", "sc": sc, "reason": "stop"}), "stop")
+    if sc is None:
         return
-    acknowledge(h, sc, 1)
-    keystroke = 'tell application "System Events" to keystroke "k" using {control down, option down, shift down}'
-    pressed = []
-    stops_typing(h, sc, name, "d", "the stop hotkey", lambda: pressed.append(sh("osascript", "-e", keystroke)), "hotkey")
-    if pressed and pressed[0].returncode != 0:
-        print("        the hotkey press failed: " + pressed[0].stderr.strip()[:200])
+    stops_typing(h, sc, target, path, "d", "the stop hotkey", press_stop_hotkey, "hotkey")
+    h.send({"cmd": "stop", "sc": sc + "-again", "reason": "stop"})
+    ended_of(h, sc + "-again", 5)
+
+    # The other window got none of what was typed: saved through a stream of its own, its file is still empty.
+    other_target = find_window(h, other)
+    if check(other_target is not None and start_window(h, "smoke-other", other_target) is not None, "the other window can be shared"):
+        text = saved(h, "smoke-other", other_path)
+        check(text == "", "the other window got none of the typing", repr(text[:80]))
+        h.send({"cmd": "stop", "sc": "smoke-other", "reason": "stop"})
+        ended_of(h, "smoke-other", 5)
 
 
 def main():
