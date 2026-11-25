@@ -295,11 +295,9 @@ def scenario(d, ph, port, folder):
         ph.click("[data-lock-go]")
         time.sleep(3)
         ph.shot("unlock-sheet")
-        for fy in (0.93, 0.88):  # Safari's "Sign in" sheet: its Continue button at the bottom
-            if not ph.has("[data-lock-screen]"):
-                break
-            ph.tap_screen(0.5, fy)
-            time.sleep(3)
+        # Safari's "Sign In" sheet: Use Passkey sits at 90 % of the screen's height, More Options under it.
+        ph.tap_screen(0.5, 0.90)
+        time.sleep(3)
         try:
             ph.wait("[data-lock-screen]", 40, gone=True)
         except TimeoutError:
