@@ -17,6 +17,9 @@
 //! - `sps`: the SPS rewrite that tells a decoder no frame is reordered, and the codec string.
 //! - `wire`: the helper's stdout frames and the media messages the phone reads.
 //! - `input`: the closed set of input a phone may send, the keys, the stop hotkey.
+//! - `stream_core` (with the `helper` feature, on every OS): one stream's loop, which uses all of the above and drives the machine through
+//!   the `Backend` trait: commands, frames in flight, the keyframe gate, pacing and top-off, paint-over tiles, the cursor and the stats. A
+//!   backend (`win`) only grabs, converts, encodes, reads back and says what it sees.
 
 /// The window class of the sharing border, which is never offered as a target and never captured.
 pub const BORDER_CLASS: &str = "KelpieScreenBorder";
@@ -53,6 +56,9 @@ pub mod wire;
 
 #[cfg(feature = "helper")]
 pub mod tile_image;
+
+#[cfg(feature = "helper")]
+pub mod stream_core;
 
 #[cfg(all(windows, feature = "helper"))]
 pub mod win;

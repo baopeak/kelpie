@@ -7,7 +7,7 @@
 //! - `encode_mf`: Media Foundation H.264, hardware first, the inbox software encoder as the fallback.
 //! - `targets_win`, `states_win`, `input_win`: windows and monitors, what the phone is told about them, `SendInput`.
 //! - `border`: the sharing border and badge (left out of every capture), and the stop hotkey.
-//! - `stream`: one stream's loop, and `Host`, which the stdin commands reach.
+//! - `stream`: this side of `stream_core::Backend`, the input thread, and `Host`, which the stdin commands reach.
 
 pub mod border;
 pub mod capture_dxgi;
@@ -21,12 +21,7 @@ pub mod stream;
 pub mod system;
 pub mod targets_win;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Wall-clock milliseconds, the clock the daemon stamps input with.
-pub fn wall_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
-}
+pub use crate::stream_core::wall_ms;
 
 /// A wide string with its terminating zero.
 pub fn wide(s: &str) -> Vec<u16> {
