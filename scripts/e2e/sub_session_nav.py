@@ -16,7 +16,8 @@ first, the unrelated session outside it; the parent's row lines up with the unre
 children indent, under a tree line that starts below the parent's dot; each click shows the clicked session (pane, tab title, active chip, breadcrumb for a
 child), marks its row and only its row, pulses its row and pane, and leaves the keyboard in its terminal; showing a child never
 reorders the sidebar; a chip and the breadcrumb's link do the same; a folded parent shows its count and stands in for its hidden
-child on screen.
+child on screen. The rows follow the screen (tabs left to right): activity, status, a report and a new sub-session move no row; a
+tab dragged before the family's brings its session up, and a session whose tab closes goes below those on screen.
 
 `--before`: the same clicks and screenshots (prefixed `before-`) against whatever the dev server serves, for a comparison with
 an older version; its failures are printed and the exit code is 0.
@@ -343,12 +344,13 @@ def scenario(run, d):
     w.js("const b = document.querySelector('.project[data-project=\"' + arguments[0] + '\"]').closest('.project-block'); b.querySelector('.session-row .sub-chev').click()", pid)
     check("unfolded: the children come back, in order", until(lambda: order() == want_order, 5), order())
 
-    # Nothing a session does moves a row: activity, status, a report, a new sub-session, a tab dragged, a tab opened and closed.
-    # The order is sampled all along; every sample must be the same.
+    # Nothing a session does moves a row: activity, status, a report, a new sub-session. Only the layout does: a tab dragged, a tab
+    # closed. The order is sampled all along; every sample must be the one the screen gives at that moment.
     samples = []
+    expect = list(want_order)
 
     def sample():
-        samples.append(order())
+        samples.append((list(expect), order()))
 
     def status_of(sid):
         return next((s["status"] for s in d.call("session.list") if s["id"] == sid), None)
@@ -385,8 +387,11 @@ def scenario(run, d):
         return three["id"] if r["name"] == "third-child" else _which(r)
     want_more = ["Claude (parent)", "chat-first-message-lost", "sidebar-clarity", "third-child", "Claude (other)"]
     check("a new sub-session comes last under its parent; nothing else moves", until(lambda: order() == want_more, 15), order())
-    # The other session's tab dragged before the family's tab (as a drag on the tab bar does).
+    # The other session's tab dragged before the family's tab (as a drag on the tab bar does): its row comes first.
     w.js(f"const ws = {S}.workspace(arguments[0]); const t = ws.tabs.find(t => JSON.stringify(t.root).includes(arguments[1])); {S}.moveTab(arguments[0], t.id, 0)", pid, other["id"])
+    expect = ["Claude (other)", "Claude (parent)", "chat-first-message-lost", "sidebar-clarity"]
+    if not BEFORE:
+        check("a tab dragged before the family's tab brings its session's row first", until(lambda: [x for x in order() if x != "third-child"] == expect, 5), order())
     for _ in range(4):
         sample()
         time.sleep(0.25)
@@ -398,23 +403,27 @@ def scenario(run, d):
     def which(r):  # noqa: F811
         return late["id"] if r["name"] == "late" else __which(r)
     w.js(f"{S}.revealSession(arguments[0])", late["id"])
-    check("a new top-level session comes last", until(lambda: order() == want_more + ["late"], 15), order())
+    # Its tab is the last one: its row comes last.
+    check("a new top-level session comes last", until(lambda: [x for x in order() if x != "third-child"] == expect + ["late"], 15), order())
     # Its tab closed while the session keeps running (kill = false): the session used to fall to the bottom of the list.
     loc = w.js(f"return {S}.paneLocation(arguments[0])", late["id"])
     w.js_async(f"const done = arguments[arguments.length-1]; {S}.closePane(arguments[0], arguments[1], arguments[2], false).then(() => done(true), e => done(String(e)))", loc["projectId"], loc["tabId"], loc["paneId"])
     until(lambda: not w.js(f"return {S}.paneLocation(arguments[0])", late["id"]), 15)
     check("set-up: the late session's tab is closed and the session still runs",
           not w.js(f"return {S}.paneLocation(arguments[0])", late["id"]) and any(x["id"] == late["id"] and x.get("alive") for x in d.call("session.list")), order())
-    # And the other session's tab closed the same way: it had a tab from the start, so the old pane order ranked it high.
+    # And the other session's tab closed the same way: on screen nowhere, it goes below the family (sessions on screen nowhere
+    # follow, oldest first).
     oloc = w.js(f"return {S}.paneLocation(arguments[0])", other["id"])
     w.js_async(f"const done = arguments[arguments.length-1]; {S}.closePane(arguments[0], arguments[1], arguments[2], false).then(() => done(true), e => done(String(e)))", oloc["projectId"], oloc["tabId"], oloc["paneId"])
     until(lambda: not w.js(f"return {S}.paneLocation(arguments[0])", other["id"]), 15)
+    expect = list(want_order)
+    until(lambda: order() == want_more + ["late"], 5)
     for _ in range(4):
         sample()
         time.sleep(0.25)
     run.shot(f"{PREFIX}-10-after-activity")
-    moved = [s for s in samples if [x for x in s if x not in ("third-child", "late")] != want_order]
-    check("activity, status changes, a report, a new sub-session, a dragged tab and tabs opened and closed moved no row",
+    moved = [(want, got) for want, got in samples if [x for x in got if x not in ("third-child", "late")] != want]
+    check("activity, status changes, a report and a new sub-session moved no row; a dragged and a closed tab moved only as the screen did",
           not moved and order() == want_more + ["late"], moved[:3] or order())
 
 

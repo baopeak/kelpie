@@ -72,8 +72,9 @@ their name and shortcut when you hover them.
 2. **Start a session**: click Claude / Codex / OMP / Terminal on the empty project screen, or
    `+` in the tab bar for options (extra args, name, split, *Chat view*) and your quick commands.
 3. **Sidebar**: every project with its branch (`*` = uncommitted changes, ↑↓ ahead/behind) and
-   its sessions — oldest first, each keeping its place whatever it or its panes do (the row of
-   the session on screen is marked): status dot, task title, model and time since the
+   its sessions in the order they are on screen — tabs left to right, and in each tab left pane
+   before right, top before bottom — and the rest after, oldest first (the row of the session on
+   screen is marked): status dot, task title, model and time since the
    last activity. Badges show
    sessions that need you (amber), are working (blue) or finished unread (green). The chevron
    folds a project (a folded repository shows how many worktrees it has); the toolbar filters
@@ -868,10 +869,14 @@ open). A request not answered in 5 minutes is refused, and one withdrawn when it
 
 **The tree.** A child sits under its parent in the sidebar (if both are in the same project), on
 tree lines, oldest first; the parent and everything below it share one faint card, so the next
-top-level session reads as separate. A project's sessions are listed oldest first and keep their
-place: activity, a status or report, a new sub-session, which session a pane shows and tabs opened,
-closed or dragged move no row (a conversation switched between terminal and chat keeps the place of
-the session it replaced). The parent row has a fold arrow and a badge with the number of sessions below it, coloured
+top-level session reads as separate. A project's sessions are listed in the order they are on
+screen: tabs left to right, and in each tab its panes in the order they were split: a side-by-side
+split lists its left side before its right, a stacked one its top before its bottom, each side
+whole before the next (resizing panes never reorders the list). A family
+moves as one block, at the place of its first member on screen, so showing a child in its parent's
+pane moves nothing. Sessions in no pane or tab follow, oldest first (a conversation switched between
+terminal and chat keeps the place of the session it replaced). Only the layout moves a row (a pane
+split, moved or closed, a tab dragged): activity, a status or report, focus and clicks never do. The parent row has a fold arrow and a badge with the number of sessions below it, coloured
 by the worst state among them (needs you, failed, working, finished, idle); folded, the parent is
 marked while one of its hidden children is on screen. The session on screen has its row marked
 (accent wash and edge, name in bold) and kept in view. A family of sessions lives in the tab of the

@@ -14,6 +14,7 @@ import { Icon, KindGlyph } from "./icons";
 import { ContextRing } from "./context-ring";
 import { BrandMark, BrandWordmark, KipCompanion, kipShown } from "./brand";
 import { findPane } from "../lib/layout";
+import { orderByScreen, screenPlaces, shareTakeoverPlaces } from "../lib/session-order";
 import { sessionAccount } from "../lib/accounts";
 import { isAgentKind } from "../lib/agents";
 import { hostLabel } from "../lib/remote";
@@ -109,9 +110,8 @@ export const shortModel = (m: string | null | undefined) =>
   m ? m.replace(/^(claude|anthropic)[-/]/i, "").replace(/^openai[-/]/i, "").replace(/\[.*\]$/, "") : "";
 
 /** A project's sessions in a stable order: oldest first, a session switched between terminal and chat (a new session that took
- *  over the conversation) in the place of the one it replaced (`store.sessionSince`). Nothing a person does elsewhere moves a
- *  row: not activity or status, not opening, showing or closing a pane, not a family's pane switching between parent and child
- *  (rows used to follow pane order, so each of those reshuffled the list). */
+ *  over the conversation) in the place of the one it replaced (`store.sessionSince`). The rows follow the screen on top of it
+ *  (`projectRows`); this order breaks their ties and orders the sessions on screen nowhere. */
 function projectSessions(projectId: string): SessionInfo[] {
   return Object.values(store.sessions)
     .filter((s) => s.project_id === projectId)
@@ -127,9 +127,27 @@ const isNested = (s: SessionInfo) => {
   return (store.sessions[parent]?.project_id ?? null) === (s.project_id ?? null);
 };
 
-/** The sessions listed directly under a project: its own, less the sub-sessions shown under their parents. (Counts, filters and
- *  the "recent" order look at all of them: a sub-session that needs you still lights its project.) */
-const projectRows = (projectId: string) => projectSessions(projectId).filter((s) => !isNested(s));
+/** The row a session is listed under: its own, or for a sub-session the top of its family. */
+const rowOf = (id: string) => {
+  let s: SessionInfo | undefined = store.sessions[id];
+  for (let guard = 0; s && isNested(s) && guard < 10_000; guard++) s = store.sessions[store.sessionTree().nested.get(s.id)!];
+  return s?.id;
+};
+
+/** The sessions listed directly under a project: its own, less the sub-sessions shown under their parents, in the order they are
+ *  on screen: tabs left to right, each tab's panes in layout order (a side-by-side split left before right, a stacked one top
+ *  before bottom, each half whole before the next; pane sizes play no part). A family (a parent and its sub-sessions)
+ *  is one block at the place of its first member on screen, so a child shown in its parent's pane moves nothing. Sessions on
+ *  screen nowhere follow, oldest first. A conversation switched between terminal and chat keeps its row's place throughout (the
+ *  new session and the one it replaces share a place while the pane passes from one to the other). Only the layout moves a row:
+ *  never activity, status, focus or a click on a row on screen. (Counts, filters and the "recent" order look at all of them: a
+ *  sub-session that needs you still lights its project.) */
+const projectRows = (projectId: string) =>
+  orderByScreen(
+    projectSessions(projectId).filter((s) => !isNested(s)),
+    shareTakeoverPlaces(screenPlaces(store.workspace(projectId).tabs), store.takeovers()),
+    rowOf,
+  );
 
 const lastActivity = (projectId: string) =>
   projectSessions(projectId).reduce((m, s) => Math.max(m, s.last_activity || s.created_at), 0);
