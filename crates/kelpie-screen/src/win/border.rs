@@ -11,20 +11,14 @@ use std::thread::JoinHandle;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect,
-    SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    PostMessageW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST,
-    LWA_COLORKEY, MSG, SWP_NOACTIVATE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
-    WM_DESTROY, WM_HOTKEY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, PostMessageW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos,
+    ShowWindow, TranslateMessage, HWND_TOPMOST, LWA_COLORKEY, MSG, SWP_NOACTIVATE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE, WM_DESTROY, WM_HOTKEY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::wide;
@@ -67,40 +61,15 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
             let dark = CreateSolidBrush(DARK);
             FillRect(dc, &client, key);
             for edge in [
-                RECT {
-                    left: 0,
-                    top: 0,
-                    right: client.right,
-                    bottom: THICK,
-                },
-                RECT {
-                    left: 0,
-                    top: client.bottom - THICK,
-                    right: client.right,
-                    bottom: client.bottom,
-                },
-                RECT {
-                    left: 0,
-                    top: 0,
-                    right: THICK,
-                    bottom: client.bottom,
-                },
-                RECT {
-                    left: client.right - THICK,
-                    top: 0,
-                    right: client.right,
-                    bottom: client.bottom,
-                },
+                RECT { left: 0, top: 0, right: client.right, bottom: THICK },
+                RECT { left: 0, top: client.bottom - THICK, right: client.right, bottom: client.bottom },
+                RECT { left: 0, top: 0, right: THICK, bottom: client.bottom },
+                RECT { left: client.right - THICK, top: 0, right: client.right, bottom: client.bottom },
             ] {
                 FillRect(dc, &edge, orange);
             }
             let w = BADGE_W.min(client.right - 2 * THICK);
-            let mut badge = RECT {
-                left: (client.right - w) / 2,
-                top: THICK,
-                right: (client.right + w) / 2,
-                bottom: THICK + BADGE_H,
-            };
+            let mut badge = RECT { left: (client.right - w) / 2, top: THICK, right: (client.right + w) / 2, bottom: THICK + BADGE_H };
             FillRect(dc, &badge, dark);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, ORANGE);
@@ -108,12 +77,7 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                 if let Some(s) = s.borrow().as_ref() {
                     let mut text = s.label.clone();
                     text.pop();
-                    DrawTextW(
-                        dc,
-                        &mut text,
-                        &mut badge,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    );
+                    DrawTextW(dc, &mut text, &mut badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 }
             });
             let _ = DeleteObject(key.into());
@@ -125,15 +89,7 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
         MOVE => {
             let r = STATE.with(|s| s.borrow().as_ref().map(|s| *s.rect.lock().unwrap()));
             if let Some(r) = r {
-                let _ = SetWindowPos(
-                    hwnd,
-                    Some(HWND_TOPMOST),
-                    r.x - THICK,
-                    r.y - THICK,
-                    r.w + 2 * THICK,
-                    r.h + 2 * THICK,
-                    SWP_NOACTIVATE,
-                );
+                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), r.x - THICK, r.y - THICK, r.w + 2 * THICK, r.h + 2 * THICK, SWP_NOACTIVATE);
                 let _ = InvalidateRect(Some(hwnd), None, true);
             }
             LRESULT(0)
@@ -163,41 +119,21 @@ impl Border {
     /// Shows the border around `rect` (screen pixels) with `label` in its badge, and registers the stop hotkey, which sends on `on_hotkey`. Returns
     /// once the window exists: an error (no window, or the hotkey held by another program) means the screen must not be shared, since the desktop
     /// would not show it or could not stop it.
-    pub fn show(
-        rect: Rect,
-        label: &str,
-        hotkey: Hotkey,
-        on_hotkey: Sender<()>,
-    ) -> Result<Border, String> {
+    pub fn show(rect: Rect, label: &str, hotkey: Hotkey, on_hotkey: Sender<()>) -> Result<Border, String> {
         let hwnd = Arc::new(Mutex::new(0usize));
         let shared = Arc::new(Mutex::new(rect));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (h, r) = (hwnd.clone(), shared.clone());
         let label = wide(label);
         let thread = std::thread::spawn(move || unsafe {
-            STATE.with(|s| {
-                *s.borrow_mut() = Some(State {
-                    label,
-                    rect: r.clone(),
-                    hotkey: Some(on_hotkey),
-                })
-            });
+            STATE.with(|s| *s.borrow_mut() = Some(State { label, rect: r.clone(), hotkey: Some(on_hotkey) }));
             let instance = GetModuleHandleW(None).unwrap_or_default();
             let class = wide(crate::BORDER_CLASS);
-            let wc = WNDCLASSW {
-                lpfnWndProc: Some(proc_),
-                hInstance: instance.into(),
-                lpszClassName: PCWSTR(class.as_ptr()),
-                ..Default::default()
-            };
+            let wc = WNDCLASSW { lpfnWndProc: Some(proc_), hInstance: instance.into(), lpszClassName: PCWSTR(class.as_ptr()), ..Default::default() };
             RegisterClassW(&wc);
             let rect = *r.lock().unwrap();
             let Ok(win) = CreateWindowExW(
-                WS_EX_LAYERED
-                    | WS_EX_TRANSPARENT
-                    | WS_EX_TOPMOST
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 PCWSTR(class.as_ptr()),
                 w!("Kelpie screen sharing"),
                 WS_POPUP,
@@ -217,19 +153,9 @@ impl Border {
             let _ = SetLayeredWindowAttributes(win, KEY, 255, LWA_COLORKEY);
             let _ = SetWindowDisplayAffinity(win, WDA_EXCLUDEFROMCAPTURE);
             let _ = ShowWindow(win, SW_SHOWNOACTIVATE);
-            if RegisterHotKey(
-                Some(win),
-                1,
-                HOT_KEY_MODIFIERS(hotkey.mods) | MOD_NOREPEAT,
-                u32::from(hotkey.vk),
-            )
-            .is_err()
-            {
+            if RegisterHotKey(Some(win), 1, HOT_KEY_MODIFIERS(hotkey.mods) | MOD_NOREPEAT, u32::from(hotkey.vk)).is_err() {
                 let _ = DestroyWindow(win);
-                let _ = ready_tx.send(Err(
-                    "another program holds the stop hotkey: pick another in Settings → Mobile"
-                        .into(),
-                ));
+                let _ = ready_tx.send(Err("another program holds the stop hotkey: pick another in Settings → Mobile".into()));
                 return;
             }
             let _ = ready_tx.send(Ok(()));
@@ -241,11 +167,7 @@ impl Border {
             }
         });
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Border {
-                hwnd,
-                rect: shared,
-                thread: Some(thread),
-            }),
+            Ok(Ok(())) => Ok(Border { hwnd, rect: shared, thread: Some(thread) }),
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)

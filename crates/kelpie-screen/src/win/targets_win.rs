@@ -2,18 +2,11 @@
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetCursorInfo, GetWindow, GetWindowLongPtrW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, CURSORINFO,
-    CURSOR_SHOWING, GWL_EXSTYLE, GW_OWNER, HCURSOR, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS,
-    IDC_HAND, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
-    IDC_WAIT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    EnumWindows, GetClassNameW, GetCursorInfo, GetWindow, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, CURSORINFO, CURSOR_SHOWING,
+    GWL_EXSTYLE, GW_OWNER, HCURSOR, IDC_APPSTARTING, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use super::from_wide;
@@ -28,15 +21,7 @@ pub fn hwnd(h: u64) -> HWND {
 /// Where a window is: its frame as DWM draws it (no invisible resize borders), physical pixels.
 pub fn window_rect(h: HWND) -> Option<Rect> {
     let mut r = RECT::default();
-    unsafe {
-        DwmGetWindowAttribute(
-            h,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut r as *mut _ as *mut _,
-            std::mem::size_of::<RECT>() as u32,
-        )
-        .ok()?
-    };
+    unsafe { DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut _, std::mem::size_of::<RECT>() as u32).ok()? };
     Some(Rect::from_edges(r.left, r.top, r.right, r.bottom))
 }
 
@@ -57,27 +42,16 @@ pub fn minimized(h: HWND) -> bool {
 
 fn exe_name(pid: u32) -> String {
     unsafe {
-        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return String::new();
-        };
+        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            p,
-            PROCESS_NAME_WIN32,
-            windows::core::PWSTR(buf.as_mut_ptr()),
-            &mut len,
-        )
-        .is_ok();
+        let ok = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
         let _ = CloseHandle(p);
         if !ok {
             return String::new();
         }
         let full = String::from_utf16_lossy(&buf[..len as usize]);
-        full.rsplit(['\\', '/'])
-            .next()
-            .unwrap_or_default()
-            .to_string()
+        full.rsplit(['\\', '/']).next().unwrap_or_default().to_string()
     }
 }
 
@@ -125,20 +99,12 @@ pub fn windows() -> Vec<WindowInfo> {
 /// The cursor: shape, whether it shows, where (screen pixels).
 pub fn cursor() -> (Shape, bool, i32, i32) {
     unsafe {
-        let mut ci = CURSORINFO {
-            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
-            ..Default::default()
-        };
+        let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
         if GetCursorInfo(&mut ci).is_err() {
             return (Shape::Arrow, false, 0, 0);
         }
         let POINT { x, y } = ci.ptScreenPos;
-        (
-            shape_of(ci.hCursor),
-            ci.flags.0 & CURSOR_SHOWING.0 != 0,
-            x,
-            y,
-        )
+        (shape_of(ci.hCursor), ci.flags.0 & CURSOR_SHOWING.0 != 0, x, y)
     }
 }
 

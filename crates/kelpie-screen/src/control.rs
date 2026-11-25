@@ -29,17 +29,7 @@ const fn rung(fps: u8, scale: u8) -> Rung {
 }
 
 /// Frames a second first, then size, down to about 360p at 5 fps for a slow link (200-300 kbps).
-pub const RUNGS: [Rung; 9] = [
-    rung(30, 100),
-    rung(20, 100),
-    rung(15, 100),
-    rung(10, 100),
-    rung(8, 100),
-    rung(8, 75),
-    rung(6, 67),
-    rung(6, 50),
-    rung(5, 33),
-];
+pub const RUNGS: [Rung; 9] = [rung(30, 100), rung(20, 100), rung(15, 100), rung(10, 100), rung(8, 100), rung(8, 75), rung(6, 67), rung(6, 50), rung(5, 33)];
 pub const LOWEST: usize = RUNGS.len() - 1;
 /// From this rung on, a keyframe always takes the big frame's bitrate dip (`pace::BigFrame`), so that it stays small on a slow link.
 pub const KEY_DIP_RUNG: usize = 7;
@@ -95,9 +85,7 @@ impl Overuse {
 
     /// One frame took `encode_ms` at a rung whose frames come every `interval_ms`. True when the rung changed.
     pub fn sample(&mut self, encode_ms: f64, interval_ms: f64, now: u64) -> bool {
-        let ema = self
-            .ema
-            .map_or(encode_ms, |e| e + EMA_ALPHA * (encode_ms - e));
+        let ema = self.ema.map_or(encode_ms, |e| e + EMA_ALPHA * (encode_ms - e));
         self.ema = Some(ema);
         self.frames = self.frames.saturating_add(1);
         let usage = ema / interval_ms.max(1.0);
@@ -112,10 +100,7 @@ impl Overuse {
         } else if usage < UNDER {
             self.over_since = None;
             let since = *self.under_since.get_or_insert(now);
-            if now.saturating_sub(since) >= UNDER_FOR_MS
-                && self.frames >= UP_MIN_FRAMES
-                && self.rung > 0
-            {
+            if now.saturating_sub(since) >= UNDER_FOR_MS && self.frames >= UP_MIN_FRAMES && self.rung > 0 {
                 self.rung -= 1;
                 self.changed();
                 return true;
@@ -301,9 +286,7 @@ impl Bandwidth {
 
     /// How long the link's window must be full for a cut: twice the round trip's floor, between half a second and a second (a second without one).
     fn full_for_ms(&self) -> u64 {
-        self.rtt_base().map_or(FULL_FOR_MS, |r| {
-            (2 * u64::from(r)).clamp(FULL_FOR_MIN_MS, FULL_FOR_MS)
-        })
+        self.rtt_base().map_or(FULL_FOR_MS, |r| (2 * u64::from(r)).clamp(FULL_FOR_MIN_MS, FULL_FOR_MS))
     }
 
     /// The bitrate goes to `to` for `rule`, and the cut is kept with what was seen. False when it was already there (the floor).
@@ -311,15 +294,7 @@ impl Bandwidth {
         if to == self.kbps {
             return false;
         }
-        let cut = Cut {
-            rule,
-            from_kbps: self.kbps,
-            to_kbps: to,
-            rtt_recent_ms: self.recent_floor(),
-            rtt_base_ms: self.rtt_base(),
-            link_full_ms: self.link_full_ms,
-            inflight,
-        };
+        let cut = Cut { rule, from_kbps: self.kbps, to_kbps: to, rtt_recent_ms: self.recent_floor(), rtt_base_ms: self.rtt_base(), link_full_ms: self.link_full_ms, inflight };
         self.kbps = to;
         match rule {
             CutRule::Queueing => self.cut_counts.queueing += 1,
@@ -360,18 +335,9 @@ impl Bandwidth {
     /// The round trip's floor over the last trend window, counted from after the last cut, with enough samples to be a trend.
     fn recent_floor(&self) -> Option<u32> {
         let latest = self.rtts.back()?.0;
-        let from = latest
-            .saturating_sub(self.trend_window_ms())
-            .max(self.last_down.map_or(0, |d| d + 1));
-        let recent: Vec<u32> = self
-            .rtts
-            .iter()
-            .filter(|(t, _)| *t >= from)
-            .map(|(_, r)| *r)
-            .collect();
-        (recent.len() >= self.trend_samples())
-            .then(|| recent.into_iter().min())
-            .flatten()
+        let from = latest.saturating_sub(self.trend_window_ms()).max(self.last_down.map_or(0, |d| d + 1));
+        let recent: Vec<u32> = self.rtts.iter().filter(|(t, _)| *t >= from).map(|(_, r)| *r).collect();
+        (recent.len() >= self.trend_samples()).then(|| recent.into_iter().min()).flatten()
     }
 
     /// Whether the queueing seen now is worth a cut: half a second after the last one; once a cut's floor has held for a second it is a new
@@ -388,15 +354,10 @@ impl Bandwidth {
             // Nothing to tell yet (no samples since the cut): wait.
             None => return false,
         }
-        if self
-            .last_down
-            .is_some_and(|d| now.saturating_sub(d) < self.trend_window_ms())
-        {
+        if self.last_down.is_some_and(|d| now.saturating_sub(d) < self.trend_window_ms()) {
             return false;
         }
-        let Some(recent) = self.recent_floor() else {
-            return false;
-        };
+        let Some(recent) = self.recent_floor() else { return false };
         if let (Some(before), Some(down)) = (self.cut_floor, self.last_down) {
             if recent + SHIFT_TOLERANCE_MS < before {
                 return false;
@@ -421,11 +382,7 @@ impl Bandwidth {
     /// A frame's round trip, from the daemon sending it to the phone's acknowledgement.
     pub fn on_ack(&mut self, rtt_ms: u32, now: u64) {
         self.rtts.push_back((now, rtt_ms));
-        while self
-            .rtts
-            .front()
-            .is_some_and(|(t, _)| now.saturating_sub(*t) > MIN_RTT_WINDOW_MS)
-        {
+        while self.rtts.front().is_some_and(|(t, _)| now.saturating_sub(*t) > MIN_RTT_WINDOW_MS) {
             self.rtts.pop_front();
         }
     }
@@ -437,8 +394,7 @@ impl Bandwidth {
 
     /// No frame went out lately: what the link carries is not being tested.
     pub fn app_limited(&self, now: u64) -> bool {
-        self.last_sent
-            .is_none_or(|s| now.saturating_sub(s) >= IDLE_AFTER_MS)
+        self.last_sent.is_none_or(|s| now.saturating_sub(s) >= IDLE_AFTER_MS)
     }
 
     /// A media message of `raw` bytes went out as `wire` bytes (the daemon works it out from the link's padding).
@@ -471,31 +427,19 @@ impl Bandwidth {
         let link_full = self.link_full_ms >= full_for;
         // That long of it for the first cut, and a second more of the same spell for each cut after it (a link that stalls altogether, for a
         // dropped path, is not cut to the floor twice as fast).
-        let window_cut =
-            self.link_full_ms >= self.window_cut_at.map_or(full_for, |at| at + FULL_FOR_MS);
+        let window_cut = self.link_full_ms >= self.window_cut_at.map_or(full_for, |at| at + FULL_FOR_MS);
         if queueing || link_full {
             self.clean_since = now;
             if queue_cut || window_cut {
-                if self
-                    .last_up
-                    .is_some_and(|u| now.saturating_sub(u) < UP_WAIT_MS)
-                {
+                if self.last_up.is_some_and(|u| now.saturating_sub(u) < UP_WAIT_MS) {
                     self.up_wait = (self.up_wait * 2).min(UP_WAIT_MAX_MS);
                 }
                 if link_full {
                     self.window_cut_at = Some(self.link_full_ms);
                 }
                 self.last_down = Some(now);
-                let rule = if queue_cut {
-                    CutRule::Queueing
-                } else {
-                    CutRule::Window
-                };
-                return self.cut_to(
-                    (self.kbps * CUT_PERCENT / 100).max(MIN_KBPS),
-                    rule,
-                    inflight,
-                );
+                let rule = if queue_cut { CutRule::Queueing } else { CutRule::Window };
+                return self.cut_to((self.kbps * CUT_PERCENT / 100).max(MIN_KBPS), rule, inflight);
             }
             return false;
         }
@@ -522,11 +466,7 @@ impl Bandwidth {
     /// Whether the link has room for crisp tiles on top of the video: at least `CRISP_MIN_KBPS`, no lag now, and no cut of the bitrate in the
     /// last `CRISP_CALM_MS`. Measured, so it holds for any network: a phone page cannot tell cellular from Wi-Fi on iOS.
     pub fn calm(&self, inflight: u32, now: u64) -> bool {
-        self.kbps >= CRISP_MIN_KBPS
-            && !self.lagging(inflight)
-            && self
-                .last_down
-                .is_none_or(|d| now.saturating_sub(d) >= CRISP_CALM_MS)
+        self.kbps >= CRISP_MIN_KBPS && !self.lagging(inflight) && self.last_down.is_none_or(|d| now.saturating_sub(d) >= CRISP_CALM_MS)
     }
 
     /// The rung the bitrate affords: 1080p30 → 1080p15 → 1080p8 → 75 % at 8 → 67 % at 6 → half at 6 → a third at 5.
@@ -557,10 +497,7 @@ pub const KEYFRAME_GAP_MS: u64 = 1000;
 impl KeyframeGate {
     /// True when the next frame should be a keyframe now.
     pub fn request(&mut self, now: u64) -> bool {
-        if self
-            .last
-            .is_none_or(|l| now.saturating_sub(l) >= KEYFRAME_GAP_MS)
-        {
+        if self.last.is_none_or(|l| now.saturating_sub(l) >= KEYFRAME_GAP_MS) {
             self.last = Some(now);
             self.pending = false;
             true
@@ -572,11 +509,7 @@ impl KeyframeGate {
 
     /// A request that waited: true once its second is over.
     pub fn due(&mut self, now: u64) -> bool {
-        if self.pending
-            && self
-                .last
-                .is_none_or(|l| now.saturating_sub(l) >= KEYFRAME_GAP_MS)
-        {
+        if self.pending && self.last.is_none_or(|l| now.saturating_sub(l) >= KEYFRAME_GAP_MS) {
             self.pending = false;
             self.last = Some(now);
             return true;
@@ -612,13 +545,7 @@ pub struct Flight {
 
 impl Default for Flight {
     fn default() -> Flight {
-        Flight {
-            seq: 0,
-            acked: 0,
-            key: true,
-            gate: KeyframeGate::default(),
-            sizes: VecDeque::new(),
-        }
+        Flight { seq: 0, acked: 0, key: true, gate: KeyframeGate::default(), sizes: VecDeque::new() }
     }
 }
 
@@ -738,13 +665,7 @@ pub const TOP_WIDTH: u32 = 1920;
 /// than `TOP_WIDTH` (an ultrawide monitor is shown smaller), even sides.
 fn fit(src: (u32, u32), scale: u8, min_lines: u32, max_lines: u32) -> (u32, u32) {
     let lines = u64::from(src.1.min(TOP_LINES)) * u64::from(scale.clamp(1, 100)) / 100;
-    let (w, h) = geom::fitted(
-        src.0,
-        src.1,
-        lines as u32,
-        min_lines,
-        max_lines.min(TOP_LINES),
-    );
+    let (w, h) = geom::fitted(src.0, src.1, lines as u32, min_lines, max_lines.min(TOP_LINES));
     if w <= TOP_WIDTH || w == 0 {
         return (w, h);
     }
@@ -786,21 +707,7 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(src: (u32, u32), window: bool, software: bool, now: u64) -> Controller {
-        Controller {
-            overuse: Overuse::default(),
-            bandwidth: Bandwidth::new(now),
-            src,
-            window,
-            level: 0,
-            software,
-            l3_since: None,
-            paused_for_load: false,
-            hw_times: VecDeque::new(),
-            hw_slow_since: None,
-            asked_software: false,
-            win: false,
-            started_low: false,
-        }
+        Controller { overuse: Overuse::default(), bandwidth: Bandwidth::new(now), src, window, level: 0, software, l3_since: None, paused_for_load: false, hw_times: VecDeque::new(), hw_slow_since: None, asked_software: false, win: false, started_low: false }
     }
 
     /// Whether the daemon takes a window sized to the link.
@@ -823,14 +730,10 @@ impl Controller {
     /// window keeps a long link busy (3 frames cost 7.5 fps at 100 ms); the queueing cut still bounds how old a picture gets. 3 frames and
     /// 192 KiB until a round trip is known, and for a daemon that does not take another.
     pub fn window(&self) -> (u32, usize) {
-        let Some(rtt) = self.bandwidth.rtt_base().filter(|_| self.win) else {
-            return (MIN_WINDOW, MIN_WINDOW_BYTES);
-        };
+        let Some(rtt) = self.bandwidth.rtt_base().filter(|_| self.win) else { return (MIN_WINDOW, MIN_WINDOW_BYTES) };
         let fps = u64::from(self.params().fps);
-        let frames = ((fps * (u64::from(rtt) + 50)).div_ceil(1000) + 1)
-            .clamp(u64::from(MIN_WINDOW), u64::from(MAX_WINDOW)) as u32;
-        let bytes = (u64::from(self.bandwidth.kbps) * (u64::from(rtt) + 100) / 8)
-            .clamp(MIN_WINDOW_BYTES as u64, MAX_WINDOW_BYTES as u64) as usize;
+        let frames = ((fps * (u64::from(rtt) + 50)).div_ceil(1000) + 1).clamp(u64::from(MIN_WINDOW), u64::from(MAX_WINDOW)) as u32;
+        let bytes = (u64::from(self.bandwidth.kbps) * (u64::from(rtt) + 100) / 8).clamp(MIN_WINDOW_BYTES as u64, MAX_WINDOW_BYTES as u64) as usize;
         (frames, bytes)
     }
 
@@ -888,18 +791,8 @@ impl Controller {
         let at = self.rung();
         let r = RUNGS[at];
         let min_lines = if self.window { MIN_WINDOW_LINES } else { 0 };
-        let encoder = if self.started_low {
-            Reason::Load
-        } else {
-            Reason::Cpu
-        };
-        let mut reason = if at == 0 {
-            Reason::None
-        } else if self.overuse.rung >= self.bandwidth.rung() {
-            encoder
-        } else {
-            Reason::Bandwidth
-        };
+        let encoder = if self.started_low { Reason::Load } else { Reason::Cpu };
+        let mut reason = if at == 0 { Reason::None } else if self.overuse.rung >= self.bandwidth.rung() { encoder } else { Reason::Bandwidth };
         let (free_w, free_h) = fit(self.src, r.scale, min_lines, u32::MAX);
         let (mut fps, mut max_lines) = (r.fps, u32::MAX);
         let mut cap = |c: (u8, u32), why: Reason, fps: &mut u8, max_lines: &mut u32| {
@@ -915,29 +808,13 @@ impl Controller {
         if self.software {
             cap(SOFTWARE_CAP, Reason::Encoder, &mut fps, &mut max_lines);
         }
-        let (w, h) = if max_lines == u32::MAX {
-            (free_w, free_h)
-        } else {
-            fit(self.src, r.scale, min_lines, max_lines)
-        };
+        let (w, h) = if max_lines == u32::MAX { (free_w, free_h) } else { fit(self.src, r.scale, min_lines, max_lines) };
         // What goes on the wire is more than what the encoder makes (the link pads each message): the encoder is asked for less.
         let link = (f64::from(self.bandwidth.kbps) / self.bandwidth.wire_factor()) as u32;
-        let kbps = if self.software {
-            link.min(SOFTWARE_MAX_KBPS)
-        } else {
-            link
-        }
-        .max(MIN_KBPS / 2);
+        let kbps = if self.software { link.min(SOFTWARE_MAX_KBPS) } else { link }.max(MIN_KBPS / 2);
         // Smaller than the top rung's own picture is "reduced"; a 4K monitor shown at 1080p is not.
         let degraded = fps < 8 || h < fit(self.src, 100, min_lines, u32::MAX).1;
-        Params {
-            fps,
-            w,
-            h,
-            kbps,
-            reason,
-            degraded,
-        }
+        Params { fps, w, h, kbps, reason, degraded }
     }
 
     pub fn interval_ms(&self) -> f64 {
@@ -955,11 +832,7 @@ impl Controller {
             return None;
         }
         self.hw_times.push_back((now, encode_ms));
-        while self
-            .hw_times
-            .front()
-            .is_some_and(|(t, _)| now.saturating_sub(*t) > HW_SLOW_FOR_MS)
-        {
+        while self.hw_times.front().is_some_and(|(t, _)| now.saturating_sub(*t) > HW_SLOW_FOR_MS) {
             self.hw_times.pop_front();
         }
         let p95 = percentile(self.hw_times.iter().map(|(_, ms)| *ms), 0.95);
@@ -982,11 +855,7 @@ impl Controller {
         self.bandwidth.fps = self.params().fps;
         self.bandwidth.window = self.window().0;
         self.bandwidth.tick(inflight, now);
-        if !self.paused_for_load
-            && self
-                .l3_since
-                .is_some_and(|s| now.saturating_sub(s) >= L3_PAUSE_MS)
-        {
+        if !self.paused_for_load && self.l3_since.is_some_and(|s| now.saturating_sub(s) >= L3_PAUSE_MS) {
             self.paused_for_load = true;
             return Some(Event::PausedForLoad);
         }
@@ -1000,17 +869,9 @@ impl Controller {
 
     /// Whether a frame may be encoded now: the window has room for it (frames and bytes in flight), and the rung's interval has passed since
     /// the last one.
-    pub fn may_encode(
-        &self,
-        inflight: u32,
-        inflight_bytes: usize,
-        since_last_ms: Option<u64>,
-    ) -> bool {
+    pub fn may_encode(&self, inflight: u32, inflight_bytes: usize, since_last_ms: Option<u64>) -> bool {
         let (frames, bytes) = self.window();
-        !self.paused_for_load
-            && inflight < frames
-            && inflight_bytes < bytes
-            && since_last_ms.is_none_or(|ms| ms as f64 + 0.5 >= self.interval_ms())
+        !self.paused_for_load && inflight < frames && inflight_bytes < bytes && since_last_ms.is_none_or(|ms| ms as f64 + 0.5 >= self.interval_ms())
     }
 }
 
@@ -1117,10 +978,7 @@ pub struct Report {
 
 impl Stats {
     pub fn new(now: u64) -> Stats {
-        Stats {
-            since: now,
-            ..Default::default()
-        }
+        Stats { since: now, ..Default::default() }
     }
 
     pub fn frame(&mut self, bytes: usize, key: bool, encode_ms: f64) {
@@ -1167,29 +1025,13 @@ impl Stats {
     }
 
     /// The second's report, once a second has passed; the counters start again (the interval carries on from the last frame).
-    pub fn report(
-        &mut self,
-        now: u64,
-        p: &Params,
-        level: u8,
-        software: bool,
-        crisp: Option<bool>,
-    ) -> Option<Report> {
+    pub fn report(&mut self, now: u64, p: &Params, level: u8, software: bool, crisp: Option<bool>) -> Option<Report> {
         self.report_with(now, p, level, software, crisp, 0, None)
     }
 
     /// `report`, with what the encoder holds and its first output's delay.
     #[allow(clippy::too_many_arguments)]
-    pub fn report_with(
-        &mut self,
-        now: u64,
-        p: &Params,
-        level: u8,
-        software: bool,
-        crisp: Option<bool>,
-        held: u64,
-        first_output_ms: Option<f64>,
-    ) -> Option<Report> {
+    pub fn report_with(&mut self, now: u64, p: &Params, level: u8, software: bool, crisp: Option<bool>, held: u64, first_output_ms: Option<f64>) -> Option<Report> {
         let span = now.saturating_sub(self.since);
         if span < 1000 {
             return None;
@@ -1206,8 +1048,7 @@ impl Stats {
             h: p.h,
             kbps: per_s(self.bytes * 8) / 1000,
             target_kbps: p.kbps,
-            encode_ms_p95: percentile(self.encode_ms.iter().copied(), 0.95)
-                .map_or(0.0, |v| (v * 10.0).round() / 10.0),
+            encode_ms_p95: percentile(self.encode_ms.iter().copied(), 0.95).map_or(0.0, |v| (v * 10.0).round() / 10.0),
             dropped: self.dropped_encoder + self.dropped_link,
             reason: p.reason,
             degraded: p.degraded,
@@ -1216,14 +1057,8 @@ impl Stats {
             idr_ratio,
             crisp,
             stages: Stages {
-                capture_to_send_ms_p50: round1(percentile(
-                    self.capture_to_send.iter().copied(),
-                    0.5,
-                )),
-                capture_to_send_ms_p95: round1(percentile(
-                    self.capture_to_send.iter().copied(),
-                    0.95,
-                )),
+                capture_to_send_ms_p50: round1(percentile(self.capture_to_send.iter().copied(), 0.5)),
+                capture_to_send_ms_p95: round1(percentile(self.capture_to_send.iter().copied(), 0.95)),
                 convert_ms_p95: round1(percentile(self.convert.iter().copied(), 0.95)),
                 encode_ms_p50: round1(percentile(self.encode_ms.iter().copied(), 0.5)),
                 send_interval_ms_p95: round1(percentile(self.send_intervals.iter().copied(), 0.95)),
@@ -1238,23 +1073,14 @@ impl Stats {
                 link_cuts_queueing: self.link_cuts.queueing,
                 link_cuts_window: self.link_cuts.window,
                 link_cuts_size: self.link_cuts.size,
-                last_cut_queueing_ms: self
-                    .last_cut
-                    .as_ref()
-                    .and_then(|c| c.rtt_recent_ms.zip(c.rtt_base_ms))
-                    .map(|(recent, base)| recent.saturating_sub(base)),
+                last_cut_queueing_ms: self.last_cut.as_ref().and_then(|c| c.rtt_recent_ms.zip(c.rtt_base_ms)).map(|(recent, base)| recent.saturating_sub(base)),
                 last_cut_link_full_ms: self.last_cut.as_ref().map(|c| c.link_full_ms),
                 last_cut_inflight: self.last_cut.as_ref().map(|c| c.inflight),
                 inflight_limit: self.inflight_limit,
             },
             cuts: std::mem::take(&mut self.cuts),
         };
-        let (last_send, dxgi_first_full, last_cut, inflight_limit) = (
-            self.last_send,
-            self.dxgi_first_full,
-            self.last_cut.take(),
-            self.inflight_limit,
-        );
+        let (last_send, dxgi_first_full, last_cut, inflight_limit) = (self.last_send, self.dxgi_first_full, self.last_cut.take(), self.inflight_limit);
         *self = Stats::new(now);
         self.inflight_limit = inflight_limit;
         self.last_send = last_send;
@@ -1270,15 +1096,9 @@ mod tests {
 
     #[test]
     fn the_ladder_drops_frames_before_size_and_ends_at_a_third() {
-        assert!(RUNGS
-            .windows(2)
-            .all(|w| w[1].fps <= w[0].fps && w[1].scale <= w[0].scale && w[1] != w[0]));
+        assert!(RUNGS.windows(2).all(|w| w[1].fps <= w[0].fps && w[1].scale <= w[0].scale && w[1] != w[0]));
         let first_scaled = RUNGS.iter().position(|r| r.scale < 100).unwrap();
-        assert!(
-            RUNGS[..first_scaled].iter().all(|r| r.scale == 100)
-                && RUNGS[first_scaled - 1].fps == 8,
-            "every frame rate down to 8 before any scaling"
-        );
+        assert!(RUNGS[..first_scaled].iter().all(|r| r.scale == 100) && RUNGS[first_scaled - 1].fps == 8, "every frame rate down to 8 before any scaling");
         assert_eq!(RUNGS[LOWEST], rung(5, 33));
     }
 
@@ -1296,10 +1116,7 @@ mod tests {
             t += 33;
         }
         assert_eq!(o.rung, 1);
-        assert!(
-            changed_at.is_some_and(|c| (2000..2100).contains(&c)),
-            "{changed_at:?}"
-        );
+        assert!(changed_at.is_some_and(|c| (2000..2100).contains(&c)), "{changed_at:?}");
         // Now cheap: 5 ms against 50 ms (20 fps). Not up before 10 s, and not with fewer than 60 frames.
         let start = t;
         let mut up_at = None;
@@ -1315,10 +1132,7 @@ mod tests {
         // In between, nothing moves.
         let mut o = Overuse::default();
         for i in 0..1000 {
-            assert!(
-                !o.sample(20.0, 1000.0 / 30.0, i * 33),
-                "0.6 of the budget is fine"
-            );
+            assert!(!o.sample(20.0, 1000.0 / 30.0, i * 33), "0.6 of the budget is fine");
         }
     }
 
@@ -1333,10 +1147,7 @@ mod tests {
         }
         assert_eq!(c.overuse.rung, LOWEST);
         let p = c.params();
-        assert_eq!(
-            (p.fps, p.h, p.reason, p.degraded),
-            (5, 356, Reason::Cpu, true)
-        );
+        assert_eq!((p.fps, p.h, p.reason, p.degraded), (5, 356, Reason::Cpu, true));
     }
 
     fn acks(b: &mut Bandwidth, rtt: u32, from: u64, to: u64) {
@@ -1348,8 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_window_for_twice_the_round_trip_takes_fifteen_percent_off_and_ten_seconds_of_sending_add_a_tenth(
-    ) {
+    fn a_full_window_for_twice_the_round_trip_takes_fifteen_percent_off_and_ten_seconds_of_sending_add_a_tenth() {
         // The daemon says how long the link's window has been full with each flow. A 400 ms round trip: a second of it (the most).
         let mut b = Bandwidth::new(0);
         acks(&mut b, 400, 0, 1000);
@@ -1364,31 +1174,15 @@ mod tests {
         assert!(!window(&mut b, 1500, 2500), "not again within a second");
         assert!(window(&mut b, 2000, 3000));
         assert_eq!(b.kbps, 1083);
-        assert_eq!(
-            (b.cut_counts.window, b.cut_counts.total()),
-            (2, 2),
-            "every cut counted by its rule, for the stats"
-        );
+        assert_eq!((b.cut_counts.window, b.cut_counts.total()), (2, 2), "every cut counted by its rule, for the stats");
         let cuts = b.take_cuts();
-        assert_eq!(
-            cuts.iter()
-                .map(|c| (c.rule, c.from_kbps, c.to_kbps, c.link_full_ms, c.inflight))
-                .collect::<Vec<_>>(),
-            [
-                (CutRule::Window, 1500, 1275, 1000, 3),
-                (CutRule::Window, 1275, 1083, 2000, 3)
-            ],
-            "with what the rule saw"
-        );
+        assert_eq!(cuts.iter().map(|c| (c.rule, c.from_kbps, c.to_kbps, c.link_full_ms, c.inflight)).collect::<Vec<_>>(), [(CutRule::Window, 1500, 1275, 1000, 3), (CutRule::Window, 1275, 1083, 2000, 3)], "with what the rule saw");
         // A 40 ms round trip: half a second of it is enough (twice the round trip, but never under half a second).
         let mut fast = Bandwidth::new(0);
         acks(&mut fast, 40, 0, 1000);
         assert!(!window(&mut fast, 400, 1400));
         assert!(window(&mut fast, 500, 1500), "half a second");
-        assert!(
-            !window(&mut fast, 1400, 2400) && window(&mut fast, 1500, 2500),
-            "and a second more of the same spell for the next"
-        );
+        assert!(!window(&mut fast, 1400, 2400) && window(&mut fast, 1500, 2500), "and a second more of the same spell for the next");
         // 300 ms: 600 ms of it.
         let mut mid = Bandwidth::new(0);
         acks(&mut mid, 300, 0, 1000);
@@ -1404,11 +1198,7 @@ mod tests {
             t += 500;
             assert!(t < 20_000, "never went up");
         };
-        assert_eq!(
-            (up, b.kbps),
-            (13_000, 1191),
-            "ten clean seconds of frames going out"
-        );
+        assert_eq!((up, b.kbps), (13_000, 1191), "ten clean seconds of frames going out");
         // A still screen sends nothing: no evidence, so no increase, however long it lasts.
         let held = b.kbps;
         for t in (13_500..60_000).step_by(500) {
@@ -1454,14 +1244,8 @@ mod tests {
             t += 70;
         }
         let cuts = b.take_cuts();
-        assert!(
-            cuts.is_empty() && b.cut_counts == CutCounts::default(),
-            "{cuts:?}"
-        );
-        assert_eq!(
-            b.kbps, START_KBPS,
-            "and no increase on what a held-up stream cannot show either"
-        );
+        assert!(cuts.is_empty() && b.cut_counts == CutCounts::default(), "{cuts:?}");
+        assert_eq!(b.kbps, START_KBPS, "and no increase on what a held-up stream cannot show either");
         // A figure the daemon gave once is not repeated by the helper's clock: a flow that said a second, then none, is one cut, not one a second.
         let mut c = Bandwidth::new(0);
         c.on_link_window(1200);
@@ -1517,10 +1301,7 @@ mod tests {
             }
             t += 33;
         }
-        assert!(
-            cuts <= 2,
-            "{cuts} cuts for a step that held: the floor is taken again, not cut to the bottom"
-        );
+        assert!(cuts <= 2, "{cuts} cuts for a step that held: the floor is taken again, not cut to the bottom");
         assert!(b.kbps >= START_KBPS * 70 / 100, "{} kbps", b.kbps);
         // Cuts are bounded whatever the round trips say: a link that keeps rising is cut three times in ten seconds at most.
         let mut c = Bandwidth::new(0);
@@ -1593,10 +1374,7 @@ mod tests {
             t += 250;
         }
         assert!(cycles_per_min.iter().all(|c| *c <= 3), "{cycles_per_min:?}");
-        assert!(
-            cycles_per_min.iter().sum::<u32>() >= 3,
-            "it still tries: {cycles_per_min:?}"
-        );
+        assert!(cycles_per_min.iter().sum::<u32>() >= 3, "it still tries: {cycles_per_min:?}");
     }
 
     #[test]
@@ -1628,24 +1406,9 @@ mod tests {
             b.kbps = k;
             b.rung()
         };
-        assert_eq!(
-            [
-                at(4000),
-                at(1000),
-                at(600),
-                at(400),
-                at(350),
-                at(250),
-                at(180)
-            ],
-            [0, 2, 4, 5, 6, 7, 8]
-        );
+        assert_eq!([at(4000), at(1000), at(600), at(400), at(350), at(250), at(180)], [0, 2, 4, 5, 6, 7, 8]);
         assert_eq!(RUNGS[at(250)], rung(6, 50), "250 kbps: half at 6 fps");
-        assert_eq!(
-            RUNGS[at(180)],
-            rung(5, 33),
-            "under 220 kbps: a third at 5 fps"
-        );
+        assert_eq!(RUNGS[at(180)], rung(5, 33), "under 220 kbps: a third at 5 fps");
         // A 1080p monitor at 180 kbps is about 360p; a window keeps 540 lines; a 4K monitor's half is 540 lines, not 1080.
         let mut c = Controller::new((1920, 1080), false, false, 0);
         c.bandwidth.kbps = 180;
@@ -1655,10 +1418,7 @@ mod tests {
         assert_eq!(w.params().h, MIN_WINDOW_LINES);
         let mut k = Controller::new((3840, 2160), false, false, 0);
         k.bandwidth.kbps = 250;
-        assert_eq!(
-            (k.params().w, k.params().h, k.params().degraded),
-            (960, 540, true)
-        );
+        assert_eq!((k.params().w, k.params().h, k.params().degraded), (960, 540, true));
     }
 
     #[test]
@@ -1685,10 +1445,7 @@ mod tests {
         c.bandwidth.kbps = 300;
         assert!(!c.key_dip(true), "two-thirds at 6 fps: not yet");
         c.bandwidth.kbps = 250;
-        assert!(
-            c.key_dip(true) && !c.key_dip(false),
-            "from half at 6 fps, keyframes only"
-        );
+        assert!(c.key_dip(true) && !c.key_dip(false), "from half at 6 fps, keyframes only");
         c.bandwidth.kbps = 4000;
         c.overuse.rung = LOWEST;
         assert!(c.key_dip(true), "whatever moved the ladder down");
@@ -1708,21 +1465,13 @@ mod tests {
         assert_eq!(at(1000, 0, true).0, MAX_WINDOW, "never more than 12");
         assert_eq!(at(10, 0, true).0, MIN_WINDOW, "never fewer than 3");
         assert_eq!(at(200, 2, true).0, 5, "15 fps at 200 ms");
-        assert_eq!(
-            at(200, 0, false),
-            (MIN_WINDOW, MIN_WINDOW_BYTES),
-            "a daemon that does not take another: 3 frames and 192 KiB"
-        );
+        assert_eq!(at(200, 0, false), (MIN_WINDOW, MIN_WINDOW_BYTES), "a daemon that does not take another: 3 frames and 192 KiB");
         let c = {
             let mut c = Controller::new((1920, 1080), false, false, 0);
             c.set_win(true);
             c
         };
-        assert_eq!(
-            c.window(),
-            (MIN_WINDOW, MIN_WINDOW_BYTES),
-            "no round trip yet"
-        );
+        assert_eq!(c.window(), (MIN_WINDOW, MIN_WINDOW_BYTES), "no round trip yet");
         // The bytes: the rate over the round trip and 100 ms, between 192 KiB and 2 MiB.
         let mut big = Controller::new((1920, 1080), false, false, 0);
         big.set_win(true);
@@ -1733,14 +1482,8 @@ mod tests {
         let mut g = Controller::new((1920, 1080), false, false, 0);
         g.set_win(true);
         acks(&mut g.bandwidth, 200, 0, 1000);
-        assert!(
-            g.may_encode(8, 0, None) && !g.may_encode(9, 0, None),
-            "nine frames at 200 ms"
-        );
-        assert!(
-            !g.may_encode(1, MIN_WINDOW_BYTES, None),
-            "nor more bytes than its own"
-        );
+        assert!(g.may_encode(8, 0, None) && !g.may_encode(9, 0, None), "nine frames at 200 ms");
+        assert!(!g.may_encode(1, MIN_WINDOW_BYTES, None), "nor more bytes than its own");
         g.tick(8, 1000);
         assert!(!g.bandwidth.lagging(8) && g.bandwidth.lagging(9));
     }
@@ -1765,16 +1508,8 @@ mod tests {
             }
             None
         };
-        assert!(
-            first_cut(30, 33).is_some_and(|ms| ms <= 600),
-            "{:?}",
-            first_cut(30, 33)
-        );
-        assert!(
-            first_cut(6, 167).is_some_and(|ms| ms <= 900),
-            "{:?}",
-            first_cut(6, 167)
-        );
+        assert!(first_cut(30, 33).is_some_and(|ms| ms <= 600), "{:?}", first_cut(30, 33));
+        assert!(first_cut(6, 167).is_some_and(|ms| ms <= 900), "{:?}", first_cut(6, 167));
         // One late acknowledgement among frames on time is not a trend, at 6 fps either.
         for (fps, gap) in [(30u8, 33u64), (6, 167)] {
             let mut b = Bandwidth::new(0);
@@ -1789,22 +1524,12 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_started_on_a_loaded_machine_starts_at_the_lowest_rung_and_climbs_as_the_encoder_allows(
-    ) {
+    fn a_stream_started_on_a_loaded_machine_starts_at_the_lowest_rung_and_climbs_as_the_encoder_allows() {
         let mut c = Controller::new((1920, 1080), false, false, 0);
         c.set_level(2, 0);
         c.start_low();
         let p = c.params();
-        assert_eq!(
-            (p.fps, p.h, p.degraded, p.reason),
-            (
-                RUNGS[LOWEST].fps,
-                fit((1920, 1080), RUNGS[LOWEST].scale, 0, u32::MAX).1,
-                true,
-                Reason::Load
-            ),
-            "{p:?}: reduced for the load, not for a slow encoder"
-        );
+        assert_eq!((p.fps, p.h, p.degraded, p.reason), (RUNGS[LOWEST].fps, fit((1920, 1080), RUNGS[LOWEST].scale, 0, u32::MAX).1, true, Reason::Load), "{p:?}: reduced for the load, not for a slow encoder");
         // A light encoder: a rung up once ten seconds and 60 frames have gone by, never in one jump.
         let mut t = 0;
         while c.rung() == LOWEST && t < 60_000 {
@@ -1825,12 +1550,7 @@ mod tests {
         let mut slow = Controller::new((1920, 1080), false, false, 0);
         slow.set_level(2, 0);
         slow.start_low();
-        assert!(
-            (0..60_000)
-                .step_by(200)
-                .all(|t| slow.on_encoded(60.0, t).is_none()),
-            "no UseSoftware while started low"
-        );
+        assert!((0..60_000).step_by(200).all(|t| slow.on_encoded(60.0, t).is_none()), "no UseSoftware while started low");
         // However far it climbs, the level's cap holds: 15 fps and 720 lines at L2.
         c.overuse.rung = 0;
         assert_eq!((c.params().fps, c.params().h), (15, 720));
@@ -1840,21 +1560,14 @@ mod tests {
     fn load_caps_and_the_software_encoder_only_ever_lower_and_say_why() {
         let mut c = Controller::new((3840, 2160), false, false, 0);
         let p = c.params();
-        assert_eq!(
-            (p.fps, p.w, p.h, p.reason, p.degraded),
-            (30, 1920, 1080, Reason::None, false),
-            "a 4K monitor at the top rung is 1080p, and not reduced"
-        );
+        assert_eq!((p.fps, p.w, p.h, p.reason, p.degraded), (30, 1920, 1080, Reason::None, false), "a 4K monitor at the top rung is 1080p, and not reduced");
         c.set_level(1, 0);
         let p = c.params();
         assert_eq!((p.fps, p.h, p.reason), (20, 1080, Reason::Load));
         c.set_level(2, 0);
         assert_eq!((c.params().fps, c.params().h), (15, 720));
         c.set_level(3, 0);
-        assert_eq!(
-            (c.params().fps, c.params().h, c.params().degraded),
-            (8, 540, true)
-        );
+        assert_eq!((c.params().fps, c.params().h, c.params().degraded), (8, 540, true));
         c.set_level(0, 0);
         c.set_software(true);
         let p = c.params();
@@ -1870,36 +1583,12 @@ mod tests {
 
     #[test]
     fn a_5k_or_ultrawide_monitor_is_shown_within_the_top_rung() {
-        assert_eq!(
-            fit((5120, 2880), 100, 0, u32::MAX),
-            (1920, 1080),
-            "5K: level 4 instead of no encoder at all"
-        );
-        assert_eq!(
-            fit((5120, 1440), 100, 0, u32::MAX),
-            (1920, 540),
-            "ultrawide: no wider than 1920"
-        );
-        assert_eq!(
-            fit((2560, 1440), 50, 0, u32::MAX),
-            (960, 540),
-            "half of the top rung's 1080 lines"
-        );
-        assert_eq!(
-            fit((3840, 2160), 50, 0, u32::MAX),
-            (960, 540),
-            "4K at half: 540 lines"
-        );
-        assert_eq!(
-            fit((3840, 2160), 50, 0, 720),
-            (960, 540),
-            "under a cap it does not reach"
-        );
-        assert_eq!(
-            fit((1366, 768), 100, 0, u32::MAX),
-            (1366, 768),
-            "smaller ones as they are"
-        );
+        assert_eq!(fit((5120, 2880), 100, 0, u32::MAX), (1920, 1080), "5K: level 4 instead of no encoder at all");
+        assert_eq!(fit((5120, 1440), 100, 0, u32::MAX), (1920, 540), "ultrawide: no wider than 1920");
+        assert_eq!(fit((2560, 1440), 50, 0, u32::MAX), (960, 540), "half of the top rung's 1080 lines");
+        assert_eq!(fit((3840, 2160), 50, 0, u32::MAX), (960, 540), "4K at half: 540 lines");
+        assert_eq!(fit((3840, 2160), 50, 0, 720), (960, 540), "under a cap it does not reach");
+        assert_eq!(fit((1366, 768), 100, 0, u32::MAX), (1366, 768), "smaller ones as they are");
         let c = Controller::new((5120, 2880), false, false, 0);
         assert!(!c.params().degraded);
     }
@@ -1912,11 +1601,7 @@ mod tests {
             c.bandwidth.on_wire(5_000, 10_000);
         }
         assert!((c.bandwidth.wire_factor() - 2.0).abs() < 0.01);
-        assert!(
-            (c.params().kbps as i64 - i64::from(START_KBPS / 2)).abs() <= 2,
-            "{}",
-            c.params().kbps
-        );
+        assert!((c.params().kbps as i64 - i64::from(START_KBPS / 2)).abs() <= 2, "{}", c.params().kbps);
         c.bandwidth.on_wire(1, 100);
         assert!(c.bandwidth.wire_factor() <= 4.0, "a ratio is held to 4");
     }
@@ -1936,28 +1621,17 @@ mod tests {
             f.encoded(false, 0);
         }
         assert_eq!((f.inflight(), f.inflight_bytes()), (3, 3000));
-        assert!(
-            !c.may_encode(f.inflight(), f.inflight_bytes(), Some(1000)),
-            "the window is full"
-        );
+        assert!(!c.may_encode(f.inflight(), f.inflight_bytes(), Some(1000)), "the window is full");
         // The daemon says what it dropped and asks for a keyframe within the keyframe's second: the frames are given up, and nothing but a
         // keyframe is encoded, once its second is over.
         f.dropped_through(4);
         f.ask_key(500);
         assert_eq!((f.inflight(), f.inflight_bytes()), (0, 0));
-        assert!(
-            f.gated() && !f.wants_key(),
-            "a delta now would only be dropped"
-        );
+        assert!(f.gated() && !f.wants_key(), "a delta now would only be dropped");
         f.tick(999);
         assert!(f.gated());
         f.tick(1000);
-        assert!(
-            f.wants_key()
-                && !f.gated()
-                && c.may_encode(f.inflight(), f.inflight_bytes(), Some(1000)),
-            "the next frame is a keyframe, and it may go"
-        );
+        assert!(f.wants_key() && !f.gated() && c.may_encode(f.inflight(), f.inflight_bytes(), Some(1000)), "the next frame is a keyframe, and it may go");
         f.sent(40_000);
         f.encoded(true, 1000);
         assert!(!f.wants_key());
@@ -1984,11 +1658,7 @@ mod tests {
         assert_eq!((c.params().w, c.params().h), (720, 540));
         let mut m = Controller::new((1280, 960), false, false, 0);
         m.overuse.rung = LOWEST;
-        assert_eq!(
-            (m.params().w, m.params().h),
-            (420, 316),
-            "a monitor goes to a third"
-        );
+        assert_eq!((m.params().w, m.params().h), (420, 316), "a monitor goes to a third");
     }
 
     #[test]
@@ -2001,11 +1671,7 @@ mod tests {
         assert_eq!(c.tick(0, 2000 + L3_PAUSE_MS), None, "said once");
         c.resume(2000 + L3_PAUSE_MS);
         assert!(c.may_encode(0, 0, None));
-        assert_eq!(
-            c.tick(0, 3000 + L3_PAUSE_MS),
-            None,
-            "five more minutes before the next"
-        );
+        assert_eq!(c.tick(0, 3000 + L3_PAUSE_MS), None, "five more minutes before the next");
         c.set_level(2, 4000 + L3_PAUSE_MS);
         assert_eq!(c.tick(0, 4000 + 3 * L3_PAUSE_MS), None, "not at L2");
     }
@@ -2042,27 +1708,18 @@ mod tests {
         let mut c = Controller::new((1920, 1080), false, false, 0);
         assert!(c.may_encode(0, 0, None));
         assert!(c.may_encode(2, 0, Some(40)));
-        assert!(
-            !c.may_encode(MIN_WINDOW, 0, Some(1000)),
-            "the window is full"
-        );
+        assert!(!c.may_encode(MIN_WINDOW, 0, Some(1000)), "the window is full");
         assert!(!c.may_encode(0, 0, Some(20)), "30 fps: not before 33 ms");
         assert!(c.may_encode(0, 0, Some(33)));
         c.overuse.rung = 2;
-        assert!(
-            !c.may_encode(0, 0, Some(60)) && c.may_encode(0, 0, Some(67)),
-            "15 fps"
-        );
+        assert!(!c.may_encode(0, 0, Some(60)) && c.may_encode(0, 0, Some(67)), "15 fps");
     }
 
     #[test]
     fn keyframes_come_at_most_once_a_second_and_requests_are_not_lost() {
         let mut g = KeyframeGate::default();
         assert!(g.request(0));
-        assert!(
-            !g.request(200) && !g.request(400),
-            "within the second: wait"
-        );
+        assert!(!g.request(200) && !g.request(400), "within the second: wait");
         assert!(!g.due(900));
         assert!(g.due(1000), "the waiting ones become one");
         assert!(!g.due(1500));
@@ -2076,11 +1733,7 @@ mod tests {
     fn a_second_s_report_has_the_rate_the_size_and_why() {
         let mut s = Stats::new(0);
         for i in 0..30 {
-            s.frame(
-                if i == 0 { 60_000 } else { 6_000 },
-                i == 0,
-                4.0 + f64::from(i % 5),
-            );
+            s.frame(if i == 0 { 60_000 } else { 6_000 }, i == 0, 4.0 + f64::from(i % 5));
         }
         s.dropped_encoder = 2;
         for i in 0..30u64 {
@@ -2089,106 +1742,31 @@ mod tests {
         }
         s.top_off = 4;
         s.dxgi_first_full = Some(1);
-        s.link_cuts = CutCounts {
-            queueing: 0,
-            window: 1,
-            size: 0,
-        };
+        s.link_cuts = CutCounts { queueing: 0, window: 1, size: 0 };
         s.inflight_limit = 6;
-        s.cut(Cut {
-            rule: CutRule::Window,
-            from_kbps: 1500,
-            to_kbps: 1275,
-            rtt_recent_ms: Some(32),
-            rtt_base_ms: Some(30),
-            link_full_ms: 1020,
-            inflight: 3,
-        });
-        let p = Params {
-            fps: 30,
-            w: 1920,
-            h: 1080,
-            kbps: 1500,
-            reason: Reason::None,
-            degraded: false,
-        };
+        s.cut(Cut { rule: CutRule::Window, from_kbps: 1500, to_kbps: 1275, rtt_recent_ms: Some(32), rtt_base_ms: Some(30), link_full_ms: 1020, inflight: 3 });
+        let p = Params { fps: 30, w: 1920, h: 1080, kbps: 1500, reason: Reason::None, degraded: false };
         assert!(s.report(999, &p, 0, false, Some(true)).is_none());
         let r = s.report(1000, &p, 1, false, Some(false)).unwrap();
-        assert_eq!(
-            (r.fps, r.kbps, r.dropped, r.encoder, r.level),
-            (30, (60_000 + 29 * 6_000) * 8 / 1000, 2, "hw", 1)
-        );
+        assert_eq!((r.fps, r.kbps, r.dropped, r.encoder, r.level), (30, (60_000 + 29 * 6_000) * 8 / 1000, 2, "hw", 1));
         assert_eq!(r.idr_ratio, Some(10.0));
         assert_eq!(r.encode_ms_p95, 8.0);
         assert_eq!(serde_json::to_value(&r).unwrap()["reason"], "none");
-        assert_eq!(
-            serde_json::to_value(&r).unwrap()["crisp"],
-            false,
-            "crisp text off for now"
-        );
+        assert_eq!(serde_json::to_value(&r).unwrap()["crisp"], false, "crisp text off for now");
         let st = &r.stages;
-        assert_eq!(
-            (
-                st.capture_to_send_ms_p50,
-                st.capture_to_send_ms_p95,
-                st.convert_ms_p95,
-                st.send_interval_ms_p95
-            ),
-            (Some(45.0), Some(49.0), Some(2.0), Some(33.0))
-        );
-        assert_eq!(
-            (st.ack_rtt_ms_p50, st.ack_rtt_ms_p95, st.top_off, st.held),
-            (Some(70.0), Some(80.0), 4, 0)
-        );
+        assert_eq!((st.capture_to_send_ms_p50, st.capture_to_send_ms_p95, st.convert_ms_p95, st.send_interval_ms_p95), (Some(45.0), Some(49.0), Some(2.0), Some(33.0)));
+        assert_eq!((st.ack_rtt_ms_p50, st.ack_rtt_ms_p95, st.top_off, st.held), (Some(70.0), Some(80.0), 4, 0));
         // Which rule cut, and what it saw: by rule in the stages, each cut once in the report for the daemon's log.
-        assert_eq!(
-            (
-                st.link_cuts,
-                st.link_cuts_window,
-                st.link_cuts_queueing,
-                st.link_cuts_size
-            ),
-            (1, 1, 0, 0)
-        );
-        assert_eq!(
-            (
-                st.last_cut_queueing_ms,
-                st.last_cut_link_full_ms,
-                st.last_cut_inflight,
-                st.inflight_limit
-            ),
-            (Some(2), Some(1020), Some(3), 6)
-        );
-        assert_eq!(
-            serde_json::to_value(&r).unwrap()["cuts"][0]["rule"],
-            "window"
-        );
-        assert_eq!(
-            s.report(1500, &p, 0, true, None),
-            None,
-            "counters started again"
-        );
+        assert_eq!((st.link_cuts, st.link_cuts_window, st.link_cuts_queueing, st.link_cuts_size), (1, 1, 0, 0));
+        assert_eq!((st.last_cut_queueing_ms, st.last_cut_link_full_ms, st.last_cut_inflight, st.inflight_limit), (Some(2), Some(1020), Some(3), 6));
+        assert_eq!(serde_json::to_value(&r).unwrap()["cuts"][0]["rule"], "window");
+        assert_eq!(s.report(1500, &p, 0, true, None), None, "counters started again");
         s.timing(2000, 10.0, 1.0);
         let later = s.report(2000, &p, 0, false, None).unwrap();
-        assert!(
-            later.cuts.is_empty() && serde_json::to_value(&later).unwrap().get("cuts").is_none(),
-            "each cut is reported once"
-        );
-        assert_eq!(
-            later.stages.last_cut_link_full_ms,
-            Some(1020),
-            "the last cut's figures stay"
-        );
+        assert!(later.cuts.is_empty() && serde_json::to_value(&later).unwrap().get("cuts").is_none(), "each cut is reported once");
+        assert_eq!(later.stages.last_cut_link_full_ms, Some(1020), "the last cut's figures stay");
         let later = later.stages;
-        assert_eq!(
-            later.send_interval_ms_p95,
-            Some(1043.0),
-            "the interval carries on from the last frame before the report"
-        );
-        assert_eq!(
-            later.dxgi_first_full,
-            Some(1),
-            "said once, kept in every report after"
-        );
+        assert_eq!(later.send_interval_ms_p95, Some(1043.0), "the interval carries on from the last frame before the report");
+        assert_eq!(later.dxgi_first_full, Some(1), "said once, kept in every report after");
     }
 }

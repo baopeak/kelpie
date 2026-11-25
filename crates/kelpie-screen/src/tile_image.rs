@@ -34,13 +34,7 @@ fn png(rgb: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 fn jpeg(rgb: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let enc = jpeg_encoder::Encoder::new(&mut out, 90);
-    enc.encode(
-        rgb,
-        u16::try_from(w).ok()?,
-        u16::try_from(h).ok()?,
-        jpeg_encoder::ColorType::Rgb,
-    )
-    .ok()?;
+    enc.encode(rgb, u16::try_from(w).ok()?, u16::try_from(h).ok()?, jpeg_encoder::ColorType::Rgb).ok()?;
     Some(out)
 }
 
@@ -56,9 +50,7 @@ pub fn encode(px: &[u8], stride: usize, r: Rect) -> Option<(u8, Vec<u8>)> {
     if lossless.len() <= (w * h) as usize && lossless.len() <= MAX_TILE {
         return Some((FORMAT_PNG, lossless));
     }
-    jpeg(&pixels, w, h)
-        .filter(|j| j.len() <= MAX_TILE)
-        .map(|j| (FORMAT_JPEG, j))
+    jpeg(&pixels, w, h).filter(|j| j.len() <= MAX_TILE).map(|j| (FORMAT_JPEG, j))
 }
 
 #[cfg(test)]
@@ -88,11 +80,7 @@ mod tests {
         reader.next_frame(&mut buf).unwrap();
         assert_eq!(&buf[..3], &[255, 255, 255]);
         let stroke = (8 * w + 6) * 3;
-        assert_eq!(
-            &buf[stroke..stroke + 3],
-            &[20, 20, 20],
-            "exactly what was captured"
-        );
+        assert_eq!(&buf[stroke..stroke + 3], &[20, 20, 20], "exactly what was captured");
         // Noise: PNG would be more than a byte a pixel.
         let mut seed = 0x1234_5678u32;
         let noise: Vec<u8> = (0..stride * h)

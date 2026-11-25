@@ -133,30 +133,15 @@ pub fn peek(m: &[u8]) -> Option<Peek> {
     if m.len() > MAX_MEDIA || m.first() != Some(&MEDIA) {
         return None;
     }
-    let seq = |m: &[u8]| {
-        m.get(4..8)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
+    let seq = |m: &[u8]| m.get(4..8).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     match *m.get(1)? {
         KIND_VIDEO => {
             let n = usize::from(*m.get(3)?);
             (m.len() > VIDEO_HEADER + n * 8).then_some(())?;
-            Some(Peek {
-                kind: KIND_VIDEO,
-                key: m[2] & FLAG_KEY != 0,
-                seq: seq(m)?,
-            })
+            Some(Peek { kind: KIND_VIDEO, key: m[2] & FLAG_KEY != 0, seq: seq(m)? })
         }
-        KIND_TILE if m.len() > TILE_HEADER => Some(Peek {
-            kind: KIND_TILE,
-            key: false,
-            seq: seq(m)?,
-        }),
-        KIND_CURSOR if m.len() == CURSOR_LEN => Some(Peek {
-            kind: KIND_CURSOR,
-            key: false,
-            seq: 0,
-        }),
+        KIND_TILE if m.len() > TILE_HEADER => Some(Peek { kind: KIND_TILE, key: false, seq: seq(m)? }),
+        KIND_CURSOR if m.len() == CURSOR_LEN => Some(Peek { kind: KIND_CURSOR, key: false, seq: 0 }),
         _ => None,
     }
 }
@@ -224,13 +209,7 @@ impl Deframer {
             OUT_JSON => serde_json::from_slice(&frame[1..]).ok().map(Out::Json),
             OUT_MEDIA => {
                 let n = usize::from(*frame.get(1).unwrap_or(&255));
-                frame
-                    .get(2..2 + n)
-                    .and_then(|sc| std::str::from_utf8(sc).ok())
-                    .map(|sc| Out::Media {
-                        sc: sc.to_string(),
-                        media: frame[2 + n..].to_vec(),
-                    })
+                frame.get(2..2 + n).and_then(|sc| std::str::from_utf8(sc).ok()).map(|sc| Out::Media { sc: sc.to_string(), media: frame[2 + n..].to_vec() })
             }
             _ => None,
         };
@@ -248,80 +227,31 @@ mod tests {
 
     #[test]
     fn a_video_message_has_its_header_where_the_phone_reads_it() {
-        let v = Video {
-            key: true,
-            seq: 0x0102_0304,
-            capture_ms: 7,
-            src: (2560, 1440),
-            coded: (1280, 720),
-            unpaint: vec![Rect::new(64, 128, 192, 64)],
-            unpaint_all: false,
-        };
+        let v = Video { key: true, seq: 0x0102_0304, capture_ms: 7, src: (2560, 1440), coded: (1280, 720), unpaint: vec![Rect::new(64, 128, 192, 64)], unpaint_all: false };
         let m = video(&v, &[0, 0, 0, 1, 0x65, 0xaa]);
         assert_eq!(&m[..4], &[MEDIA, KIND_VIDEO, FLAG_KEY, 1]);
         assert_eq!(&m[4..8], &[4, 3, 2, 1]);
         assert_eq!(&m[8..12], &[7, 0, 0, 0]);
-        assert_eq!(
-            &m[12..20],
-            &[0x00, 0x0a, 0xa0, 0x05, 0x00, 0x05, 0xd0, 0x02]
-        );
+        assert_eq!(&m[12..20], &[0x00, 0x0a, 0xa0, 0x05, 0x00, 0x05, 0xd0, 0x02]);
         assert_eq!(&m[20..28], &[64, 0, 128, 0, 192, 0, 64, 0]);
         assert_eq!(&m[28..], &[0, 0, 0, 1, 0x65, 0xaa]);
-        assert_eq!(
-            peek(&m),
-            Some(Peek {
-                kind: KIND_VIDEO,
-                key: true,
-                seq: 0x0102_0304
-            })
-        );
+        assert_eq!(peek(&m), Some(Peek { kind: KIND_VIDEO, key: true, seq: 0x0102_0304 }));
         // The phone's fixture (app/phone/src/screen.test.ts) is this message.
-        let fixture = video(
-            &Video {
-                key: false,
-                seq: 9,
-                capture_ms: 1000,
-                src: (100, 50),
-                coded: (100, 50),
-                unpaint: vec![],
-                unpaint_all: true,
-            },
-            &[0, 0, 0, 1, 0x41, 0x9a],
-        );
-        assert_eq!(
-            fixture,
-            [
-                1, 1, 2, 0, 9, 0, 0, 0, 0xe8, 3, 0, 0, 100, 0, 50, 0, 100, 0, 50, 0, 0, 0, 0, 1,
-                0x41, 0x9a
-            ]
-        );
+        let fixture = video(&Video { key: false, seq: 9, capture_ms: 1000, src: (100, 50), coded: (100, 50), unpaint: vec![], unpaint_all: true }, &[0, 0, 0, 1, 0x41, 0x9a]);
+        assert_eq!(fixture, [1, 1, 2, 0, 9, 0, 0, 0, 0xe8, 3, 0, 0, 100, 0, 50, 0, 100, 0, 50, 0, 0, 0, 0, 1, 0x41, 0x9a]);
     }
 
     #[test]
     fn too_many_unpaint_rectangles_become_unpaint_all() {
-        let v = Video {
-            key: false,
-            seq: 1,
-            capture_ms: 0,
-            src: (10, 10),
-            coded: (10, 10),
-            unpaint: vec![Rect::new(0, 0, 1, 1); MAX_UNPAINT + 1],
-            unpaint_all: false,
-        };
+        let v = Video { key: false, seq: 1, capture_ms: 0, src: (10, 10), coded: (10, 10), unpaint: vec![Rect::new(0, 0, 1, 1); MAX_UNPAINT + 1], unpaint_all: false };
         let m = video(&v, &[1]);
-        assert_eq!(
-            (m[2], m[3], m.len()),
-            (FLAG_UNPAINT_ALL, 0, VIDEO_HEADER + 1)
-        );
+        assert_eq!((m[2], m[3], m.len()), (FLAG_UNPAINT_ALL, 0, VIDEO_HEADER + 1));
     }
 
     #[test]
     fn tiles_and_the_cursor() {
         let t = tile(5, 77, Rect::new(512, 0, 512, 256), FORMAT_PNG, b"\x89PNG");
-        assert_eq!(
-            &t[..TILE_HEADER],
-            &[1, 2, 1, 0, 5, 0, 0, 0, 77, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 1]
-        );
+        assert_eq!(&t[..TILE_HEADER], &[1, 2, 1, 0, 5, 0, 0, 0, 77, 0, 0, 0, 0, 2, 0, 0, 0, 2, 0, 1]);
         assert_eq!(&t[TILE_HEADER..], b"\x89PNG");
         assert_eq!(peek(&t).map(|p| (p.kind, p.seq)), Some((KIND_TILE, 5)));
         let c = cursor(Shape::IBeam, true, -3, 400);
@@ -331,34 +261,11 @@ mod tests {
 
     #[test]
     fn what_is_not_a_media_message_is_not_taken_for_one() {
-        for bad in [
-            &b"{\"type\":\"hb\"}"[..],
-            &[],
-            &[1],
-            &[1, 1, 0, 0, 1, 0, 0, 0],
-            &[1, 9, 0, 0, 0, 0, 0, 0, 0],
-            &[1, 3, 0, 0],
-            &[1, 2, 1, 0, 1, 0, 0, 0],
-        ] {
+        for bad in [&b"{\"type\":\"hb\"}"[..], &[], &[1], &[1, 1, 0, 0, 1, 0, 0, 0], &[1, 9, 0, 0, 0, 0, 0, 0, 0], &[1, 3, 0, 0], &[1, 2, 1, 0, 1, 0, 0, 0]] {
             assert_eq!(peek(bad), None, "{bad:?}");
         }
-        let v = video(
-            &Video {
-                key: false,
-                seq: 1,
-                capture_ms: 0,
-                src: (1, 1),
-                coded: (1, 1),
-                unpaint: vec![Rect::default(); 3],
-                unpaint_all: false,
-            },
-            &[],
-        );
-        assert_eq!(
-            peek(&v),
-            None,
-            "a header that promises rectangles and no picture"
-        );
+        let v = video(&Video { key: false, seq: 1, capture_ms: 0, src: (1, 1), coded: (1, 1), unpaint: vec![Rect::default(); 3], unpaint_all: false }, &[]);
+        assert_eq!(peek(&v), None, "a header that promises rectangles and no picture");
         assert_eq!(peek(&vec![1u8; MAX_MEDIA + 1]), None);
     }
 
@@ -377,13 +284,7 @@ mod tests {
         }
         assert_eq!(got.len(), 3);
         assert_eq!(got[0], Out::Json(json!({"event": "hello", "proto": 1})));
-        assert_eq!(
-            got[1],
-            Out::Media {
-                sc: "sc1".into(),
-                media: vec![1, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
-            }
-        );
+        assert_eq!(got[1], Out::Media { sc: "sc1".into(), media: vec![1, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0] });
         assert!(!d.broken());
         let mut bad = Deframer::default();
         bad.push(&[0xff, 0xff, 0xff, 0x7f, 1]);

@@ -9,13 +9,8 @@
 use windows::core::{Interface, Result};
 use windows::Win32::Foundation::{E_ACCESSDENIED, RECT};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED,
-};
-use windows::Win32::Graphics::Dxgi::{
-    IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
-};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_UNSPECIFIED};
+use windows::Win32::Graphics::Dxgi::{IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO};
 
 use super::d3d::Device;
 use crate::geom::Rect;
@@ -45,20 +40,10 @@ pub struct Dxgi {
 impl Dxgi {
     pub fn new(d: &Device, output: IDXGIOutput1, rect: Rect) -> std::result::Result<Dxgi, String> {
         let desc = unsafe { output.GetDesc() }.map_err(|e| e.to_string())?;
-        if desc.Rotation != DXGI_MODE_ROTATION_IDENTITY
-            && desc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED
-        {
-            return Err(
-                "a rotated screen cannot be shown yet: pick one of its windows instead".into(),
-            );
+        if desc.Rotation != DXGI_MODE_ROTATION_IDENTITY && desc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED {
+            return Err("a rotated screen cannot be shown yet: pick one of its windows instead".into());
         }
-        let mut me = Dxgi {
-            output,
-            dup: None,
-            rect,
-            fresh: true,
-            first_full: None,
-        };
+        let mut me = Dxgi { output, dup: None, rect, fresh: true, first_full: None };
         let _ = me.reopen(d);
         Ok(me)
     }
@@ -67,9 +52,7 @@ impl Dxgi {
     fn unchanged(&self) -> bool {
         unsafe { self.output.GetDesc() }.is_ok_and(|d| {
             let r = d.DesktopCoordinates;
-            (d.Rotation == DXGI_MODE_ROTATION_IDENTITY
-                || d.Rotation == DXGI_MODE_ROTATION_UNSPECIFIED)
-                && Rect::from_edges(r.left, r.top, r.right, r.bottom) == self.rect
+            (d.Rotation == DXGI_MODE_ROTATION_IDENTITY || d.Rotation == DXGI_MODE_ROTATION_UNSPECIFIED) && Rect::from_edges(r.left, r.top, r.right, r.bottom) == self.rect
         })
     }
 
@@ -98,11 +81,7 @@ impl Dxgi {
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Grab::Timeout,
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 self.dup = None;
-                return if self.unchanged() {
-                    Grab::Unavailable
-                } else {
-                    Grab::Changed
-                };
+                return if self.unchanged() { Grab::Unavailable } else { Grab::Changed };
             }
             Err(_) => {
                 self.dup = None;
@@ -119,31 +98,17 @@ impl Dxgi {
                     // The whole picture is copied into `into`, on the GPU (cheap), as WebRTC's duplicator copies it: what changed is said
                     // (`dirty`) for the tiles' readback and hashing only, so a region the metadata missed never leaves stale pixels in the video.
                     // `into` may be a little smaller (a monitor of an odd size, made even for the encoder): only its own size counts.
-                    let mut desc =
-                        windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+                    let mut desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
                     unsafe { into.GetDesc(&mut desc) };
-                    let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX {
-                        left: 0,
-                        top: 0,
-                        front: 0,
-                        right: desc.Width,
-                        bottom: desc.Height,
-                        back: 1,
-                    };
-                    unsafe {
-                        d.ctx
-                            .CopySubresourceRegion(into, 0, 0, 0, 0, &tex, 0, Some(&region))
-                    };
+                    let region = windows::Win32::Graphics::Direct3D11::D3D11_BOX { left: 0, top: 0, front: 0, right: desc.Width, bottom: desc.Height, back: 1 };
+                    unsafe { d.ctx.CopySubresourceRegion(into, 0, 0, 0, 0, &tex, 0, Some(&region)) };
                     // The first frame of a duplication made again (after UAC, the lock screen) counts as all changed: the desktop may have
                     // changed while there was none, whatever its metadata says.
                     if self.fresh {
                         let all = u64::from(desc.Width) * u64::from(desc.Height);
-                        self.first_full =
-                            Some(dirty.as_ref().is_none_or(|d| crate::pace::area(d) >= all));
+                        self.first_full = Some(dirty.as_ref().is_none_or(|d| crate::pace::area(d) >= all));
                     }
-                    Grab::Frame {
-                        dirty: crate::geom::after_reopen(&mut self.fresh, dirty),
-                    }
+                    Grab::Frame { dirty: crate::geom::after_reopen(&mut self.fresh, dirty) }
                 }
                 None => Grab::Timeout,
             }
@@ -165,43 +130,12 @@ impl Dxgi {
         let move_size = std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
         let mut moves = vec![DXGI_OUTDUPL_MOVE_RECT::default(); size as usize / move_size + 1];
         let mut used = 0u32;
-        unsafe {
-            dup.GetFrameMoveRects(
-                (moves.len() * move_size) as u32,
-                moves.as_mut_ptr(),
-                &mut used,
-            )
-            .ok()?
-        };
-        let moved: Vec<(i32, i32, Rect)> = moves[..used as usize / move_size]
-            .iter()
-            .map(|m| {
-                (
-                    m.SourcePoint.x,
-                    m.SourcePoint.y,
-                    Rect::from_edges(
-                        m.DestinationRect.left,
-                        m.DestinationRect.top,
-                        m.DestinationRect.right,
-                        m.DestinationRect.bottom,
-                    ),
-                )
-            })
-            .collect();
+        unsafe { dup.GetFrameMoveRects((moves.len() * move_size) as u32, moves.as_mut_ptr(), &mut used).ok()? };
+        let moved: Vec<(i32, i32, Rect)> = moves[..used as usize / move_size].iter().map(|m| (m.SourcePoint.x, m.SourcePoint.y, Rect::from_edges(m.DestinationRect.left, m.DestinationRect.top, m.DestinationRect.right, m.DestinationRect.bottom))).collect();
         let mut buf = vec![RECT::default(); size as usize / std::mem::size_of::<RECT>() + 1];
         let mut used = 0u32;
-        unsafe {
-            dup.GetFrameDirtyRects(
-                (buf.len() * std::mem::size_of::<RECT>()) as u32,
-                buf.as_mut_ptr(),
-                &mut used,
-            )
-            .ok()?
-        };
-        let dirty: Vec<Rect> = buf[..used as usize / std::mem::size_of::<RECT>()]
-            .iter()
-            .map(|r| Rect::from_edges(r.left, r.top, r.right, r.bottom))
-            .collect();
+        unsafe { dup.GetFrameDirtyRects((buf.len() * std::mem::size_of::<RECT>()) as u32, buf.as_mut_ptr(), &mut used).ok()? };
+        let dirty: Vec<Rect> = buf[..used as usize / std::mem::size_of::<RECT>()].iter().map(|r| Rect::from_edges(r.left, r.top, r.right, r.bottom)).collect();
         Some(crate::geom::updated_region(&dirty, &moved))
     }
 }

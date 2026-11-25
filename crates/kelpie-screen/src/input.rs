@@ -69,18 +69,14 @@ fn mod_code(m: &str) -> Option<(u16, bool)> {
 }
 
 fn number(v: &Value, key: &str, lo: f64, hi: f64) -> Option<f64> {
-    v.get(key)
-        .and_then(Value::as_f64)
-        .filter(|n| n.is_finite() && *n >= lo && *n <= hi)
+    v.get(key).and_then(Value::as_f64).filter(|n| n.is_finite() && *n >= lo && *n <= hi)
 }
 
 /// The phone's input as the helper takes it, or None: a closed set of operations with numbers in range, refused whole if one is not.
 /// `move {x,y}`, `down`/`up {x,y,b}`, `click {x,y,b,n}`, `wheel {x,y,dx,dy}` (dx/dy in notches of 120), `key {key, mods}`, and `release`, which lets go
 /// of a button held by a `down` where the pointer is, without moving it (what the daemon sends for an `up` it drops as late).
 pub fn checked_ops(ops: &Value) -> Option<Vec<Value>> {
-    let ops = ops
-        .as_array()
-        .filter(|o| !o.is_empty() && o.len() <= MAX_OPS)?;
+    let ops = ops.as_array().filter(|o| !o.is_empty() && o.len() <= MAX_OPS)?;
     ops.iter()
         .map(|op| {
             let kind = op.get("k").and_then(Value::as_str)?;
@@ -205,12 +201,7 @@ pub fn held_after(held: bool, ops: &[Value]) -> bool {
 
 /// Text to type, if it may be typed: not empty, not too long, no control characters but new lines and tabs.
 pub fn checked_text(text: &str) -> Option<&str> {
-    (!text.is_empty()
-        && text.chars().count() <= MAX_TEXT
-        && text
-            .chars()
-            .all(|c| !c.is_control() || c == '\n' || c == '\t' || c == '\r'))
-    .then_some(text)
+    (!text.is_empty() && text.chars().count() <= MAX_TEXT && text.chars().all(|c| !c.is_control() || c == '\n' || c == '\t' || c == '\r')).then_some(text)
 }
 
 /// One key going down or up, as `SendInput` takes it: a virtual key, or a UTF-16 unit typed as Unicode.
@@ -222,33 +213,12 @@ pub enum KeyEvent {
 
 /// A key with modifiers: the modifiers down, the key down and up, the modifiers up in reverse.
 pub fn key_events(key: &str, mods: &[&str]) -> Vec<KeyEvent> {
-    let Some((vk, extended)) = key_code(key) else {
-        return vec![];
-    };
+    let Some((vk, extended)) = key_code(key) else { return vec![] };
     let mods: Vec<(u16, bool)> = mods.iter().filter_map(|m| mod_code(m)).collect();
-    let mut out: Vec<KeyEvent> = mods
-        .iter()
-        .map(|&(m, ext)| KeyEvent::Vk {
-            vk: m,
-            extended: ext,
-            up: false,
-        })
-        .collect();
-    out.push(KeyEvent::Vk {
-        vk,
-        extended,
-        up: false,
-    });
-    out.push(KeyEvent::Vk {
-        vk,
-        extended,
-        up: true,
-    });
-    out.extend(mods.iter().rev().map(|&(m, ext)| KeyEvent::Vk {
-        vk: m,
-        extended: ext,
-        up: true,
-    }));
+    let mut out: Vec<KeyEvent> = mods.iter().map(|&(m, ext)| KeyEvent::Vk { vk: m, extended: ext, up: false }).collect();
+    out.push(KeyEvent::Vk { vk, extended, up: false });
+    out.push(KeyEvent::Vk { vk, extended, up: true });
+    out.extend(mods.iter().rev().map(|&(m, ext)| KeyEvent::Vk { vk: m, extended: ext, up: true }));
     out
 }
 
@@ -270,16 +240,8 @@ pub fn text_events(text: &str) -> Vec<KeyEvent> {
             _ => None,
         };
         if let Some(vk) = vk {
-            out.push(KeyEvent::Vk {
-                vk,
-                extended: false,
-                up: false,
-            });
-            out.push(KeyEvent::Vk {
-                vk,
-                extended: false,
-                up: true,
-            });
+            out.push(KeyEvent::Vk { vk, extended: false, up: false });
+            out.push(KeyEvent::Vk { vk, extended: false, up: true });
             continue;
         }
         let mut buf = [0u16; 2];
@@ -332,9 +294,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
         return None;
     }
     let key = key.to_ascii_uppercase();
-    let (vk, _) = key_code(&key).filter(|(vk, _)| {
-        (0x30..=0x39).contains(vk) || (0x41..=0x5A).contains(vk) || (0x70..=0x7B).contains(vk)
-    })?;
+    let (vk, _) = key_code(&key).filter(|(vk, _)| (0x30..=0x39).contains(vk) || (0x41..=0x5A).contains(vk) || (0x70..=0x7B).contains(vk))?;
     Some(Hotkey { mods: bits, vk })
 }
 
@@ -344,129 +304,44 @@ mod tests {
 
     #[test]
     fn keys_go_only_to_the_target_and_its_own_dialogs_and_presses_also_to_its_own_menus() {
-        let target = WindowFacts {
-            is_target: true,
-            same_process: true,
-            same_thread: true,
-            ..Default::default()
-        };
-        let own_dialog = WindowFacts {
-            owned_by_target: true,
-            same_process: true,
-            ..Default::default()
-        };
-        let foreign_dialog = WindowFacts {
-            owned_by_target: true,
-            same_process: false,
-            ..Default::default()
-        };
-        let second_window = WindowFacts {
-            same_process: true,
-            same_thread: true,
-            ..Default::default()
-        };
-        let own_menu = WindowFacts {
-            same_process: true,
-            same_thread: true,
-            menu: true,
-            ..Default::default()
-        };
+        let target = WindowFacts { is_target: true, same_process: true, same_thread: true, ..Default::default() };
+        let own_dialog = WindowFacts { owned_by_target: true, same_process: true, ..Default::default() };
+        let foreign_dialog = WindowFacts { owned_by_target: true, same_process: false, ..Default::default() };
+        let second_window = WindowFacts { same_process: true, same_thread: true, ..Default::default() };
+        let own_menu = WindowFacts { same_process: true, same_thread: true, menu: true, ..Default::default() };
         let other_program = WindowFacts::default();
         assert_eq!(keys_reach(target), Reach::Yes);
-        assert_eq!(
-            keys_reach(own_dialog),
-            Reach::Yes,
-            "a Save As of the shared program"
-        );
+        assert_eq!(keys_reach(own_dialog), Reach::Yes, "a Save As of the shared program");
         assert_eq!(keys_reach(foreign_dialog), Reach::ForeignDialog, "another process's window the target owns: a credential prompt, or anything that named it as owner");
-        assert_eq!(
-            keys_reach(second_window),
-            Reach::Other,
-            "another top-level window of the same program"
-        );
-        assert_eq!(
-            keys_reach(own_menu),
-            Reach::Other,
-            "keys go to the window that has the focus, never to a menu as such"
-        );
+        assert_eq!(keys_reach(second_window), Reach::Other, "another top-level window of the same program");
+        assert_eq!(keys_reach(own_menu), Reach::Other, "keys go to the window that has the focus, never to a menu as such");
         assert_eq!(keys_reach(other_program), Reach::Other);
-        assert_eq!(
-            press_reach(own_menu),
-            Reach::Yes,
-            "its own menus and dropdowns take clicks"
-        );
-        assert_eq!(
-            press_reach(second_window),
-            Reach::Other,
-            "a window the phone does not see takes no click"
-        );
+        assert_eq!(press_reach(own_menu), Reach::Yes, "its own menus and dropdowns take clicks");
+        assert_eq!(press_reach(second_window), Reach::Other, "a window the phone does not see takes no click");
         assert_eq!(press_reach(foreign_dialog), Reach::ForeignDialog);
-        assert_eq!(
-            press_reach(WindowFacts {
-                menu: true,
-                ..Default::default()
-            }),
-            Reach::Other,
-            "another program's menu"
-        );
-        let frameless = WindowFacts {
-            same_process: true,
-            same_thread: true,
-            menu: false,
-            ..Default::default()
-        };
+        assert_eq!(press_reach(WindowFacts { menu: true, ..Default::default() }), Reach::Other, "another program's menu");
+        let frameless = WindowFacts { same_process: true, same_thread: true, menu: false, ..Default::default() };
         assert_eq!(press_reach(frameless), Reach::Other, "a frameless window of the same program (WPF, Qt) is not a menu: the phone may not see it");
     }
 
     #[test]
     fn a_drag_never_drops_where_the_phone_does_not_see() {
         assert_eq!(drag_step("move", true, Reach::Yes), DragStep::Go);
-        assert_eq!(
-            drag_step("move", true, Reach::Other),
-            DragStep::Hold,
-            "the pointer stays on the shared window"
-        );
-        assert_eq!(
-            drag_step("up", true, Reach::Other),
-            DragStep::ReleaseAtLastSafe,
-            "let go at the last safe point, not over the covering window"
-        );
-        assert_eq!(
-            drag_step("up", true, Reach::ForeignDialog),
-            DragStep::ReleaseAtLastSafe
-        );
-        assert_eq!(
-            drag_step("move", false, Reach::Other),
-            DragStep::Go,
-            "no button held: a move is only a move"
-        );
+        assert_eq!(drag_step("move", true, Reach::Other), DragStep::Hold, "the pointer stays on the shared window");
+        assert_eq!(drag_step("up", true, Reach::Other), DragStep::ReleaseAtLastSafe, "let go at the last safe point, not over the covering window");
+        assert_eq!(drag_step("up", true, Reach::ForeignDialog), DragStep::ReleaseAtLastSafe);
+        assert_eq!(drag_step("move", false, Reach::Other), DragStep::Go, "no button held: a move is only a move");
         assert_eq!(drag_step("up", true, Reach::Yes), DragStep::Go);
     }
     #[test]
     fn a_release_has_no_place_and_a_held_button_is_followed_through_the_ops() {
-        assert_eq!(
-            checked_ops(&json!([{"k": "release", "x": 5, "y": 6}])).unwrap(),
-            [json!({"k": "release"})],
-            "no coordinates go with it"
-        );
+        assert_eq!(checked_ops(&json!([{"k": "release", "x": 5, "y": 6}])).unwrap(), [json!({"k": "release"})], "no coordinates go with it");
         let ops = |v: Value| checked_ops(&v).unwrap();
-        assert!(held_after(
-            false,
-            &ops(json!([{"k": "down", "x": 1, "y": 1}, {"k": "move", "x": 2, "y": 2}]))
-        ));
-        assert!(!held_after(
-            true,
-            &ops(json!([{"k": "up", "x": 2, "y": 2}]))
-        ));
-        assert!(
-            !held_after(false, &ops(json!([{"k": "click", "x": 1, "y": 1}]))),
-            "a click lets go of what it pressed"
-        );
+        assert!(held_after(false, &ops(json!([{"k": "down", "x": 1, "y": 1}, {"k": "move", "x": 2, "y": 2}]))));
+        assert!(!held_after(true, &ops(json!([{"k": "up", "x": 2, "y": 2}]))));
+        assert!(!held_after(false, &ops(json!([{"k": "click", "x": 1, "y": 1}]))), "a click lets go of what it pressed");
         assert!(!held_after(true, &ops(json!([{"k": "release"}]))));
-        assert!(held_after(
-            true,
-            &ops(json!([{"k": "move", "x": 3, "y": 3}]))
-        ));
+        assert!(held_after(true, &ops(json!([{"k": "move", "x": 3, "y": 3}]))));
     }
     #[test]
     fn only_input_a_screen_takes_goes_and_a_bad_op_refuses_the_message() {
@@ -484,11 +359,7 @@ mod tests {
         assert_eq!(got[1]["b"], "left", "a button defaults to left");
         assert_eq!(got[4]["n"], 2);
         assert_eq!(got[5]["dy"], -240.0);
-        assert_eq!(
-            got[6]["mods"],
-            json!(["ctrl", "shift"]),
-            "in a fixed order, once each"
-        );
+        assert_eq!(got[6]["mods"], json!(["ctrl", "shift"]), "in a fixed order, once each");
         assert_eq!(got[7]["mods"], json!([]));
         for bad in [
             json!([]),
@@ -515,54 +386,16 @@ mod tests {
     #[test]
     fn a_key_with_modifiers_presses_them_around_it() {
         let ev = key_events("S", &["ctrl", "shift"]);
-        let vk = |v: u16, up: bool| KeyEvent::Vk {
-            vk: v,
-            extended: false,
-            up,
-        };
-        assert_eq!(
-            ev,
-            [
-                vk(0x11, false),
-                vk(0x10, false),
-                vk(0x53, false),
-                vk(0x53, true),
-                vk(0x10, true),
-                vk(0x11, true)
-            ]
-        );
-        assert_eq!(
-            key_events("ArrowLeft", &[]),
-            [
-                KeyEvent::Vk {
-                    vk: 0x25,
-                    extended: true,
-                    up: false
-                },
-                KeyEvent::Vk {
-                    vk: 0x25,
-                    extended: true,
-                    up: true
-                }
-            ]
-        );
+        let vk = |v: u16, up: bool| KeyEvent::Vk { vk: v, extended: false, up };
+        assert_eq!(ev, [vk(0x11, false), vk(0x10, false), vk(0x53, false), vk(0x53, true), vk(0x10, true), vk(0x11, true)]);
+        assert_eq!(key_events("ArrowLeft", &[]), [KeyEvent::Vk { vk: 0x25, extended: true, up: false }, KeyEvent::Vk { vk: 0x25, extended: true, up: true }]);
         assert_eq!(key_events("F12", &[]).len(), 2);
         assert!(key_events("Nope", &["ctrl"]).is_empty());
         // The Windows key: alone it opens Start, held it is an extended modifier (Win+E).
-        let win = |up: bool| KeyEvent::Vk {
-            vk: 0x5B,
-            extended: true,
-            up,
-        };
+        let win = |up: bool| KeyEvent::Vk { vk: 0x5B, extended: true, up };
         assert_eq!(key_events("Meta", &[]), [win(false), win(true)]);
-        assert_eq!(
-            key_events("E", &["meta"]),
-            [win(false), vk(0x45, false), vk(0x45, true), win(true)]
-        );
-        assert_eq!(
-            checked_ops(&json!([{"k": "key", "key": "L", "mods": ["meta"]}])).unwrap()[0]["mods"],
-            json!(["meta"])
-        );
+        assert_eq!(key_events("E", &["meta"]), [win(false), vk(0x45, false), vk(0x45, true), win(true)]);
+        assert_eq!(checked_ops(&json!([{"k": "key", "key": "L", "mods": ["meta"]}])).unwrap()[0]["mods"], json!(["meta"]));
         assert_eq!(key_code("0"), Some((0x30, false)));
         assert_eq!(key_code("F1"), Some((0x70, false)));
         assert_eq!(key_code("F0"), None);
@@ -573,22 +406,13 @@ mod tests {
         let ev = text_events("é\r\n😀\tx");
         let units: Vec<String> = ev
             .iter()
-            .filter(|e| {
-                !matches!(
-                    e,
-                    KeyEvent::Vk { up: true, .. } | KeyEvent::Unicode { up: true, .. }
-                )
-            })
+            .filter(|e| !matches!(e, KeyEvent::Vk { up: true, .. } | KeyEvent::Unicode { up: true, .. }))
             .map(|e| match e {
                 KeyEvent::Vk { vk, .. } => format!("vk{vk:x}"),
                 KeyEvent::Unicode { unit, .. } => format!("u{unit:x}"),
             })
             .collect();
-        assert_eq!(
-            units,
-            ["ue9", "vkd", "ud83d", "ude00", "vk9", "u78"],
-            "one Enter for CR LF; the emoji as its two surrogates"
-        );
+        assert_eq!(units, ["ue9", "vkd", "ud83d", "ude00", "vk9", "u78"], "one Enter for CR LF; the emoji as its two surrogates");
         assert_eq!(ev.len(), units.len() * 2, "every key goes up again");
         assert_eq!(checked_text("Mật khẩu 123"), Some("Mật khẩu 123"));
         assert_eq!(checked_text("line\nline"), Some("line\nline"));
@@ -609,37 +433,10 @@ mod tests {
 
     #[test]
     fn the_stop_hotkey_needs_two_modifiers_one_of_them_ctrl_or_alt() {
-        assert_eq!(
-            parse_hotkey(DEFAULT_HOTKEY),
-            Some(Hotkey {
-                mods: MOD_CONTROL | MOD_ALT | MOD_SHIFT,
-                vk: 0x4B
-            })
-        );
-        assert_eq!(
-            parse_hotkey("ctrl + shift + f9"),
-            Some(Hotkey {
-                mods: MOD_CONTROL | MOD_SHIFT,
-                vk: 0x78
-            })
-        );
-        assert_eq!(
-            parse_hotkey("Win+Alt+3"),
-            Some(Hotkey {
-                mods: MOD_WIN | MOD_ALT,
-                vk: 0x33
-            })
-        );
-        for bad in [
-            "K",
-            "Ctrl+K",
-            "Shift+Win+K",
-            "Ctrl+Ctrl+K",
-            "Ctrl+Alt+Enter",
-            "Ctrl+Alt+",
-            "Ctrl+Hyper+K",
-            "",
-        ] {
+        assert_eq!(parse_hotkey(DEFAULT_HOTKEY), Some(Hotkey { mods: MOD_CONTROL | MOD_ALT | MOD_SHIFT, vk: 0x4B }));
+        assert_eq!(parse_hotkey("ctrl + shift + f9"), Some(Hotkey { mods: MOD_CONTROL | MOD_SHIFT, vk: 0x78 }));
+        assert_eq!(parse_hotkey("Win+Alt+3"), Some(Hotkey { mods: MOD_WIN | MOD_ALT, vk: 0x33 }));
+        for bad in ["K", "Ctrl+K", "Shift+Win+K", "Ctrl+Ctrl+K", "Ctrl+Alt+Enter", "Ctrl+Alt+", "Ctrl+Hyper+K", ""] {
             assert_eq!(parse_hotkey(bad), None, "{bad:?}");
         }
     }

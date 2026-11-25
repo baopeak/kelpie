@@ -38,10 +38,7 @@ mod tests {
     #[test]
     fn a_stream_that_panics_is_said_to_have_ended_once_and_one_that_ends_is_not() {
         let mut told = 0;
-        assert!(!super::guarded(
-            || panic!("a stream fails on its way"),
-            || told += 1
-        ));
+        assert!(!super::guarded(|| panic!("a stream fails on its way"), || told += 1));
         assert_eq!(told, 1);
         assert!(super::guarded(|| {}, || told += 1));
         assert_eq!(told, 1, "an ordinary end says nothing more");
