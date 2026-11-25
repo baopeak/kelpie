@@ -19,7 +19,10 @@
 //! - `input`: the closed set of input a phone may send, the keys, the stop hotkey.
 //! - `stream_core` (with the `helper` feature, on every OS): one stream's loop, which uses all of the above and drives the machine through
 //!   the `Backend` trait: commands, frames in flight, the keyframe gate, pacing and top-off, paint-over tiles, the cursor and the stats. A
-//!   backend (`win`) only grabs, converts, encodes, reads back and says what it sees.
+//!   backend (`win`, `mac`) only grabs, converts, encodes, reads back and says what it sees.
+//!
+//! On a Mac (`mac`) the same loop runs over ScreenCaptureKit, VideoToolbox and posted Core Graphics events; places there are global points
+//! and pictures are pixels (points × the backing scale).
 
 /// The window class of the sharing border, which is never offered as a target and never captured.
 pub const BORDER_CLASS: &str = "KelpieScreenBorder";
@@ -62,3 +65,6 @@ pub mod stream_core;
 
 #[cfg(all(windows, feature = "helper"))]
 pub mod win;
+
+#[cfg(all(target_os = "macos", feature = "helper"))]
+pub mod mac;

@@ -3,11 +3,11 @@ name = "kelpie-screen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kelpie's screen helper: captures a monitor or a window, encodes H.264 and drives input for a phone (Windows)"
+description = "Kelpie's screen helper: captures a monitor or a window, encodes H.264 and drives input for a phone (Windows, macOS)"
 
 # The pure parts (coordinates, targets, states, the quality controller, tiles, the SPS rewrite, the message formats, input checks) build
 # everywhere and are what the daemon and the app use (`default-features = false`). The helper itself (`helper`) adds the tile images and,
-# on Windows, capture, encoding, input and the border window.
+# on Windows and macOS, capture, encoding, input and the border window.
 [lib]
 name = "kelpie_screen"
 path = "src/lib.rs"
@@ -19,7 +19,7 @@ required-features = ["helper"]
 
 [features]
 default = ["helper"]
-helper = ["dep:png", "dep:jpeg-encoder", "dep:windows"]
+helper = ["dep:png", "dep:jpeg-encoder", "dep:windows", "dep:objc2", "dep:block2"]
 
 [dependencies]
 serde.workspace = true
@@ -61,3 +61,10 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already in the workspace through Tauri. Objective-C (ScreenCaptureKit, AppKit) is reached by name through msg_send!, and the C APIs
+# (VideoToolbox, Core Graphics, Core Video, Core Media, Accessibility, Carbon) are declared by hand in src/mac/ffi.rs: the generated
+# objc2-* framework crates would add a dozen crates for the few dozen calls made.
+objc2 = { version = "0.6", optional = true }
+block2 = { version = "0.6", optional = true }

@@ -112,6 +112,22 @@ pub fn source_to_screen(sx: f64, sy: f64, src_w: u32, src_h: u32, target: Rect) 
     target.clamp(x, y)
 }
 
+/// A point of the source picture → where a Mac's events take it: global points (fractional), the target being `target` in points and its
+/// picture `scale` pixels a point (the backing scale, 2 on a Retina display). The source pixel under the finger keeps its place in proportion,
+/// as `source_to_screen`, and lands on the screen pixel it is, not the point around it. Always inside.
+pub fn source_to_points(sx: f64, sy: f64, src_w: u32, src_h: u32, target: Rect, scale: f64) -> (f64, f64) {
+    if target.is_empty() || src_w == 0 || src_h == 0 {
+        return (f64::from(target.x), f64::from(target.y));
+    }
+    let scale = if scale.is_finite() && scale >= 1.0 { scale } else { 1.0 };
+    let along = |s: f64, n: u32, origin: i32, size: i32| {
+        let pixels = f64::from(size) * scale;
+        let px = ((s / f64::from(n)).clamp(0.0, 1.0) * pixels).floor().min((pixels - 1.0).max(0.0));
+        f64::from(origin) + px / scale
+    };
+    (along(sx, src_w, target.x, target.w), along(sy, src_h, target.y, target.h))
+}
+
 /// A screen pixel → the source picture's pixel, for the cursor: None when it is outside the target.
 pub fn screen_to_source(x: i32, y: i32, target: Rect, src_w: u32, src_h: u32) -> Option<(i32, i32)> {
     if !target.contains(x, y) || src_w == 0 || src_h == 0 {
@@ -253,6 +269,23 @@ mod tests {
         // A 4K monitor at 200 %: physical pixels throughout, the scale changes nothing.
         let m = monitors()[0].rect;
         assert_eq!(source_to_screen(1920.5, 1080.0, 3840, 2160, m), (1920, 1080));
+    }
+
+    #[test]
+    fn on_a_mac_a_pixel_of_the_picture_lands_on_its_own_half_point() {
+        // A 1600×1200 pt Retina display: a 3200×2400 picture.
+        let display = Rect::new(0, 0, 1600, 1200);
+        assert_eq!(source_to_points(1601.0, 3.0, 3200, 2400, display, 2.0), (800.5, 1.5));
+        assert_eq!(source_to_points(1601.9, 3.2, 3200, 2400, display, 2.0), (800.5, 1.5), "the pixel under the finger");
+        assert_eq!(source_to_points(3200.0, 2400.0, 3200, 2400, display, 2.0), (1599.5, 1199.5), "the far edge stays inside");
+        assert_eq!(source_to_points(-9.0, 1e6, 3200, 2400, display, 2.0), (0.0, 1199.5));
+        // The picture scaled for the encoder is not what the phone speaks in: the source is. A window at 1× on a second display left of it,
+        // resized to twice its size since the frame: the same point keeps its place in proportion.
+        let window = Rect::new(-1200, 100, 800, 600);
+        assert_eq!(source_to_points(400.0, 300.0, 800, 600, window, 1.0), (-800.0, 400.0));
+        assert_eq!(source_to_points(400.0, 300.0, 800, 600, Rect::new(-1200, 100, 1600, 1200), 1.0), (-400.0, 700.0));
+        assert_eq!(source_to_points(10.0, 10.0, 800, 600, window, f64::NAN), (-1190.0, 110.0), "a scale that cannot be read is 1");
+        assert_eq!(source_to_points(10.0, 10.0, 0, 600, window, 2.0), (-1200.0, 100.0));
     }
 
     #[test]
