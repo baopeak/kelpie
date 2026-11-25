@@ -113,5 +113,10 @@ for app_dir in "$bundle_dir"/macos/*.app; do
     echo "kelpie-screen in $app_dir is not signed with the app's identity ($(team "$main_bin")): macOS would not count its permissions as Kelpie's" >&2
     exit 1
   fi
+  # Unsigned or ad-hoc signed (no team): it builds, but macOS forgets Screen Recording and Accessibility with every new build, and
+  # Gatekeeper warns whoever downloads it.
+  if [ "$(team "$main_bin")" = "not set" ]; then
+    echo "warning: $app_dir is not signed with a Developer ID (no team): set APPLE_SIGNING_IDENTITY for a release, or macOS asks for the screen's permissions again after each update" >&2
+  fi
 done
 echo "Bundles: $bundle_dir"
