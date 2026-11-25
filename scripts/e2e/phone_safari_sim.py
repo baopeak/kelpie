@@ -282,7 +282,11 @@ def scenario(d, ph, port, folder):
     ph.d.refresh()
     ph.wait("[data-lock-screen], [data-inbox-view], .view-switch", 40)
     ph.watch_errors()
-    face = ph.js("const e = document.querySelector('[data-lock-screen]'); return e ? e.getAttribute('data-lock-screen') : 'open'")
+    # "unknown" while the link reconnects: the computer decides what the page shows.
+    deadline, face = time.time() + 40, "unknown"
+    while time.time() < deadline and face == "unknown":
+        face = ph.js("const e = document.querySelector('[data-lock-screen]'); return e ? e.getAttribute('data-lock-screen') : 'open'")
+        time.sleep(0.5)
     ph.shot("reopened")
     need("opened again, the page asks for the passkey to unlock", face == "unlock", face)
     stop = threading.Event()
