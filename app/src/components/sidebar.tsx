@@ -27,7 +27,7 @@ import { openFinish, overlapsOf } from "../lib/review-queue";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import type { Project, SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
-import { continueAt, continueTime } from "../lib/continue-timers";
+import { continueAt, continueTime, continueTimeShort } from "../lib/continue-timers";
 import { openHosts } from "./hosts-page";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { ancestorsOf, childrenOfSession, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
@@ -43,9 +43,11 @@ export { sessionState, reportedState, type SessionState } from "../lib/session-s
 const GLYPH: Partial<Record<SessionState, string>> = { waiting: "alert", error: "close", done: "check" };
 const LABEL: Partial<Record<SessionState, string>> = { waiting: msg("needs you"), error: msg("error") };
 
+const continueTitle = (at: number, now?: number) => t("Stopped by the usage limit: continues by itself at {time}", { time: continueTime(at, now) });
+
 function stateTitle(s: SessionInfo) {
   const at = continueAt(s);
-  if (at) return t("Stopped by the usage limit: continues by itself at {time}", { time: continueTime(at) });
+  if (at) return continueTitle(at);
   switch (sessionState(s)) {
     case "waiting": return t("Needs you");
     case "error": return s.alive ? t("Last turn failed") : t("Exited with code {code}", { code: s.exit_code ?? "" });
@@ -407,7 +409,12 @@ function SessionRow(props: { s: SessionInfo; kids: number }) {
           {(label) => <span class={`age state-label ${state()}`}>{t(label())}</span>}
         </Show>
       }>
-        {(at) => <span class="age state-label limit-wait" data-continue-at={at()}>{t("continues {time}", { time: continueTime(at()) })}</span>}
+        {/* A clock and the short time, so that the name keeps its room; the full sentence is in the tooltip. */}
+        {(at) => (
+          <span class="age state-label limit-wait" data-continue-at={at()} role="img" title={continueTitle(at(), now())} aria-label={continueTitle(at(), now())}>
+            <Icon name="clock" size={10} />{continueTimeShort(at(), now())}
+          </span>
+        )}
       </Show>
     </div>
   );

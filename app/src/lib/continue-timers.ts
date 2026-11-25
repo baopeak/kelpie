@@ -13,6 +13,15 @@ export const continueAt = (s: SessionInfo): number | undefined => (s.alive && s.
 
 /** When a timer fires, as the sidebar and the banner say it: the time, with the day when it is not today (a weekly limit). */
 export function continueTime(at: number, now = Date.now()): string {
-  const sameDay = new Date(at).toDateString() === new Date(now).toDateString();
-  return formatTime(at, sameDay ? undefined : { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  return formatTime(at, sameDay(at, now) ? undefined : { weekday: "short", hour: "2-digit", minute: "2-digit" });
 }
+
+/** The same time as short as the sidebar row can show it next to the session's name: 24-hour digits, so that dropping AM/PM
+ *  leaves no doubt ("15:20", "0:05"), with the day when it is not today ("Fri 0:05"; Vietnamese puts the day last). The row's
+ *  tooltip says it in full (`continueTime`). */
+export function continueTimeShort(at: number, now = Date.now()): string {
+  const time: Intl.DateTimeFormatOptions = { hour: "numeric", minute: "2-digit", hourCycle: "h23" };
+  return formatTime(at, sameDay(at, now) ? time : { ...time, weekday: "short" });
+}
+
+const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Date(b).toDateString();
