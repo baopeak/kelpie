@@ -9,7 +9,8 @@ network: "claude" is a stand-in that speaks Claude's stream-json, and an ACP age
 scripts/e2e/fake_acp_agent.py. Each one notes every prompt it receives, so the counts below are what the agents got.
 
 As a person would, in the New session dialog:
-1. Claude, "Chat view", a prompt, Start: the prompt box is there, and Claude gets the prompt once and shows it as the first message.
+1. Claude, "Chat view", a prompt and a name, Start: the prompt box is there, and Claude gets the prompt once and shows it as the first
+   message; the typed name is the session's name in the sidebar row and on its tab.
 2. Claude, a prompt typed with "Terminal (TUI)" selected, then "Chat view", Start: Claude gets that prompt once.
 3. Claude, "Chat view", "Run in a new worktree", a prompt, Start: Claude gets it once, in the new worktree's folder.
 4. An agent from the ACP registry (it always opens as a chat), a prompt, Start: the agent gets it once.
@@ -185,6 +186,23 @@ def start():
     return new[0] if new else None
 
 
+def type_name(text):
+    """Types into the dialog's Name field as a person would."""
+    found = d.js("const r = [...document.querySelectorAll('.modal .form-row')].find(x => x.querySelector('label')?.textContent.trim() === 'Name (optional)'); const i = r?.querySelector('input'); if (i) i.setAttribute('data-e2e-name', ''); return !!i;")
+    if not found:
+        return False
+    d.click(".modal [data-e2e-name]")
+    d.keys(text)
+    return d.js("return document.querySelector('.modal [data-e2e-name]').value") == text
+
+
+def shown_names(sid):
+    """The session's name as the sidebar row and the tab that holds it show it."""
+    return d.js(f"""const s = {S}; const row = document.querySelector(`.session-row[data-row-session='${{arguments[0]}}'] .name`);
+      const loc = s.paneLocation(arguments[0]); const tab = loc && document.querySelector(`.tab[data-tab-id='${{loc.tabId}}']`);
+      return {{ store: s.sessions[arguments[0]]?.name ?? null, row: row ? row.textContent.trim() : null, tab: tab ? tab.innerText.trim() : null }};""", sid)
+
+
 def chat_users(sid):
     return d.js(f"const c = window.__kelpie.chat.getController({S}.sessions[arguments[0]]); return c.state.items.filter(i => i.kind === 'user').map(i => i.text);", sid) or []
 
@@ -213,6 +231,8 @@ try:
     run.check("1: Chat view is offered for Claude", toggle("Chat view"))
     typed = type_prompt(P1)
     run.check("1: the prompt box is there in chat view", typed)
+    NAME1 = "named chat"
+    run.check("1: the name is typed in the Name field", type_name(NAME1))
     run.shot("01-dialog-chat-view")
     sid1 = start()
     run.check("1: the session starts", bool(sid1))
@@ -221,6 +241,11 @@ try:
     shown = until(lambda: P1 in chat_users(sid1), 10) if sid1 else None
     run.check("1: the chat shows it as the first message", bool(shown) and chat_users(sid1)[:1] == [P1], str(sid1 and chat_users(sid1)))
     run.check("1: and the reply to it", bool(until(lambda: d.js("return [...document.querySelectorAll('.chat .msg-assistant')].some(e => e.textContent.includes(arguments[0]))", "Got: " + P1), 10)))
+    names = until(lambda: (lambda n: n if n["row"] == NAME1 and NAME1 in (n["tab"] or "") else None)(shown_names(sid1)), 10) if sid1 else None
+    names = names or (shown_names(sid1) if sid1 else {})
+    run.check("1: the session has the typed name", names.get("store") == NAME1, str(names))
+    run.check("1: the sidebar row shows the typed name", names.get("row") == NAME1, str(names))
+    run.check("1: the chat's tab shows the typed name", NAME1 in (names.get("tab") or ""), str(names))
     run.shot("02-chat-first-prompt")
 
     # 2. Typed with Terminal selected, then switched to Chat view.
