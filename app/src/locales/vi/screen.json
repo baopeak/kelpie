@@ -4,6 +4,7 @@
   "{device} lost control, or locked: it no longer sees this screen.": "{device} đã mất quyền điều khiển hoặc đã khóa: nó không còn thấy màn hình này.",
   "{device} stopped seeing this screen after 10 minutes with nothing done.": "{device} đã ngừng xem màn hình này sau 10 phút không làm gì.",
   "{device} no longer sees this screen.": "{device} không còn thấy màn hình này.",
+  "This Mac no longer allows Kelpie to record the screen, so {device} no longer sees it. Allow Screen Recording in System Settings → Privacy & Security.": "Máy Mac này không còn cho Kelpie ghi màn hình nữa, nên {device} không còn thấy màn hình. Hãy cho phép Ghi màn hình trong Cài đặt hệ thống → Quyền riêng tư & Bảo mật.",
   "{device} sees this computer's screen: {title}": "{device} đang xem màn hình của máy tính này: {title}",
   "Another program holds {hotkey}, so it cannot stop the shared screen: use Stop in the status bar, or pick another hotkey in Settings → Mobile.": "Một chương trình khác đang giữ {hotkey}, nên phím này không dừng được màn hình đang chia sẻ: hãy dùng Dừng trên thanh trạng thái, hoặc chọn phím tắt khác trong Cài đặt → Di động.",
   "The shared screen uses the software encoder: smaller and slower, but it works.": "Màn hình đang chia sẻ dùng bộ mã hóa phần mềm: nhỏ hơn và chậm hơn, nhưng vẫn chạy.",
