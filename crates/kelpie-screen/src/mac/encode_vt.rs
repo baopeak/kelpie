@@ -101,12 +101,14 @@ impl Encoder {
             let hw = cfbool(hardware);
             let low = kVTVideoEncoderSpecification_EnableLowLatencyRateControl;
             let use_hw = kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder;
-            // Low latency first: with the hardware asked for, then as VideoToolbox picks (on a Mac without a hardware encoder the low-latency
-            // one is its software encoder, which a hardware request makes it refuse), and only then without it.
-            let mut specs = vec![(cfdict(&[(low, cfbool(true)), (use_hw, hw)]), true)];
+            // Low latency first: with the hardware asked for, then as VideoToolbox picks, and only then without it. The low-latency encoder
+            // refuses to be told to leave the hardware out (`kVTParameterErr`, found on macOS 26), so a software one is asked for by
+            // leaving the hardware key out; `hardware` then says what it is.
+            let mut specs = Vec::new();
             if hardware {
-                specs.push((cfdict(&[(low, cfbool(true))]), true));
+                specs.push((cfdict(&[(low, cfbool(true)), (use_hw, hw)]), true));
             }
+            specs.push((cfdict(&[(low, cfbool(true))]), true));
             specs.push((cfdict(&[(use_hw, hw)]), false));
             let (mut last, mut low_err) = (0, 0);
             let last_low = specs.iter().rposition(|s| s.1);
