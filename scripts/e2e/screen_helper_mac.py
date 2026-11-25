@@ -8,14 +8,15 @@ It runs the built `kelpie-screen` binary, speaks its stdin JSON lines and reads 
    still regions are painted with tiles and the cursor is sent; then the stop hotkey (Ctrl+Option+Shift+K, posted through the helper's own
    input) ends it with `hotkey`.
 3. A TextEdit window stream on a document of its own: another app is put in front, a click through the helper brings TextEdit back, typed
-   text and Cmd+S reach it (the saved file holds the text). Then what must not happen: a long text stops, and the other window gets none of
-   it, when another TextEdit window takes the focus part way, or another app comes in front; `stop`, and the stop hotkey (pressed through
-   System Events), end the stream part way through a long text, and nothing more is typed after it ended. Only this script's own documents
-   are closed at the end.
+   text and Cmd+S reach it (the saved file holds the text). Then what must not happen: a long text stops when another TextEdit window takes
+   the focus part way, or another app comes in front, and only the characters said typed are in the shared document (the other window's
+   file stays empty); `stop`, and the stop hotkey (a real key press posted from this process), end the stream part way through a long text,
+   and nothing more is typed after it ended. Documents are read by saving them with Cmd+S through a stream, and only this script's own are
+   closed at the end (Cmd+W through a stream), so no AppleScript automation permission is needed.
 4. Closing stdin ends the helper.
 
-Needs Screen Recording and Accessibility for the process that runs it (and Automation of System Events for the hotkey press), ffmpeg/ffprobe
-on PATH and nothing else at the Mac's keyboard. Every check prints ok or FAILED; the exit code is the number of failures.
+Needs Screen Recording and Accessibility for the process that runs it, ffmpeg/ffprobe on PATH and nothing else at the Mac's keyboard. Every
+check prints ok or FAILED; the exit code is the number of failures.
 
     python3 scripts/e2e/screen_helper_mac.py --helper "$CARGO_TARGET_DIR/debug/kelpie-screen" [--seconds 10] [--out /tmp/kelpie-screen-smoke]
 """
