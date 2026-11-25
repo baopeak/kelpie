@@ -1646,7 +1646,7 @@ is not recorded anywhere: *What phones did* says only when a takeover started an
 picture stops for a few seconds the phone dims it and sends nothing until it is back, so a tap never lands on a page that changed meanwhile. A program on the
 computer that tries to stand in for Kelpie's window here is refused, and Kelpie says so.
 
-**Seeing the computer's screen from the phone** (Windows). When an agent waits on something outside Kelpie — a dialog, an installer, the app it is building,
+**Seeing the computer's screen from the phone** (Windows, and macOS 12.3 or later). When an agent waits on something outside Kelpie — a dialog, an installer, the app it is building,
 an IDE — a phone given *May take control* can see one of the computer's screens or one window and use it: *See the computer's screen* in the inbox or in a session lists the
 screens, then Kelpie and the code editors that are open, then the other windows. The first screen opens with a sheet of the gestures, and **?** at the top shows
 it again. The button next to it switches between the two ways a finger works:
@@ -1709,12 +1709,25 @@ did* says which program was shared (such as `Code.exe`, never the window's title
 Keys and text go only into the shared window: if another window has taken the focus on the computer, Kelpie brings the shared one to the front once,
 and if that does not work it types nothing and the phone says *Not typed*, so a password never lands in a chat that popped up. Sharing does not start
 if the orange border cannot be shown or another program holds the stop hotkey (Kelpie says so: pick another hotkey), nor while Kelpie itself runs as
-administrator. A 4K or larger screen is shown at 1080p, with crisp text at its full sharpness; a rotated screen cannot be shown yet (share one of its
+administrator (as root on a Mac). A 4K or larger screen is shown at 1080p, with crisp text at its full sharpness; a rotated screen cannot be shown yet (share one of its
 windows). If the picture stops while the computer says it is sending, the phone says *The picture is stuck* and asks for a fresh one.
+
+**On a Mac**, macOS asks you to allow Kelpie twice, in System Settings → Privacy & Security: *Screen Recording* lets a phone see the screen, and
+*Accessibility* lets it click and type. Settings → Mobile → Advanced shows whether Kelpie has each, and *Open System Settings* next to one it lacks
+puts Kelpie in that list and opens the pane where you turn it on. macOS applies Screen Recording from Kelpie's next start, so quit Kelpie and open it
+again after allowing it. Without Screen Recording no screen starts, and the phone says which permission is missing; without Accessibility the phone
+still sees the screen and says why its taps and keys are not sent. The key row shows ⌘ ⌥ ⌃ ⇧ (Command, Option, Control, Shift) in place of Ctrl,
+Shift, Alt and Win, so ⌘ then S saves; ⌘Space opens Spotlight where ⊞ would be, and there is no menu key. The stop hotkey is Control+Option+Shift+K.
+When a password field holds the keyboard (macOS's secure input), the phone says that what you type may not arrive. The Mac's lock screen and login
+window, FileVault's start-up screen, the prompts in which macOS asks for a permission, and other users' sessions cannot be seen or answered from the
+phone, and Kelpie must be open in your signed-in session: the daemon alone cannot see the screen. Direct (peer to peer) and TURN are not available on
+a Mac yet, so the picture goes over Tailscale, your HTTPS address or the relay's connection. macOS ties both permissions to Kelpie's signature, so
+a build that is not signed with a stable identity (one you built yourself, for example) asks for them again after each update.
 
 **What *May take control* means for the screen.** A phone given it can do anything you can do at this computer while signed in: for example Win+R and a
 command runs any program as you. Win+L locks the computer, and the phone cannot unlock it again: someone has to sign in at the computer. Ctrl+Alt+Del
-cannot be sent from the phone, and Windows security prompts (UAC), the lock screen and sign-in cannot be seen or answered from it. Give it only to your own
+cannot be sent from the phone, and Windows security prompts (UAC), the lock screen and sign-in cannot be seen or answered from it. On a Mac, ⌘Space and a
+command do the same, and Control+⌘+Q locks it. Give it only to your own
 phone, with its lock on. The phone needs a browser that decodes H.264 video with WebCodecs: Safari on iOS 16.4 or later (iOS 26 works
 best), or Chrome on Android; an older one says so.
 
