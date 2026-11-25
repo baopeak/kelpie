@@ -219,7 +219,8 @@ async function doSwitchToChat(project: Project, pane: Pane) {
     const loc = store.paneLocation(s.id);
     if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "chat", sessionId: info.id });
     disposeView(s.id);
-    await daemon("session.close", { handle: s.handle }).catch(() => {});
+    // Not closed, it stays listed as a stopped session: it no longer shares the new one's place.
+    await daemon("session.close", { handle: s.handle }).catch(() => store.endTakeover(s.id));
   } catch (e) {
     store.forgetPlace(id);
     await markSwitching(s, false);
@@ -277,7 +278,8 @@ async function doSwitchToTerminal(project: Project, pane: Pane, command?: string
     const loc = store.paneLocation(c.id);
     if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "terminal", sessionId: info.id });
     disposeController(c.id);
-    await daemon("session.close", { handle: c.handle }).catch(() => {});
+    // Not closed, it stays listed as a stopped session: it no longer shares the new one's place.
+    await daemon("session.close", { handle: c.handle }).catch(() => store.endTakeover(c.id));
   } catch (e) {
     store.forgetPlace(id);
     await markSwitching(c, false);
@@ -321,7 +323,8 @@ async function replaceChat(s: SessionInfo, conv: string | null, settings: AgentS
   const loc = store.paneLocation(s.id);
   if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "chat", sessionId: info.id });
   disposeController(s.id);
-  await daemon("session.close", { handle: s.handle }).catch(() => {});
+  // Not closed, it stays listed as a stopped session: it no longer shares the new one's place.
+  await daemon("session.close", { handle: s.handle }).catch(() => store.endTakeover(s.id));
 }
 
 /** Conversations already started again for bypass: one that is refused again (a host where the flag is left out) is not
