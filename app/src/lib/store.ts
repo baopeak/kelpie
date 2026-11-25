@@ -344,6 +344,14 @@ function createAppStore() {
     if (state.sessionSince?.[id] !== undefined) update((st) => void delete st.sessionSince![id]);
   }
 
+  /** The session `fromId` is no longer being replaced (it stayed listed: its close failed): its row stops sharing the new
+   *  session's place. */
+  function endTakeover(fromId: string) {
+    if (Object.values(takeovers()).includes(fromId)) {
+      setTakeovers((m) => Object.fromEntries(Object.entries(m).filter(([, from]) => from !== fromId)));
+    }
+  }
+
   /** Switches between terminal and chat under way: the new session's id and the id of the session it replaces, while both are
    *  listed. For that moment only one of the two has the pane (first the old, then the new), so the sidebar gives both its place
    *  and neither row jumps. Kept in memory only: a switch ends with the old session closed. */
@@ -2025,7 +2033,7 @@ function createAppStore() {
   return {
     state, sessions, connected, sessionsKnown, overlay, setOverlay, loaded, toast, notify, lastSwitchMs,
     init, activeProject, workspace, activeTab, addProject, removeProject, restoreProjects, renameProject, moveProject, switchProject,
-    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, forgetPlace, takeovers, openFile, acceptFlags, closePane,
+    addTab, selectTab, cycleTab, focusPane, placePane, newSession, startSession, revealSession, goToSession, focusSessionInput, focusedSession, sessionSince, inheritPlace, forgetPlace, endTakeover, takeovers, openFile, acceptFlags, closePane,
     arrangeTab, tileCandidates, canTile, canSpread, tileTab, spreadTab, launchGrid, saveLayout, deleteLayout, renameLayout, applyLayout, equalizeTab, dropPane, setBroadcast, renameTab,
     splitPicker, moveTab, movePaneToTab, mergeTab,
     resumeSession, resumeInterrupted, setChatResumer,

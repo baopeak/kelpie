@@ -12,7 +12,7 @@ ones a drag on a pane or a tab calls), and rows are clicked with WebDriver. Chec
 left pane, list the left one first (the owner's report: the right pane's session came first); top before bottom; tab 1 before
 tab 2; a dragged tab and a moved pane re-sort the rows as the screen does; a family (a parent and its sub-session) is one block that
 stays in place when the child is shown in the parent's pane; activity, status changes and clicks on rows move no row; a session
-whose pane closes goes below those on screen.
+whose pane closes goes below those on screen; dragging dividers until pane tops cross moves no row.
 
 `--before`: the same steps and screenshots (prefixed `before-`) against whatever the dev server serves, for a comparison with an
 older version; its failures are printed and the exit code is 0.
@@ -283,6 +283,29 @@ def scenario(run, d):
     time.sleep(1.0)
     run.shot(f"{PREFIX}-08-pane-closed")
     expect("a session whose pane closed goes after the sessions on screen", ["parent", "kid", "charlie", "delta", "alpha", "bravo"])
+
+    # A 2x2 grid of columns in a new tab, then the dividers dragged until the panes' tops cross (the bottom-left pane's top now
+    # below the bottom-right one's): resizing is no change of layout, the rows stay.
+    g1, g2, g3, g4 = make("g1"), make("g2"), make("g3"), make("g4")
+    place(g1["id"], "tab")
+    place(g3["id"], "right")
+    l1 = loc(g1["id"])
+    w.js(f"{S}.focusPane(arguments[0], arguments[1], arguments[2])", pid, l1["tabId"], l1["paneId"])
+    place(g2["id"], "down")
+    l3 = loc(g3["id"])
+    w.js(f"{S}.focusPane(arguments[0], arguments[1], arguments[2])", pid, l3["tabId"], l3["paneId"])
+    place(g4["id"], "down")
+    grid = ["parent", "kid", "charlie", "delta", "alpha", "g1", "g2", "g3", "g4", "bravo"]
+    expect("a grid of columns lists the left column, then the right one", grid)
+    cols = w.js(f"const t = {S}.workspace(arguments[0]).tabs.find(t => t.id === arguments[1]); return t.root.children.map(c => c.id)", pid, l1["tabId"])
+    w.js(f"{S}.resizeSplit(arguments[0], arguments[1], arguments[2], 0, 0.85)", pid, l1["tabId"], cols[0])
+    w.js(f"{S}.resizeSplit(arguments[0], arguments[1], arguments[2], 0, 0.15)", pid, l1["tabId"], cols[1])
+    crossed = until(lambda: term(g2["id"]) and term(g4["id"]) and term(g4["id"])["top"] < term(g2["id"])["top"], 10)
+    check("set-up: after the drag the bottom-right pane's top is above the bottom-left one's", crossed, w.js(TERMS_JS))
+    time.sleep(1.0)
+    run.shot(f"{PREFIX}-09-dividers-dragged")
+    resized = [order() for _ in range(4) if not time.sleep(0.25)]
+    check("dragging the dividers until the tops cross moves no row", all(r == grid for r in resized), resized)
 
 
 def main():

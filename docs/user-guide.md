@@ -870,13 +870,14 @@ open). A request not answered in 5 minutes is refused, and one withdrawn when it
 **The tree.** A child sits under its parent in the sidebar (if both are in the same project), on
 tree lines, oldest first; the parent and everything below it share one faint card, so the next
 top-level session reads as separate. A project's sessions are listed in the order they are on
-screen: tabs left to right, and in each tab its panes in the order they were split: a side-by-side
+screen: tabs left to right, and in each tab its panes in layout order: a side-by-side
 split lists its left side before its right, a stacked one its top before its bottom, each side
 whole before the next (resizing panes never reorders the list). A family
 moves as one block, at the place of its first member on screen, so showing a child in its parent's
 pane moves nothing. Sessions in no pane or tab follow, oldest first (a conversation switched between
 terminal and chat keeps the place of the session it replaced). Only the layout moves a row (a pane
-split, moved or closed, a tab dragged): activity, a status or report, focus and clicks never do. The parent row has a fold arrow and a badge with the number of sessions below it, coloured
+split, moved or closed, a tab opened, closed or dragged; a click on a session in no pane opens it in
+a tab): activity, a status or report, focus and clicks on rows on screen never do. The parent row has a fold arrow and a badge with the number of sessions below it, coloured
 by the worst state among them (needs you, failed, working, finished, idle); folded, the parent is
 marked while one of its hidden children is on screen. The session on screen has its row marked
 (accent wash and edge, name in bold) and kept in view. A family of sessions lives in the tab of the
