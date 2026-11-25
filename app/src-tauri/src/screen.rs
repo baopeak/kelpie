@@ -535,12 +535,13 @@ fn privacy_pane(what: &str) -> Option<&'static str> {
     }
 }
 
-/// What a Mac allows Kelpie for the screen (Settings → Mobile): `{screen, accessibility}`; null on any other computer. The helper runs from
-/// inside Kelpie.app and is started by it, so macOS counts its permissions as Kelpie's: what this process is allowed, the helper is.
+/// What a Mac allows Kelpie for the screen (Settings → Mobile): `{screen, accessibility}`; null on any other computer, and on a Mac that
+/// cannot share its screen (before macOS 12.3), where no permission would help. The helper runs from inside Kelpie.app and is started by it,
+/// so macOS counts its permissions as Kelpie's: what this process is allowed, the helper is.
 #[tauri::command]
 pub fn screen_permissions() -> Option<Value> {
     #[cfg(target_os = "macos")]
-    return Some(json!({"screen": mac::screen_recording(), "accessibility": mac::accessibility()}));
+    return screen_available().then(|| json!({"screen": mac::screen_recording(), "accessibility": mac::accessibility()}));
     #[cfg(not(target_os = "macos"))]
     None
 }

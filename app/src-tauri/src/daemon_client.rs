@@ -37,15 +37,28 @@ struct View {
 }
 
 /// What this app provides to phones on this computer: a browser pane taken over (Windows: the WebView2 DevTools protocol) and the screen
-/// (Windows and macOS, through the helper).
+/// (Windows, and a Mac whose macOS can share it, through the helper).
 fn provided_kinds() -> &'static [&'static str] {
+    kinds_for(cfg!(target_os = "macos") && crate::screen::screen_available())
+}
+
+fn kinds_for(mac_can_share: bool) -> &'static [&'static str] {
     if cfg!(windows) {
         &["browser", "screen"]
-    } else if cfg!(target_os = "macos") {
+    } else if mac_can_share {
         &["screen"]
     } else {
         &[]
     }
+}
+
+/// The daemon's API level that knows a Mac's screen: it tells the phone the computer's `os` and says why a Mac refused or ended a screen. An
+/// older one (an update keeps the previous daemon running) would show the phone Windows' keys and texts, so a Mac offers it no screen.
+const MAC_SCREEN_API: u64 = 50;
+
+/// Whether this app offers `kind` to a daemon at `api`.
+fn offered_to(kind: &str, api: u64) -> bool {
+    !(cfg!(target_os = "macos") && kind == "screen" && api < MAC_SCREEN_API)
 }
 
 enum Pending {
@@ -151,6 +164,13 @@ impl DaemonClient {
     }
 
     async fn register_kind(self: Arc<Self>, kind: &'static str) {
+        if cfg!(target_os = "macos") {
+            let api = self.call("daemon.info", json!({})).await.ok().and_then(|i| i.get("api").and_then(Value::as_u64)).unwrap_or(1);
+            if !offered_to(kind, api) {
+                tracing::info!("the background service is older than this app (API {api}): this Mac's screen waits until it is restarted");
+                return;
+            }
+        }
         for wait_ms in [0u64, 500, 1000, 2000, 4000, 8000] {
             tokio::time::sleep(Duration::from_millis(wait_ms)).await;
             match self.call("provider.register", json!({"kind": kind})).await {
@@ -417,14 +437,20 @@ mod tests {
 
     #[test]
     fn a_mac_provides_the_screen_and_windows_the_browser_panes_too() {
-        let kinds = provided_kinds();
         if cfg!(windows) {
-            assert_eq!(kinds, ["browser", "screen"]);
-        } else if cfg!(target_os = "macos") {
-            assert_eq!(kinds, ["screen"], "the screen helper runs on a Mac; a pane's takeover needs WebView2");
+            assert_eq!(provided_kinds(), ["browser", "screen"]);
+            assert_eq!(kinds_for(false), ["browser", "screen"], "Windows does not ask the Mac's question");
         } else {
-            assert!(kinds.is_empty());
+            assert_eq!(kinds_for(true), ["screen"], "the screen helper runs on a Mac; a pane's takeover needs WebView2");
+            assert!(kinds_for(false).is_empty(), "a Mac before macOS 12.3, or without the helper, offers no screen it cannot start");
         }
+    }
+
+    #[test]
+    fn a_mac_offers_its_screen_only_to_a_daemon_that_knows_one() {
+        assert!(offered_to("browser", 1));
+        assert!(offered_to("screen", MAC_SCREEN_API));
+        assert_eq!(offered_to("screen", MAC_SCREEN_API - 1), !cfg!(target_os = "macos"), "Windows offers its screen to any daemon, as before");
     }
 
     fn read_back(bytes: &[u8]) -> std::io::Result<Option<Frame>> {
