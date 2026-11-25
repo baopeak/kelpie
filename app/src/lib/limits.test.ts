@@ -42,7 +42,7 @@ describe("loadScheduled", () => {
 
 const { sessionState } = await import("./session-state");
 const { isLimited } = await import("./limits");
-const { continueAt, continueTime } = await import("./continue-timers");
+const { continueAt, continueTime, continueTimeShort } = await import("./continue-timers");
 
 describe("a session waiting on its timer", () => {
   const limited = (id: string, chat: boolean) =>
@@ -80,5 +80,19 @@ describe("continueTime", () => {
     expect(continueTime(later, now)).not.toMatch(/[A-Za-z]{3}/);
     expect(continueTime(later, now)).toMatch(/15:20|3:20/);
     expect(continueTime(friday, now)).toMatch(/Fri/);
+  });
+});
+
+describe("continueTimeShort", () => {
+  it("is the hour and minute in 24-hour digits today, and keeps the day for another day", () => {
+    const now = new Date(2026, 10, 24, 10, 0).getTime();
+    const later = new Date(2026, 10, 24, 15, 20).getTime();
+    const friday = new Date(2026, 10, 27, 12, 5).getTime();
+    const midnight = new Date(2026, 10, 27, 0, 5).getTime();
+    expect(continueTimeShort(later, now)).toBe("15:20");
+    expect(continueTimeShort(friday, now)).toMatch(/^Fri,? 12:05$/);
+    // Midnight and noon do not read the same without AM/PM.
+    expect(continueTimeShort(midnight, now)).toMatch(/^Fri,? 0?0:05$/);
+    expect(continueTimeShort(later, now).length).toBeLessThan(continueTime(later, now).length);
   });
 });

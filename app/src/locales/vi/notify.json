@@ -48,7 +48,6 @@
   "Will send “continue” at {time}.": "Sẽ gửi “continue” lúc {time}.",
   "Sent “continue” to {name}": "Đã gửi “continue” cho {name}",
   "Stopped by the usage limit: continues by itself at {time}": "Phiên đang dừng vì giới hạn sử dụng và sẽ tự tiếp tục lúc {time}",
-  "continues {time}": "tiếp tục {time}",
   "The time the limit lifts (your local time)": "Giờ giới hạn được gỡ (giờ địa phương của bạn)",
   "Continue at this time": "Tiếp tục vào giờ này",
   "Continue at reset ({time})": "Tiếp tục khi giới hạn được đặt lại ({time})",
