@@ -113,5 +113,10 @@
   "Scroll up": "Cuộn lên",
   "Scroll down": "Cuộn xuống",
   "Hold": "Giữ",
-  "Release": "Thả"
+  "Release": "Thả",
+  "A password field on the Mac is protecting the keyboard: what you type may not arrive.": "Một ô mật khẩu trên máy Mac đang bảo vệ bàn phím, nên những gì bạn gõ có thể không tới nơi.",
+  "The Mac has not allowed Kelpie to control it, so taps and keys are not sent. Allow it in System Settings → Privacy & Security → Accessibility, on the Mac.": "Máy Mac chưa cho phép Kelpie điều khiển máy, nên các lần chạm và phím bấm không được gửi đi. Bạn hãy cho phép trong Cài đặt hệ thống → Quyền riêng tư & Bảo mật → Trợ năng, ngay trên máy Mac.",
+  "Pick a screen or one window. The Mac shows a border around what you see and can stop it at any time; its lock screen and login window cannot be seen or answered from here.": "Hãy chọn một màn hình hoặc một cửa sổ. Máy Mac sẽ hiện một đường viền quanh phần bạn đang xem và có thể dừng việc chia sẻ bất cứ lúc nào, còn màn hình khóa và cửa sổ đăng nhập của máy thì không xem hay thao tác được từ đây.",
+  "For a shortcut, tap ⌘ (or another modifier) in the key bar, then type one letter and tap Type it: ⌘ then S saves.": "Để dùng phím tắt, bạn chạm ⌘ (hoặc một phím bổ trợ khác) trên thanh phím, rồi gõ một chữ cái và chạm Gõ vào: chẳng hạn ⌘ rồi S sẽ lưu.",
+  "For a shortcut, tap Ctrl (or another modifier) in the key bar, then type one letter and tap Type it: Ctrl then S saves.": "Để dùng phím tắt, bạn chạm Ctrl (hoặc một phím bổ trợ khác) trên thanh phím, rồi gõ một chữ cái và chạm Gõ vào: chẳng hạn Ctrl rồi S sẽ lưu."
 }

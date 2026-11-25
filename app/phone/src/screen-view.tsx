@@ -1,11 +1,11 @@
 // The computer's screen on the phone: what to see (its screens, Kelpie and IDEs first, then windows), then the picture, which a finger drives
-// as a trackpad or directly, a key bar with Ctrl, Shift and Alt, a field for text (sent as one message, said as sent or not sent), the
+// as a trackpad or directly, a key bar with Ctrl, Shift and Alt (⌘ ⌥ ⌃ ⇧ on a Mac), a field for text (sent as one message, said as sent or not sent), the
 // quality line, and Stop. Video is decoded with WebCodecs and drawn with the crisp tiles and the cursor over it; the logic is screen.ts.
 // Nothing waits to be shown: a decoded frame is drawn as it comes out of the decoder (no smoothing buffer), on a low-latency canvas where the
 // browser offers one, and a frame the decoder is too far behind for is skipped. The cursor is a layer of its own over the picture: moving it
 // never draws the picture again, so it follows the finger at the screen's own rate, at once where the finger puts it (local echo).
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { avcChunk, Backlog, canDecode, clampView, decoderWedged, fedSince, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, keepInView, KEYS, LONG_PRESS_MS, MODS, Overlay, parseMedia, qualityText, remoteText, sameSetup, setupFor, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Feel, type Frame, type GestureOut, type Mod, type ScOp, type TargetRow, type View } from "./screen";
+import { avcChunk, Backlog, canDecode, clampView, decoderWedged, fedSince, detailsText, echoAt, echoPoint, fitView, FrameTimes, followHostCursor, Gestures, keepInView, keyLabel, keyOp, keysFor, LONG_PRESS_MS, modLabel, modsFor, Overlay, parseMedia, pickerHint, qualityText, remoteText, sameSetup, setupFor, shortcutHint, toClient, visibleRect, type CursorEcho, type DecoderSetup, type Feel, type Frame, type GestureOut, type Mod, type ScOp, type TargetRow, type View } from "./screen";
 import { holdPageStill } from "./screen-page-guard";
 import { screenGesturesSeen, screenMouseBar } from "./prefs";
 import { canSharpen, connected, livePathNow, onScreenMedia, remoteScreen, remoteScreens, route } from "./phone-state";
@@ -14,8 +14,6 @@ import { needsProof, pathRows, type ViaId } from "./screen-paths";
 import { HOSTED } from "./hosted";
 import { msg, t } from "./i18n";
 
-const KEY_LABELS: Record<(typeof KEYS)[number], string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", ContextMenu: "☰", Meta: "⊞", F1: "F1", F2: "F2", F3: "F3", F4: "F4", F5: "F5", F6: "F6", F7: "F7", F8: "F8", F9: "F9", F10: "F10", F11: "F11", F12: "F12" };
-const MOD_LABELS: Record<Mod, string> = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", meta: "Win" };
 
 /** What a finger does in each mode, as the help sheet lists it: the gesture, then what the computer gets. */
 const GESTURE_ROWS: Record<"trackpad" | "direct", [string, string][]> = {
@@ -139,7 +137,7 @@ function Picker() {
   return (
     <div class="card takeover-pick">
       <h2>{t("See the computer's screen")}</h2>
-      <p class="muted">{t("Pick a screen or one window. The computer shows a border around what you see and can stop it at any time; Windows security prompts and the lock screen cannot be seen or answered from here.")}</p>
+      <p class="muted">{pickerHint(s().os, t)}</p>
       <Show when={s().message}><p class="banner bad" role="status">{s().message}</p></Show>
       <Show when={s().retry}>{(r) => <RetryLine at={r().at} />}</Show>
       <Show when={s().targets} fallback={<p class="muted">{t("Asking the computer…")}</p>}>
@@ -599,7 +597,7 @@ function Live() {
   };
 
   const key = (k: string) => {
-    send([{ k: "key", key: k, mods: mods() }]);
+    send([keyOp(k, mods())]);
     setMods([]);
   };
   const toggleMod = (m: Mod) => setMods((all) => (all.includes(m) ? all.filter((x) => x !== m) : [...all, m]));
@@ -676,7 +674,7 @@ function Live() {
           {(l) => <canvas class="screen-loupe" ref={(el) => { loupeEl = el; queueMicrotask(drawLoupe); }} style={{ transform: `translate3d(${l().x - LOUPE / 2}px, ${Math.max(0, l().y - LOUPE - 40)}px, 0)` }} aria-hidden="true" data-screen-loupe />}
         </Show>
         <Show when={dragging()}><div class="screen-chip" role="status" data-screen-dragging>{t("Dragging: lift your finger to drop")}</div></Show>
-        <Show when={remoteText(s().remote, t)}>{(line) => <div class="takeover-lost" role="status" data-remote-state={s().remote}>{line()}</div>}</Show>
+        <Show when={remoteText(s().remote, t, s().os)}>{(line) => <div class="takeover-lost" role="status" data-remote-state={s().remote}>{line()}</div>}</Show>
         <Show when={s().phase === "frozen" || !connected()}>
           <div class="takeover-lost" role="status" data-screen-reconnecting>
             {s().graceLeft !== null ? t("Reconnecting… the computer keeps this screen for {s} s more. Nothing is sent until the picture is back.", { s: s().graceLeft ?? 0 }) : t("Connection lost: nothing is sent until the picture is back.")}
@@ -723,13 +721,14 @@ function Live() {
             </tbody>
           </table>
           <p class="muted">{t("The button at the top switches between Trackpad and Direct touch. Text you type below is shown as you type it; Hide covers a password.")}</p>
+          <p class="muted" data-screen-shortcut-hint>{shortcutHint(s().os, t)}</p>
           <div class="actions"><button class="btn primary" data-screen-help-close onClick={closeHelp}>{t("Got it")}</button></div>
         </div>
       </Show>
       <div class="composer">
         <div class="keybar">
-          <For each={MODS}>{(m) => <button class="btn" classList={{ primary: mods().includes(m) }} aria-pressed={mods().includes(m)} disabled={!live()} onClick={() => toggleMod(m)}>{MOD_LABELS[m]}</button>}</For>
-          <For each={KEYS}>{(k) => <button class="btn" disabled={!live()} aria-label={k} onClick={() => key(k)}>{KEY_LABELS[k]}</button>}</For>
+          <For each={modsFor(s().os)}>{(m) => <button class="btn" classList={{ primary: mods().includes(m) }} aria-pressed={mods().includes(m)} disabled={!live()} onClick={() => toggleMod(m)} data-mod={m}>{modLabel(m, s().os)}</button>}</For>
+          <For each={keysFor(s().os)}>{(k) => <button class="btn" disabled={!live()} aria-label={k} onClick={() => key(k)} data-key={k}>{keyLabel(k)}</button>}</For>
         </div>
         <form class="takeover-text" onSubmit={(e) => { e.preventDefault(); keepTyping(); void sendText(); }}>
           {/* Shown as typed, so the person sees what goes to the computer (a password field would also force an English keyboard on the
