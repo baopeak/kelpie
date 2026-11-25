@@ -106,7 +106,7 @@ impl Encoder {
                 specs.push((cfdict(&[(low, cfbool(true))]), true));
             }
             specs.push((cfdict(&[(use_hw, hw)]), false));
-            let mut last = 0;
+            let (mut last, mut low_err) = (0, 0);
             let last_low = specs.iter().rposition(|s| s.1);
             'specs: for (i, (spec, low_latency)) in specs.iter().enumerate() {
                 // The low-latency encoder of a session just closed is let go a moment later: the last low-latency try waits for it.
@@ -118,9 +118,12 @@ impl Encoder {
                     last = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, kCMVideoCodecType_H264, spec.ptr(), attrs.ptr(), std::ptr::null(), on_output, shared as *mut c_void, &mut e.session);
                     if last == 0 && !e.session.is_null() {
                         if !low_latency {
-                            e.refused.push("EnableLowLatencyRateControl".into());
+                            e.refused.push(format!("EnableLowLatencyRateControl ({low_err})"));
                         }
                         break 'specs;
+                    }
+                    if *low_latency {
+                        low_err = last;
                     }
                     e.session = std::ptr::null_mut();
                 }

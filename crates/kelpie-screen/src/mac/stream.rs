@@ -456,7 +456,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     if !opened.as_ref().is_ok_and(|e| e.hardware) {
         ctl.set_software(true);
         params = ctl.params();
-        let fits = opened.as_ref().is_ok_and(|e| (e.w, e.h) == (params.w, params.h) && !e.refused.iter().any(|r| r == "EnableLowLatencyRateControl"));
+        let fits = opened.as_ref().is_ok_and(|e| (e.w, e.h) == (params.w, params.h) && !e.refused.iter().any(|r| r.starts_with("EnableLowLatencyRateControl")));
         if !fits {
             drop(opened);
             opened = Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, false);
