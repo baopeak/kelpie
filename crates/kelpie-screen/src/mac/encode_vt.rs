@@ -141,10 +141,12 @@ impl Encoder {
             let keys = cfnum_i64(100_000);
             e.set("RealTime", kVTCompressionPropertyKey_RealTime, cfbool(true));
             e.set("AllowFrameReordering", kVTCompressionPropertyKey_AllowFrameReordering, cfbool(false));
-            // Every frame comes back before the next goes in (the loop keeps one in the encoder): an encoder that waits for more input
-            // before it gives one back would never give it.
-            let no_delay = cfnum_i64(0);
-            e.set("MaxFrameDelayCount", kVTCompressionPropertyKey_MaxFrameDelayCount, no_delay.ptr());
+            // The ordinary encoder may hold frames before it gives one back: asked not to (the low-latency one never does, and refuses the
+            // setting).
+            if !e.low_latency {
+                let no_delay = cfnum_i64(0);
+                e.set("MaxFrameDelayCount", kVTCompressionPropertyKey_MaxFrameDelayCount, no_delay.ptr());
+            }
             e.set("ProfileLevel", kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel);
             e.set("ExpectedFrameRate", kVTCompressionPropertyKey_ExpectedFrameRate, fps_n.ptr());
             e.set("MaxKeyFrameInterval", kVTCompressionPropertyKey_MaxKeyFrameInterval, keys.ptr());
