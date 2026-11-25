@@ -668,6 +668,7 @@ describe("one screen from the phone", () => {
     expect(r.s.state).toMatchObject({ text: "not_sent", remote: "blocked" });
     expect(remoteText("blocked", (x) => x, "mac")).toContain("Privacy & Security → Accessibility");
     expect(remoteText("blocked", (x) => x, "windows")).toContain("administrator");
+    expect(endedText("no_screen_permission", (x) => x), "Screen Recording taken back").toContain("Screen Recording");
   });
 
   it("text is said as sent or not, and never sent twice", async () => {

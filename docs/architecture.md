@@ -1233,7 +1233,7 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   keyboard (`IsSecureEventInputEnabled`) is `secure_input`, said to the phone while input still goes. **Permissions (TCC):** the helper runs from
   inside Kelpie.app and is started by it, so macOS counts its Screen Recording and Accessibility as Kelpie's; the app reads both
   (`screen_permissions`: `CGPreflightScreenCaptureAccess`, `AXIsProcessTrusted`) for Settings → Mobile, where `screen_open_permission` asks macOS once
-  (which lists Kelpie) and opens that Privacy pane. Without Screen Recording the helper refuses the start (`no_screen_permission: …`), without
+  (which lists Kelpie) and opens that Privacy pane. Without Screen Recording the helper refuses the start (`no_screen_permission: …`), and a capture it stops because the grant was taken back ends with the reason `no_screen_permission`; without
   Accessibility it refuses input (`input_blocked`, the phone's `blocked`) and text (`no_accessibility: …`); the daemon answers those with the codes
   `no_screen_permission` and `no_accessibility` and its own plain text. The screens list and the start's answer carry `os` (`mac` | `windows`, API 50),
   from which the phone shows ⌘ ⌥ ⌃ ⇧, Spotlight (⌘Space) for the Windows key and the Mac's texts. The grants follow the app's code signature: the

@@ -1715,7 +1715,8 @@ windows). If the picture stops while the computer says it is sending, the phone 
 **On a Mac**, macOS asks you to allow Kelpie twice, in System Settings → Privacy & Security: *Screen Recording* lets a phone see the screen, and
 *Accessibility* lets it click and type. Settings → Mobile → Advanced shows whether Kelpie has each, and *Open System Settings* next to one it lacks
 puts Kelpie in that list and opens the pane where you turn it on. macOS applies Screen Recording from Kelpie's next start, so quit Kelpie and open it
-again after allowing it. Without Screen Recording no screen starts, and the phone says which permission is missing; without Accessibility the phone
+again after allowing it. Without Screen Recording no screen starts, and the phone says which permission is missing (taken back while a phone sees
+the screen, it ends the screen, and the phone says why); without Accessibility the phone
 still sees the screen and says why its taps and keys are not sent. The key row shows ⌘ ⌥ ⌃ ⇧ (Command, Option, Control, Shift) in place of Ctrl,
 Shift, Alt and Win, so ⌘ then S saves; ⌘Space opens Spotlight where ⊞ would be, and there is no menu key. The stop hotkey is Control+Option+Shift+K.
 When a password field holds the keyboard (macOS's secure input), the phone says that what you type may not arrive. The Mac's lock screen and login

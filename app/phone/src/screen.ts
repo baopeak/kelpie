@@ -1170,6 +1170,8 @@ export function endedText(reason: string, t: (s: string) => string): string {
       return t("The computer's graphics driver restarted, which ended the screen. See it again.");
     case "encoder_failed":
       return t("The computer could not encode its screen.");
+    case "no_screen_permission":
+      return t("The Mac no longer allows Kelpie to record the screen. Allow it again in System Settings → Privacy & Security → Screen Recording, on the Mac.");
     case "app_closed":
     case "app":
       return t("The Kelpie app on the computer closed.");

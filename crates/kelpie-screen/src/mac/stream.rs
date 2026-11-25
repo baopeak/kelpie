@@ -468,11 +468,12 @@ fn fits(c: [f64; 4], size: (u32, u32)) -> bool {
     c.iter().all(|v| v.is_finite()) && x >= 0.0 && y >= 0.0 && w >= 1.0 && h >= 1.0 && x + w <= f64::from(size.0) + 2.0 && y + h <= f64::from(size.1) + 2.0
 }
 
-/// The end reason of a capture that stopped by itself, in the words the daemon passes on: the person's stop on the Mac and a permission taken
-/// back are said as stopped on the computer; anything else as the window closed or the display changed.
+/// The end reason of a capture that stopped by itself, in the words the daemon passes on: the person's stop on the Mac is said as stopped on
+/// the computer, Screen Recording taken back as such; anything else as the window closed or the display changed.
 fn stop_reason(why: StopWhy, window: bool) -> &'static str {
     match why {
-        StopWhy::ByPerson | StopWhy::NoPermission => "desktop",
+        StopWhy::ByPerson => "desktop",
+        StopWhy::NoPermission => "no_screen_permission",
         StopWhy::Other if window => "closed",
         StopWhy::Other => "display_changed",
     }
@@ -630,7 +631,7 @@ mod tests {
     #[test]
     fn a_capture_that_stops_by_itself_ends_with_a_reason_the_phone_tells_apart() {
         assert_eq!(stop_reason(StopWhy::ByPerson, false), "desktop");
-        assert_eq!(stop_reason(StopWhy::NoPermission, true), "desktop");
+        assert_eq!(stop_reason(StopWhy::NoPermission, true), "no_screen_permission");
         assert_eq!(stop_reason(StopWhy::Other, true), "closed");
         assert_eq!(stop_reason(StopWhy::Other, false), "display_changed");
     }

@@ -334,7 +334,7 @@ fn end_message(sc: &str, reason: &str) -> String {
 }
 
 /// Why a stream ended, as the phone knows the words.
-const END_REASONS: &[&str] = &["hotkey", "closed", "desktop", "encoder_failed", "app_closed", "replaced", "display_changed", "failed", "device_lost"];
+const END_REASONS: &[&str] = &["hotkey", "closed", "desktop", "encoder_failed", "app_closed", "replaced", "display_changed", "failed", "device_lost", "no_screen_permission"];
 /// What the helper says about the picture, as the phone knows the words.
 const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimized", "elevated", "covered", "covered_dialog", "paused_load", "blocked", "not_front", "secure_input"];
 

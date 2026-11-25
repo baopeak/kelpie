@@ -614,6 +614,9 @@ async fn the_phone_is_told_which_computer_this_is() {
     // A password field holding a Mac's keyboard reaches the phone.
     r.d.screen.on_event(&r.d, APP, &json!({"sc": started["sc"], "kind": "state", "state": "secure_input"}));
     assert_eq!(r.next("sc_state").await.unwrap()["state"], "secure_input");
+    // Screen Recording taken back on the Mac ends it in those words.
+    r.d.screen.on_event(&r.d, APP, &json!({"sc": started["sc"], "kind": "ended", "reason": "no_screen_permission"}));
+    assert_eq!(r.next("sc_end").await.unwrap()["reason"], "no_screen_permission");
 }
 
 #[tokio::test]
