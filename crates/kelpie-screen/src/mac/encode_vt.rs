@@ -118,7 +118,7 @@ impl Encoder {
                     last = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, kCMVideoCodecType_H264, spec.ptr(), attrs.ptr(), std::ptr::null(), on_output, shared as *mut c_void, &mut e.session);
                     if last == 0 && !e.session.is_null() {
                         if !low_latency {
-                            e.refused.push(format!("EnableLowLatencyRateControl ({low_err})"));
+                            e.refused.push(format!("EnableLowLatencyRateControl ({low_err} at {w}x{h})"));
                         }
                         break 'specs;
                     }
