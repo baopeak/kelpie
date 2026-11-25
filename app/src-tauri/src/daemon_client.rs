@@ -36,6 +36,18 @@ struct View {
     seq: u64,
 }
 
+/// What this app provides to phones on this computer: a browser pane taken over (Windows: the WebView2 DevTools protocol) and the screen
+/// (Windows and macOS, through the helper).
+fn provided_kinds() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["browser", "screen"]
+    } else if cfg!(target_os = "macos") {
+        &["screen"]
+    } else {
+        &[]
+    }
+}
+
 enum Pending {
     Call(oneshot::Sender<Result<Value, String>>),
     Attach(u32, oneshot::Sender<Result<Value, String>>),
@@ -92,8 +104,9 @@ impl DaemonClient {
                     *self.out.lock() = Some(out_tx);
                     self.connected.store(true, Ordering::SeqCst);
                     self.connected_notify.notify_waiters();
-                    // This window provides its browser panes to a phone that takes one over (Windows: the WebView2 DevTools protocol).
-                    if cfg!(windows) {
+                    // This window provides what a phone may take over: its browser panes (Windows: the WebView2 DevTools protocol) and the
+                    // screen (Windows and macOS, through the helper).
+                    if !provided_kinds().is_empty() {
                         tauri::async_runtime::spawn(self.clone().register_provider());
                     }
                     let _ = self.app.emit("daemon-status", json!({"connected": true}));
@@ -131,7 +144,7 @@ impl DaemonClient {
     /// tries again a few times, further apart each time. An older daemon has no such method, and a connection that goes ends the tries (the next one
     /// starts its own). Each kind tries on its own, so one held by another program never holds back the other.
     async fn register_provider(self: Arc<Self>) {
-        let tries: Vec<_> = ["browser", "screen"].into_iter().map(|kind| tauri::async_runtime::spawn(self.clone().register_kind(kind))).collect();
+        let tries: Vec<_> = provided_kinds().iter().copied().map(|kind| tauri::async_runtime::spawn(self.clone().register_kind(kind))).collect();
         for t in tries {
             let _ = t.await;
         }
@@ -401,6 +414,18 @@ fn spawn_daemon() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mac_provides_the_screen_and_windows_the_browser_panes_too() {
+        let kinds = provided_kinds();
+        if cfg!(windows) {
+            assert_eq!(kinds, ["browser", "screen"]);
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(kinds, ["screen"], "the screen helper runs on a Mac; a pane's takeover needs WebView2");
+        } else {
+            assert!(kinds.is_empty());
+        }
+    }
 
     fn read_back(bytes: &[u8]) -> std::io::Result<Option<Frame>> {
         let mut reader = bytes;
