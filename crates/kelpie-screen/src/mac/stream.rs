@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::border_mac::Border;
-use super::capture_sck::{Capture, Grabbed, Source};
+use super::capture_sck::{Capture, Grabbed, Source, StopWhy};
 use super::encode_vt::Encoder;
 use super::ffi::{Cf, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress, kCVPixelBufferLock_ReadOnly};
 use super::input_cg::{self, Geometry, Outcome};
@@ -256,6 +256,8 @@ struct MacBackend {
     scale: f64,
     /// The size the capture was last asked for (a window's follows it).
     capture_size: (u32, u32),
+    /// Where a window's content is in its last picture (pixels), when the capture said and it fits in the picture.
+    content: Option<[f64; 4]>,
     encoder: Encoder,
     capture: Capture,
 }
@@ -281,8 +283,9 @@ impl Backend for MacBackend {
         None
     }
 
+    /// A closed encoder (a switch to another that failed to open) encodes nothing again.
     fn healthy(&self) -> bool {
-        true
+        !self.encoder.closed()
     }
 
     fn look(&mut self) -> Observed {
@@ -309,12 +312,16 @@ impl Backend for MacBackend {
             if let Ok(mut s) = shared.lock() {
                 s.geometry.rect = rect;
                 s.geometry.src = src;
+                s.geometry.content = self.content;
                 s.policy = policy;
             }
         }
     }
 
     fn grab(&mut self, wait_ms: u64) -> Grab<Cf> {
+        if self.encoder.closed() {
+            return Grab::End("encoder_failed");
+        }
         if let Some(d) = self.display {
             if self.display_at.elapsed() >= DISPLAY_EVERY {
                 self.display_at = Instant::now();
@@ -328,10 +335,13 @@ impl Backend for MacBackend {
             Grabbed::Frame(f) => {
                 let p = f.picture.ptr() as *mut std::ffi::c_void;
                 let size = unsafe { ((CVPixelBufferGetWidth(p) as u32) & !1, (CVPixelBufferGetHeight(p) as u32) & !1) };
+                if self.window.is_some() {
+                    self.content = f.content.filter(|c| fits(*c, size));
+                }
                 Grab::Frame { picture: f.picture, size, dirty: f.dirty, first_full: None }
             }
             Grabbed::Idle => Grab::Idle,
-            Grabbed::Stopped => Grab::End(if self.window.is_some() { "closed" } else { "display_changed" }),
+            Grabbed::Stopped(why) => Grab::End(stop_reason(why, self.window.is_some())),
         }
     }
 
@@ -342,10 +352,24 @@ impl Backend for MacBackend {
         Ok(())
     }
 
+    /// The old encoder is closed first (the Mac may have one low-latency encoder at a time); if the software one does not open, the old one's
+    /// kind is opened again, and if that fails too the encoder stays closed, which ends the stream (`healthy`, `grab`).
     fn software_encoder(&mut self, params: &Params) -> Result<(), String> {
+        let was_hardware = self.encoder.hardware;
         self.encoder.close();
-        self.encoder = Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, false)?;
-        Ok(())
+        let fps = u32::from(params.fps);
+        match Encoder::open(params.w, params.h, fps, params.kbps, false) {
+            Ok(e) => {
+                self.encoder = e;
+                Ok(())
+            }
+            Err(e) => {
+                if let Ok(back) = Encoder::open(params.w, params.h, fps, params.kbps, was_hardware) {
+                    self.encoder = back;
+                }
+                Err(e)
+            }
+        }
     }
 
     fn encoder_info(&self) -> EncoderInfo {
@@ -427,12 +451,30 @@ impl Backend for MacBackend {
         targets_mac::cursor()
     }
 
+    /// Input stops first (the input thread sees `stopping` before each op and character, and is joined), and only then do the border and its
+    /// hotkey go: the Mac never takes input from the phone without them.
     fn finish(&mut self) {
         self.stopping.store(true, Ordering::SeqCst);
-        drop(self.border.take());
-        drop(self.shared.take());
         drop(self.input_guard.take());
+        drop(self.shared.take());
+        drop(self.border.take());
         drop(self.activity.take());
+    }
+}
+
+/// Whether a window's content rectangle, as the capture said it, lies within a picture of `size` pixels (a pixel over for rounding).
+fn fits(c: [f64; 4], size: (u32, u32)) -> bool {
+    let [x, y, w, h] = c;
+    c.iter().all(|v| v.is_finite()) && x >= 0.0 && y >= 0.0 && w >= 1.0 && h >= 1.0 && x + w <= f64::from(size.0) + 2.0 && y + h <= f64::from(size.1) + 2.0
+}
+
+/// The end reason of a capture that stopped by itself, in the words the daemon passes on: the person's stop on the Mac and a permission taken
+/// back are said as stopped on the computer; anything else as the window closed or the display changed.
+fn stop_reason(why: StopWhy, window: bool) -> &'static str {
+    match why {
+        StopWhy::ByPerson | StopWhy::NoPermission => "desktop",
+        StopWhy::Other if window => "closed",
+        StopWhy::Other => "display_changed",
     }
 }
 
@@ -472,7 +514,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     // The border and the hotkey first (the capture leaves the border out, which it must see to): without them nothing is shared.
     let (hk_tx, hk_rx) = channel();
     let label = format!("Shared with {} · {} stops it", opts.device, opts.hotkey_text);
-    let border = match Border::show(found.rect, &label, opts.hotkey, hk_tx) {
+    let border = match Border::show(found.rect, window, &label, opts.hotkey, hk_tx) {
         Ok(b) => b,
         Err(e) => {
             let _ = started.send(Err(e));
@@ -488,7 +530,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         }
     };
     let activity = Activity::begin();
-    let shared = Arc::new(Mutex::new(Shared { geometry: Geometry { window: found.window, rect: found.rect, src: found.src, scale: found.scale }, policy: input_policy(State::Live, window) }));
+    let shared = Arc::new(Mutex::new(Shared { geometry: Geometry { window: found.window, rect: found.rect, src: found.src, scale: found.scale, content: None }, policy: input_policy(State::Live, window) }));
     let (outcome_tx, outcome_rx) = channel::<Outcome>();
     let input_guard = {
         let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
@@ -509,6 +551,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         display_at: Instant::now(),
         scale: found.scale,
         capture_size: found.src,
+        content: None,
         encoder,
         capture,
     };
@@ -549,8 +592,8 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                     }
                     return;
                 }
-                let o = input_cg::run(&ops, &g, p, &mut pressed);
-                if o != Outcome::Done {
+                let o = input_cg::run(&ops, &g, p, &mut pressed, &stopping);
+                if !matches!(o, Outcome::Done | Outcome::Stopped) {
                     let _ = outcomes.send(o);
                 }
             }
@@ -558,8 +601,9 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                 let reply = if !fresh(t, wall_ms()) {
                     json!({"id": id, "err": "it came too late"})
                 } else {
-                    match input_cg::type_text(&text, &g, p) {
+                    match input_cg::type_text(&text, &g, p, &stopping) {
                         (Outcome::Done, _) => json!({"id": id, "ok": true}),
+                        (Outcome::Stopped, typed) => json!({"id": id, "err": format!("the screen was stopped after {typed} characters; the rest was not typed")}),
                         (Outcome::NotFront, 0) => {
                             let _ = outcomes.send(Outcome::NotFront);
                             json!({"id": id, "err": "not_front: the shared window is not in front on the computer, so nothing was typed"})
@@ -577,4 +621,28 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
         });
     }
     input_cg::release(&mut pressed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_capture_that_stops_by_itself_ends_with_a_reason_the_phone_tells_apart() {
+        assert_eq!(stop_reason(StopWhy::ByPerson, false), "desktop");
+        assert_eq!(stop_reason(StopWhy::NoPermission, true), "desktop");
+        assert_eq!(stop_reason(StopWhy::Other, true), "closed");
+        assert_eq!(stop_reason(StopWhy::Other, false), "display_changed");
+    }
+
+    #[test]
+    fn a_content_rectangle_is_used_only_when_it_lies_within_the_picture() {
+        assert!(fits([0.0, 0.0, 800.0, 600.0], (800, 600)));
+        assert!(fits([0.0, 0.0, 801.0, 601.0], (800, 600)), "rounding to even sides");
+        assert!(fits([20.0, 30.0, 760.0, 540.0], (800, 600)));
+        assert!(!fits([0.0, 0.0, 1600.0, 1200.0], (800, 600)), "points at 2x would overflow");
+        assert!(!fits([-1.0, 0.0, 400.0, 300.0], (800, 600)));
+        assert!(!fits([0.0, 0.0, 0.0, 300.0], (800, 600)));
+        assert!(!fits([0.0, 0.0, f64::NAN, 300.0], (800, 600)));
+    }
 }

@@ -125,13 +125,27 @@ pub fn window(number: u32) -> Option<CgWindow> {
     list(8, number).into_iter().find(|w| w.number == number)
 }
 
-/// The topmost window at a point that could take a click, leaving out this helper's own (the border) and invisible ones.
-pub fn window_at(x: f64, y: f64) -> Option<CgWindow> {
+/// The topmost window at a point that could take a click (of `pid` only, if given), leaving out this helper's own (the border) and invisible
+/// ones.
+pub fn window_at(x: f64, y: f64, pid: Option<i32>) -> Option<CgWindow> {
     let me = std::process::id() as i32;
     on_screen().into_iter().find(|w| {
         let b = w.bounds;
-        w.pid != me && w.alpha > 0.0 && x >= b.origin.x && y >= b.origin.y && x < b.origin.x + b.size.width && y < b.origin.y + b.size.height
+        w.pid != me && pid.is_none_or(|p| w.pid == p) && w.alpha > 0.0 && x >= b.origin.x && y >= b.origin.y && x < b.origin.x + b.size.width && y < b.origin.y + b.size.height
     })
+}
+
+/// The app a click at a point would go to, by Accessibility's hit test (which leaves out windows that let clicks through).
+pub fn pid_at(x: f64, y: f64) -> Option<i32> {
+    let sys = Cf::take(unsafe { AXUIElementCreateSystemWide() })?;
+    unsafe { AXUIElementSetMessagingTimeout(sys.ptr(), 0.5) };
+    let mut el: CFTypeRef = std::ptr::null();
+    if unsafe { AXUIElementCopyElementAtPosition(sys.ptr(), x as f32, y as f32, &mut el) } != 0 {
+        return None;
+    }
+    let el = Cf::take(el)?;
+    let mut pid = 0;
+    (unsafe { AXUIElementGetPid(el.ptr(), &mut pid) } == 0).then_some(pid)
 }
 
 /// An app's name and bundle identifier.
@@ -319,7 +333,8 @@ unsafe fn key(c: &AnyObject) -> Option<CursorKey> {
     Some((hot.x, hot.y, size.width, size.height))
 }
 
-/// The cursor: shape, whether it shows, where (global points).
+/// The cursor: shape, whether it shows, where (global points). The shape is AppKit's, read on the main thread (NSCursor and NSImage are not
+/// for other threads).
 pub fn cursor() -> (Shape, bool, i32, i32) {
     let at = unsafe {
         let ev = CGEventCreate(std::ptr::null_mut());
@@ -330,11 +345,13 @@ pub fn cursor() -> (Shape, bool, i32, i32) {
         CFRelease(ev as CFTypeRef);
         p
     };
-    let shape = objc2::rc::autoreleasepool(|_| unsafe {
-        let Some(cls) = class(c"NSCursor") else { return Shape::Arrow };
-        let now: Option<Retained<AnyObject>> = msg_send![cls, currentSystemCursor];
-        let k = now.and_then(|c| key(&c));
-        k.and_then(|k| shapes().iter().find(|(s, _)| *s == k).map(|(_, shape)| *shape)).unwrap_or(Shape::Arrow)
+    let shape = on_main(|| {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let Some(cls) = class(c"NSCursor") else { return Shape::Arrow };
+            let now: Option<Retained<AnyObject>> = msg_send![cls, currentSystemCursor];
+            let k = now.and_then(|c| key(&c));
+            k.and_then(|k| shapes().iter().find(|(s, _)| *s == k).map(|(_, shape)| *shape)).unwrap_or(Shape::Arrow)
+        })
     });
     (shape, true, at.x.floor() as i32, at.y.floor() as i32)
 }

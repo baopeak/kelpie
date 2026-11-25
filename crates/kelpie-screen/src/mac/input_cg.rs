@@ -10,6 +10,8 @@
 //!
 //! Posting events needs the Accessibility permission: without it macOS drops them without a word, so input is refused (`Blocked`) instead.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use serde_json::Value;
 
 use super::ffi::*;
@@ -29,6 +31,8 @@ pub struct Geometry {
     pub src: (u32, u32),
     /// Pixels a point.
     pub scale: f64,
+    /// Where the window's content is in the source picture (pixels: x, y, width, height), when the capture says.
+    pub content: Option<[f64; 4]>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -40,6 +44,8 @@ pub enum Outcome {
     NotFront,
     ForeignDialog,
     Refused,
+    /// The stream is stopping: nothing more was done.
+    Stopped,
 }
 
 /// A button a `down` holds, and the last point the pointer was at on the shared window while it did.
@@ -147,13 +153,16 @@ fn on_screen(target: (u32, i32)) -> bool {
 
 const FRONT_WAIT_STEPS: u32 = 15;
 
-/// The target with the keys, raised once if it has not them.
-fn front(target: (u32, i32)) -> Reach {
+/// The target with the keys, raised once if it has not them. Not waited for once the stream is stopping.
+fn front(target: (u32, i32), stopping: &AtomicBool) -> Reach {
     if keys_now(target) == Reach::Yes && on_screen(target) {
         return Reach::Yes;
     }
     targets_mac::raise(target.1, target.0);
     for _ in 0..FRONT_WAIT_STEPS {
+        if stopping.load(Ordering::SeqCst) {
+            return Reach::Other;
+        }
         if keys_now(target) == Reach::Yes && on_screen(target) {
             return Reach::Yes;
         }
@@ -170,15 +179,33 @@ fn refusal(r: Reach) -> Outcome {
     }
 }
 
+/// Where a press at `at` lands. A window of another app above the normal layer (an overlay, which often lets clicks through) covers the target
+/// only if Accessibility's hit test, which knows what really takes the click, does not find the target's app there; when it does, the target's
+/// own windows at that point decide, as for any press.
 fn lands_on(target: (u32, i32), at: CGPoint) -> Reach {
-    match targets_mac::window_at(at.x, at.y) {
-        Some(w) => press_reach(facts(target, &w)),
-        None => Reach::Other,
+    let Some(w) = targets_mac::window_at(at.x, at.y, None) else { return Reach::Other };
+    let reach = press_reach(facts(target, &w));
+    if reach != Reach::Other || w.layer <= 0 || w.pid == target.1 || targets_mac::pid_at(at.x, at.y) != Some(target.1) {
+        return reach;
+    }
+    match targets_mac::window_at(at.x, at.y, Some(target.1)) {
+        Some(own) if own.layer >= 0 => press_reach(facts(target, &own)),
+        _ => Reach::Other,
     }
 }
 
+/// A point of the source picture (pixels) as global points: through the window's content when the capture says where it is in the picture.
+fn to_points(sx: f64, sy: f64, g: &Geometry, rect: Rect) -> CGPoint {
+    let (x, y) = match g.content.filter(|_| g.window.is_some()) {
+        Some([cx, cy, cw, ch]) => geom::source_to_points(sx - cx, sy - cy, cw.round().max(1.0) as u32, ch.round().max(1.0) as u32, rect, g.scale),
+        None => geom::source_to_points(sx, sy, g.src.0, g.src.1, rect, g.scale),
+    };
+    CGPoint { x, y }
+}
+
 /// Does the checked ops (`input::checked_ops`). `pressed` keeps the button held by a `down` not yet released, so that the stream's end can let go.
-pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Option<Held>) -> Outcome {
+/// Each op first looks at `stopping`: once the stream stops, nothing more is posted.
+pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Option<Held>, stopping: &AtomicBool) -> Outcome {
     if !policy.mouse && !policy.keys {
         if ops.iter().any(|op| op["k"] == "release" || op["k"] == "up") {
             release(pressed);
@@ -191,6 +218,9 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
     let s = Source::new();
     let mut outcome = Outcome::Done;
     for op in ops {
+        if stopping.load(Ordering::SeqCst) {
+            return Outcome::Stopped;
+        }
         let kind = op["k"].as_str().unwrap_or_default();
         if kind == "release" {
             release(pressed);
@@ -202,7 +232,10 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
                 continue;
             }
             if let Some(t) = g.window {
-                let r = front(t);
+                let r = front(t, stopping);
+                if stopping.load(Ordering::SeqCst) {
+                    return Outcome::Stopped;
+                }
                 if r != Reach::Yes {
                     return refusal(r);
                 }
@@ -231,6 +264,9 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
                 if pressing && !(keys_now(t) == Reach::Yes && on_screen(t)) {
                     targets_mac::raise(t.1, t.0);
                     std::thread::sleep(std::time::Duration::from_millis(60));
+                    if stopping.load(Ordering::SeqCst) {
+                        return Outcome::Stopped;
+                    }
                 }
                 match targets_mac::window(t.0) {
                     Some(w) if w.pid == t.1 => w.bounds.rect(),
@@ -239,9 +275,7 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
             }
             None => g.rect,
         };
-        let (sx, sy) = (op["x"].as_f64().unwrap_or(0.0), op["y"].as_f64().unwrap_or(0.0));
-        let (x, y) = geom::source_to_points(sx, sy, g.src.0, g.src.1, rect, g.scale);
-        let at = CGPoint { x, y };
+        let at = to_points(op["x"].as_f64().unwrap_or(0.0), op["y"].as_f64().unwrap_or(0.0), g, rect);
         if let Some(t) = g.window {
             if matches!(kind, "move" | "up") && pressed.is_some() {
                 match drag_step(kind, true, lands_on(t, at)) {
@@ -334,8 +368,9 @@ pub fn release(pressed: &mut Option<Held>) {
 }
 
 /// Types text into the target, which must have the keys (raised once if it has not): `NotFront` otherwise, and nothing typed. With the
-/// characters typed so far: the focus is looked at again before each one, and typing stops the moment it moved.
-pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy) -> (Outcome, usize) {
+/// characters typed so far: the focus is looked at again before each one, and typing stops the moment it moved, or the stream is stopping
+/// (`Stopped`).
+pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy, stopping: &AtomicBool) -> (Outcome, usize) {
     if !policy.keys {
         return (Outcome::Refused, 0);
     }
@@ -343,7 +378,10 @@ pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy) -> (Outcome, usi
         return (Outcome::Blocked, 0);
     }
     if let Some(t) = g.window {
-        let r = front(t);
+        let r = front(t, stopping);
+        if stopping.load(Ordering::SeqCst) {
+            return (Outcome::Stopped, 0);
+        }
         if r != Reach::Yes {
             return (refusal(r), 0);
         }
@@ -351,6 +389,9 @@ pub fn type_text(text: &str, g: &Geometry, policy: InputPolicy) -> (Outcome, usi
     let s = Source::new();
     let typed = mac_text(text);
     for (n, unit) in typed.iter().enumerate() {
+        if stopping.load(Ordering::SeqCst) {
+            return (Outcome::Stopped, n);
+        }
         if let Some(t) = g.window {
             let r = keys_now(t);
             if r != Reach::Yes {
