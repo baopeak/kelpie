@@ -295,8 +295,8 @@ def scenario(d, ph, port, folder):
         ph.click("[data-lock-go]")
         time.sleep(3)
         ph.shot("unlock-sheet")
-        # Safari's "Sign In" sheet: Use Passkey sits at 90 % of the screen's height, More Options under it.
-        ph.tap_screen(0.5, 0.90)
+        # Safari's "Sign In" sheet: Use Passkey sits at 86 % of the screen's height, More Options under it at 92 %.
+        ph.tap_screen(0.5, 0.86)
         time.sleep(3)
         try:
             ph.wait("[data-lock-screen]", 40, gone=True)
