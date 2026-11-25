@@ -158,6 +158,14 @@ fn wait_done(start: impl FnOnce(&block2::Block<dyn Fn(*mut AnyObject)>)) -> Resu
     rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| Err("the capture did not answer".into()))
 }
 
+pub enum Grabbed {
+    Frame(Frame),
+    /// Nothing new yet.
+    Idle,
+    /// The stream stopped by itself (the window closed, the display went, the permission was taken back).
+    Stopped,
+}
+
 pub enum Source {
     Display(u32),
     Window(u32),
@@ -256,19 +264,19 @@ impl Capture {
         Ok(capture)
     }
 
-    /// The newest frame, waiting at most `wait` for one. Err when the stream stopped by itself.
-    pub fn grab(&self, wait: Duration) -> Result<Option<Frame>, ()> {
-        let Ok(mut slot) = self.mailbox.slot.lock() else { return Err(()) };
+    /// The newest frame, waiting at most `wait` for one.
+    pub fn grab(&self, wait: Duration) -> Grabbed {
+        let Ok(mut slot) = self.mailbox.slot.lock() else { return Grabbed::Stopped };
         if slot.frame.is_none() && !slot.stopped && !wait.is_zero() {
             slot = match self.mailbox.ready.wait_timeout(slot, wait) {
                 Ok((s, _)) => s,
-                Err(_) => return Err(()),
+                Err(_) => return Grabbed::Stopped,
             };
         }
         if slot.stopped {
-            return Err(());
+            return Grabbed::Stopped;
         }
-        Ok(slot.frame.take())
+        slot.frame.take().map_or(Grabbed::Idle, Grabbed::Frame)
     }
 
     /// The target is now `size` pixels (a window was resized).

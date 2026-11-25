@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::border_mac::Border;
-use super::capture_sck::{Capture, Source};
+use super::capture_sck::{Capture, Grabbed, Source};
 use super::encode_vt::Encoder;
 use super::ffi::{Cf, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress, kCVPixelBufferLock_ReadOnly};
 use super::input_cg::{self, Geometry, Outcome};
@@ -325,13 +325,13 @@ impl Backend for MacBackend {
             }
         }
         match self.capture.grab(Duration::from_millis(wait_ms)) {
-            Ok(Some(f)) => {
+            Grabbed::Frame(f) => {
                 let p = f.picture.ptr() as *mut std::ffi::c_void;
                 let size = unsafe { ((CVPixelBufferGetWidth(p) as u32) & !1, (CVPixelBufferGetHeight(p) as u32) & !1) };
                 Grab::Frame { picture: f.picture, size, dirty: f.dirty, first_full: None }
             }
-            Ok(None) => Grab::Idle,
-            Err(()) => Grab::End(if self.window.is_some() { "closed" } else { "display_changed" }),
+            Grabbed::Idle => Grab::Idle,
+            Grabbed::Stopped => Grab::End(if self.window.is_some() { "closed" } else { "display_changed" }),
         }
     }
 

@@ -216,9 +216,7 @@ pub fn windows() -> Vec<WindowInfo> {
     let all = list(kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
     let mut minimized: HashMap<i32, Vec<u32>> = HashMap::new();
     for w in all.iter().filter(|w| !w.onscreen && w.layer == 0 && !w.title.trim().is_empty()) {
-        if !minimized.contains_key(&w.pid) {
-            minimized.insert(w.pid, ax_windows(w.pid).into_iter().filter(|a| a.1).map(|a| a.0).collect());
-        }
+        minimized.entry(w.pid).or_insert_with(|| ax_windows(w.pid).into_iter().filter(|a| a.1).map(|a| a.0).collect());
     }
     let mut apps: HashMap<i32, (String, String)> = HashMap::new();
     all.into_iter()
@@ -266,8 +264,8 @@ pub fn info(number: u32) -> Option<WindowInfo> {
 }
 
 /// The system cursor's shapes, told apart by their hot spot and size (`currentSystemCursor` is a new object each time).
-fn shapes() -> &'static [((f64, f64, f64, f64), Shape)] {
-    static SHAPES: std::sync::OnceLock<Vec<((f64, f64, f64, f64), Shape)>> = std::sync::OnceLock::new();
+fn shapes() -> &'static [(CursorKey, Shape)] {
+    static SHAPES: std::sync::OnceLock<Vec<(CursorKey, Shape)>> = std::sync::OnceLock::new();
     SHAPES.get_or_init(|| {
         let Some(cls) = class(c"NSCursor") else { return vec![] };
         let pick = |c: Option<Retained<AnyObject>>| c.and_then(|c| unsafe { key(&c) });
@@ -292,7 +290,10 @@ fn shapes() -> &'static [((f64, f64, f64, f64), Shape)] {
     })
 }
 
-unsafe fn key(c: &AnyObject) -> Option<(f64, f64, f64, f64)> {
+/// A cursor's hot spot and image size.
+type CursorKey = (f64, f64, f64, f64);
+
+unsafe fn key(c: &AnyObject) -> Option<CursorKey> {
     let hot: CGPoint = msg_send![c, hotSpot];
     let image: Option<Retained<AnyObject>> = msg_send![c, image];
     let size: CGSize = msg_send![&*image?, size];

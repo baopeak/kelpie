@@ -3,6 +3,9 @@
 //! the structures they take are declared here with their type encodings, which `objc2` checks in a debug build.
 
 #![allow(non_upper_case_globals, non_snake_case, non_camel_case_types, dead_code)]
+// The readers below take Core Foundation references straight from the frameworks (or null, which each checks): marking them `unsafe` would
+// only move the same `unsafe` to every caller.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{c_char, c_void, CStr};
 
