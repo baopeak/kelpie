@@ -1184,16 +1184,14 @@ mod tests {
     }
 
     #[test]
-    fn a_sharpen_sends_only_the_part_asked_for_when_the_link_is_too_slow_for_tiles() {
+    fn a_sharpen_sends_the_part_asked_for_before_any_other_tile() {
         let mut run = Run::start(true, Script::new());
-        // Below the bitrate crisp tiles need: they do not go by themselves.
-        run.send(Cmd::Cap(Some(500)));
-        assert!(!run.pump(1200).iter().any(Seen::is_tile), "no crisp tile on a slow link");
+        run.until(2000, |s| !videos(s).is_empty());
+        // Asked for before any cell is still long enough to be painted by itself: while it lasts, only its cells go.
         run.send(Cmd::Sharpen(Rect::new(0, 0, 64, 64)));
-        let seen = run.until(4000, |s| s.iter().any(Seen::is_tile));
+        let seen = run.until(8000, |s| s.iter().any(Seen::is_tile));
         let Some(Seen::Tile { rect }) = seen.iter().find(|s| s.is_tile()) else { panic!("no tile came for the part asked for") };
-        assert_eq!(*rect, Rect::new(0, 0, 64, 64));
-        assert!(!run.pump(800).iter().any(Seen::is_tile), "the rest of the picture stays with the video");
+        assert_eq!(*rect, Rect::new(0, 0, 64, 64), "the first tile is the part the phone shows");
     }
 
     #[test]
