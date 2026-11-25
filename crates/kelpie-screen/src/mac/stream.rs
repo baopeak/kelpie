@@ -365,7 +365,7 @@ impl Backend for MacBackend {
     }
 
     fn asks_for_input(&self) -> bool {
-        false
+        self.encoder.asks_for_input()
     }
 
     fn set_bitrate(&mut self, kbps: u32) {

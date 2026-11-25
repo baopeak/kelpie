@@ -74,6 +74,8 @@ pub struct Encoder {
     pub h: u32,
     fps: u32,
     submitted: u64,
+    /// The low-latency rate control took it. The ordinary encoder may hold a frame until the next comes (`asks_for_input`).
+    low_latency: bool,
 }
 
 unsafe impl Send for Encoder {}
@@ -91,7 +93,7 @@ impl Encoder {
     /// software one by itself: `hardware` says which it is).
     pub fn open(w: u32, h: u32, fps: u32, kbps: u32, hardware: bool) -> Result<Encoder, String> {
         let shared = Box::into_raw(Box::new(Shared { done: Mutex::new(Vec::new()), delivered: AtomicU64::new(0), first_output_ms: Mutex::new(None), opened: Instant::now() }));
-        let mut e = Encoder { session: std::ptr::null_mut(), transfer: std::ptr::null_mut(), shared, hardware: false, name: String::new(), refused: Vec::new(), w, h, fps: fps.max(1), submitted: 0 };
+        let mut e = Encoder { session: std::ptr::null_mut(), transfer: std::ptr::null_mut(), shared, hardware: false, name: String::new(), refused: Vec::new(), w, h, fps: fps.max(1), submitted: 0, low_latency: false };
         unsafe {
             let empty = cfdict(&[]);
             let (pf, wn, hn) = (cfnum_i64(i64::from(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)), cfnum_i64(i64::from(w)), cfnum_i64(i64::from(h)));
@@ -117,6 +119,7 @@ impl Encoder {
                     }
                     last = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, kCMVideoCodecType_H264, spec.ptr(), attrs.ptr(), std::ptr::null(), on_output, shared as *mut c_void, &mut e.session);
                     if last == 0 && !e.session.is_null() {
+                        e.low_latency = *low_latency;
                         if !low_latency {
                             e.refused.push(format!("EnableLowLatencyRateControl ({low_err} at {w}x{h})"));
                         }
@@ -185,6 +188,12 @@ impl Encoder {
     unsafe fn get(&self, key: CFStringRef) -> Option<Cf> {
         let mut v: CFTypeRef = std::ptr::null();
         (VTSessionCopyProperty(self.session, key, std::ptr::null(), &mut v as *mut CFTypeRef) == 0).then(|| Cf::take(v)).flatten()
+    }
+
+    /// Whether the encoder asks for another frame while it holds one: the ordinary encoder (without the low-latency rate control) gives a frame
+    /// back only once the next has come, so the loop feeds it at its rate rather than waiting.
+    pub fn asks_for_input(&self) -> bool {
+        !self.low_latency
     }
 
     pub fn held(&self) -> u64 {
