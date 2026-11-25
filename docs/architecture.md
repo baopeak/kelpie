@@ -1237,9 +1237,11 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   Accessibility it refuses input (`input_blocked`, the phone's `blocked`) and text (`no_accessibility: …`); the daemon answers those with the codes
   `no_screen_permission` and `no_accessibility` and its own plain text. The screens list and the start's answer carry `os` (`mac` | `windows`, API 50),
   from which the phone shows ⌘ ⌥ ⌃ ⇧, Spotlight (⌘Space) for the Windows key and the Mac's texts. The grants follow the app's code signature: the
-  release's bundler signs the helper in `Contents/MacOS` with the app's identity (`scripts/build-release.sh` fails if the two differ), and an ad-hoc signed build is a new app to TCC after every update.
+  release's bundler signs the helper in `Contents/MacOS` with the app's identity (`scripts/build-release.sh` fails if the two differ, and warns when the app has no Developer ID team), and an ad-hoc signed build is a new app to TCC after every update.
   The app must run in the signed-in GUI session; the daemon alone cannot capture. Peer to peer and TURN are Windows only for now (`kelpie-rtc`), so
-  a Mac's picture goes over the link. Run as root, the app does not start the helper.
+  a Mac's picture goes over the link: the daemon's screen policy counts neither as a way on a Mac whatever its switches (`screen_policy::usable`),
+  so Automatic goes by the relay WebSocket or says `no_p2p_here`, and Settings → Mobile labels both Windows only. Run as root, the app does not
+  start the helper. The app offers the screen only on macOS 12.3 or later (`screen_available`), and only to a daemon at API 50 or later.
 - **Media messages** (`kelpie-screen/src/wire.rs`, read by `app/phone/src/screen.ts`): binary, little-endian, first byte `0x01` (no JSON message starts with it,
   which is how the page tells them apart on the link): video (key and unpaint-all flags, unpaint rectangles, `seq`, capture time, source and coded size, an
   Annex B access unit), a tile (PNG or JPEG q90, the `seq` it matches, its rectangle in source pixels), the cursor (shape, visible, position). On the local pipe

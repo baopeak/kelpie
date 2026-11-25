@@ -5,8 +5,9 @@ import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCR
 import { t } from "./i18n";
 import { NOTIFY_API } from "./notify-events";
 import { pushSummary, type PushState, type TelegramMode } from "./push-config";
+import { isWindows } from "./platform";
 import { offersControl } from "./takeover-panes";
-import type { MobilePageKind } from "./types";
+import type { MacPermissionId, MacPermissions, MobilePageKind } from "./types";
 import type { MobileDevice, MobilePermission, MobileStatus } from "../components/settings/mobile-settings";
 import type { RelayStatus } from "../components/settings/mobile-relay-settings";
 
@@ -305,13 +306,14 @@ export interface ScreenMethodRow {
 }
 
 /** The checkboxes under Advanced. The relay ways count only while the screen without Tailscale is on. A direct link (peer to peer) needs a computer at
- *  `SCREEN_P2P_API`, the relay's TURN one at `SCREEN_TURN_API`. */
-export function screenMethodRows(f: OptionFacts): ScreenMethodRow[] {
+ *  `SCREEN_P2P_API`, the relay's TURN one at `SCREEN_TURN_API`, and both only Windows sends today: elsewhere they say so. */
+export function screenMethodRows(f: OptionFacts, windows: boolean = isWindows): ScreenMethodRow[] {
   const sc = f.status?.screen;
   const disabled = blocked(f, SCREEN_REMOTE_API, !!sc, true);
   const labels: Record<ScreenMethod, string> = { tailscale: t("Tailscale"), p2p: t("Direct link (P2P)"), relay_turn: t("Relay (TURN)"), relay_ws: t("Relay WebSocket") };
   const note = (id: ScreenMethod): string | null => {
     if ((id === "relay_turn" && f.api < SCREEN_TURN_API) || (id === "p2p" && f.api < SCREEN_P2P_API)) return t("Not available yet: it comes in a later update.");
+    if ((id === "relay_turn" || id === "p2p") && !windows) return t("Windows only for now: this computer sends its screen through Tailscale or the relay WebSocket.");
     if (id === "relay_turn") {
       if (sc?.turn === "turn_not_configured") return t("This relay offers no TURN, so this way is not used.");
       return t("Through the relay's TURN server when a direct connection cannot be made. The relay's operator pays for this traffic, so it is held to the limits below.");
@@ -350,8 +352,7 @@ export function screenUsageLine(sc: MobileStatus["screen"]): string | null {
 }
 
 /** What a Mac allows Kelpie for the screen (the app's `screen_permissions`; null on any other computer). */
-export type MacPermissions = { screen: boolean; accessibility: boolean };
-export type MacPermissionId = keyof MacPermissions;
+export type { MacPermissionId, MacPermissions };
 
 /** The Mac's two permissions as Settings → Mobile lists them: what each lets a phone do, and whether Kelpie has it. */
 export function macPermissionRows(p: MacPermissions): { id: MacPermissionId; label: string; what: string; allowed: boolean }[] {

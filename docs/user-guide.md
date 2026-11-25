@@ -1722,7 +1722,9 @@ Shift, Alt and Win, so ⌘ then S saves; ⌘Space opens Spotlight where ⊞ woul
 When a password field holds the keyboard (macOS's secure input), the phone says that what you type may not arrive. The Mac's lock screen and login
 window, FileVault's start-up screen, the prompts in which macOS asks for a permission, and other users' sessions cannot be seen or answered from the
 phone, and Kelpie must be open in your signed-in session: the daemon alone cannot see the screen. Direct (peer to peer) and TURN are not available on
-a Mac yet, so the picture goes over Tailscale, your HTTPS address or the relay's connection. macOS ties both permissions to Kelpie's signature, so
+a Mac yet, so the picture goes over Tailscale, your HTTPS address or the relay's connection, and *Automatic* never waits on them: with the relay
+WebSocket off, a phone through the relay is told to turn it on. After an update the screen appears on the phone once Kelpie's background service
+is the new one (restart it when Kelpie asks). macOS ties both permissions to Kelpie's signature, so
 a build that is not signed with a stable identity (one you built yourself, for example) asks for them again after each update.
 
 **What *May take control* means for the screen.** A phone given it can do anything you can do at this computer while signed in: for example Win+R and a
