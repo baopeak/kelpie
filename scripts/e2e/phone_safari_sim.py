@@ -278,6 +278,34 @@ def scenario(d, ph, port, folder):
     check("settings open in Safari", ph.has("[data-settings]"))
     check("the page raised no script error", not ph.errors(), ph.errors())
 
+    # ---------- the page opened again: unlocked with the passkey (a WebAuthn get behind Face ID) ----------
+    ph.d.refresh()
+    ph.wait("[data-lock-screen], [data-inbox-view], .view-switch", 40)
+    ph.watch_errors()
+    face = ph.js("const e = document.querySelector('[data-lock-screen]'); return e ? e.getAttribute('data-lock-screen') : 'open'")
+    ph.shot("reopened")
+    need("opened again, the page asks for the passkey to unlock", face == "unlock", face)
+    stop = threading.Event()
+    threading.Thread(target=lambda: [face_id(ph.udid, "match") for _ in iter(lambda: stop.wait(1.5), True)], daemon=True).start()
+    try:
+        ph.click("[data-lock-go]")
+        time.sleep(3)
+        ph.shot("unlock-sheet")
+        for fy in (0.93, 0.88):  # Safari's "Sign in" sheet: its Continue button at the bottom
+            if not ph.has("[data-lock-screen]"):
+                break
+            ph.tap_screen(0.5, fy)
+            time.sleep(3)
+        try:
+            ph.wait("[data-lock-screen]", 40, gone=True)
+        except TimeoutError:
+            ph.shot("unlock-stuck")
+    finally:
+        stop.set()
+    check("the passkey unlocks the page in Safari", not ph.has("[data-lock-screen]"), ph.text("[data-lock-error]") or ph.text("[data-lock-screen]")[:200])
+    check("…and the inbox is back", ph.has("[data-inbox-view], .view-switch"))
+    check("the page raised no script error after reopening", not ph.errors(), ph.errors())
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
