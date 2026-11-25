@@ -22,6 +22,23 @@ pub struct Display {
     pub primary: bool,
 }
 
+/// A display's backing scale, as AppKit has it (`NSScreen.backingScaleFactor`): the display mode alone may say points (a virtual machine's
+/// does), while ScreenCaptureKit and the screen draw at the backing scale.
+fn backing_scale(id: u32) -> Option<f64> {
+    on_main(move || {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let screens: Option<Retained<AnyObject>> = msg_send![class(c"NSScreen")?, screens];
+            let key = nsstring("NSScreenNumber");
+            ns_items(screens.as_deref()).into_iter().find_map(|s| {
+                let desc: Option<Retained<AnyObject>> = msg_send![&*s, deviceDescription];
+                let number: Option<Retained<AnyObject>> = msg_send![&*desc?, objectForKey: &*key];
+                let n: u32 = msg_send![&*number?, unsignedIntValue];
+                (n == id).then(|| -> f64 { msg_send![&*s, backingScaleFactor] })
+            })
+        })
+    })
+}
+
 pub fn display(id: u32) -> Option<Display> {
     unsafe {
         let b = CGDisplayBounds(id);
@@ -29,14 +46,16 @@ pub fn display(id: u32) -> Option<Display> {
             return None;
         }
         let mode = CGDisplayCopyDisplayMode(id);
-        let pixels = if mode.is_null() {
-            (b.size.width as u32, b.size.height as u32)
+        let mode_px = if mode.is_null() {
+            0.0
         } else {
-            let p = (CGDisplayModeGetPixelWidth(mode) as u32, CGDisplayModeGetPixelHeight(mode) as u32);
+            let w = CGDisplayModeGetPixelWidth(mode) as f64;
             CGDisplayModeRelease(mode);
-            p
+            w
         };
-        Some(Display { id, bounds: b.rect(), pixels, scale: (f64::from(pixels.0) / b.size.width).max(1.0), primary: id == CGMainDisplayID() })
+        let scale = backing_scale(id).unwrap_or(mode_px / b.size.width).max(1.0);
+        let pixels = ((b.size.width * scale).round() as u32, (b.size.height * scale).round() as u32);
+        Some(Display { id, bounds: b.rect(), pixels, scale, primary: id == CGMainDisplayID() })
     }
 }
 

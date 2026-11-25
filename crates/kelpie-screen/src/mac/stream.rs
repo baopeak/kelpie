@@ -455,20 +455,18 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
             return;
         }
     };
+    // No hardware encoder (VideoToolbox gave its software one): the software ladder, and the encoder opened as software for it.
     let encoder = if encoder.hardware {
         encoder
     } else {
         ctl.set_software(true);
         params = ctl.params();
-        if (params.w, params.h) == (encoder.w, encoder.h) {
-            encoder
-        } else {
-            match Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, false) {
-                Ok(e) => e,
-                Err(e) => {
-                    let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
-                    return;
-                }
+        drop(encoder);
+        match Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, false) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
+                return;
             }
         }
     };

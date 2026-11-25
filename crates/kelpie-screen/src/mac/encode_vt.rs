@@ -94,22 +94,38 @@ impl Encoder {
             let (pf, wn, hn) = (cfnum_i64(i64::from(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)), cfnum_i64(i64::from(w)), cfnum_i64(i64::from(h)));
             let attrs = cfdict(&[(kCVPixelBufferPixelFormatTypeKey, pf.ptr()), (kCVPixelBufferWidthKey, wn.ptr()), (kCVPixelBufferHeightKey, hn.ptr()), (kCVPixelBufferIOSurfacePropertiesKey, empty.ptr())]);
             let hw = cfbool(hardware);
-            let low = cfdict(&[(kVTVideoEncoderSpecification_EnableLowLatencyRateControl, cfbool(true)), (kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder, hw)]);
-            let plain = cfdict(&[(kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder, hw)]);
-            let create = |spec: &Cf, out: &mut VTSessionRef| VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, kCMVideoCodecType_H264, spec.ptr(), attrs.ptr(), std::ptr::null(), on_output, shared as *mut c_void, out);
-            if create(&low, &mut e.session) != 0 || e.session.is_null() {
-                e.refused.push("EnableLowLatencyRateControl".into());
-                let st = create(&plain, &mut e.session);
-                if st != 0 || e.session.is_null() {
-                    e.session = std::ptr::null_mut();
-                    return Err(format!("no H.264 encoder works on this Mac ({st})"));
+            let low = kVTVideoEncoderSpecification_EnableLowLatencyRateControl;
+            let use_hw = kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder;
+            // Low latency first: with the hardware asked for, then as VideoToolbox picks (on a Mac without a hardware encoder the low-latency
+            // one is its software encoder, which a hardware request makes it refuse), and only then without it.
+            let mut specs = vec![(cfdict(&[(low, cfbool(true)), (use_hw, hw)]), true)];
+            if hardware {
+                specs.push((cfdict(&[(low, cfbool(true))]), true));
+            }
+            specs.push((cfdict(&[(use_hw, hw)]), false));
+            let mut last = 0;
+            for (spec, low_latency) in &specs {
+                last = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, kCMVideoCodecType_H264, spec.ptr(), attrs.ptr(), std::ptr::null(), on_output, shared as *mut c_void, &mut e.session);
+                if last == 0 && !e.session.is_null() {
+                    if !low_latency {
+                        e.refused.push("EnableLowLatencyRateControl".into());
+                    }
+                    break;
                 }
+                e.session = std::ptr::null_mut();
+            }
+            if e.session.is_null() {
+                return Err(format!("no H.264 encoder works on this Mac ({last})"));
             }
             let fps_n = cfnum_i64(i64::from(fps.max(1)));
             let rate = cfnum_i64(i64::from(kbps) * 1000);
             let keys = cfnum_i64(100_000);
             e.set("RealTime", kVTCompressionPropertyKey_RealTime, cfbool(true));
             e.set("AllowFrameReordering", kVTCompressionPropertyKey_AllowFrameReordering, cfbool(false));
+            // Every frame comes back before the next goes in (the loop keeps one in the encoder): an encoder that waits for more input
+            // before it gives one back would never give it.
+            let no_delay = cfnum_i64(0);
+            e.set("MaxFrameDelayCount", kVTCompressionPropertyKey_MaxFrameDelayCount, no_delay.ptr());
             e.set("ProfileLevel", kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel);
             e.set("ExpectedFrameRate", kVTCompressionPropertyKey_ExpectedFrameRate, fps_n.ptr());
             e.set("MaxKeyFrameInterval", kVTCompressionPropertyKey_MaxKeyFrameInterval, keys.ptr());
