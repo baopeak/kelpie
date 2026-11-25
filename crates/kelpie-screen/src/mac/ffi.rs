@@ -293,6 +293,9 @@ extern "C" {
 extern "C" {
     pub static SCStreamFrameInfoStatus: CFStringRef;
     pub static SCStreamFrameInfoDirtyRects: CFStringRef;
+    pub static SCStreamFrameInfoContentRect: CFStringRef;
+    pub static SCStreamFrameInfoContentScale: CFStringRef;
+    pub static SCStreamFrameInfoScaleFactor: CFStringRef;
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -301,6 +304,7 @@ extern "C" {
     pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
     pub fn AXUIElementGetPid(el: AXUIElementRef, pid: *mut i32) -> i32;
+    pub fn AXUIElementCopyElementAtPosition(el: AXUIElementRef, x: f32, y: f32, out: *mut CFTypeRef) -> i32;
     pub fn AXUIElementCopyAttributeValue(el: AXUIElementRef, attr: CFStringRef, out: *mut CFTypeRef) -> i32;
     pub fn AXUIElementSetAttributeValue(el: AXUIElementRef, attr: CFStringRef, value: CFTypeRef) -> i32;
     pub fn AXUIElementPerformAction(el: AXUIElementRef, action: CFStringRef) -> i32;
@@ -358,26 +362,33 @@ impl Cf {
 
 impl Clone for Cf {
     fn clone(&self) -> Cf {
-        Cf(unsafe { CFRetain(self.0) })
+        Cf(if self.0.is_null() { self.0 } else { unsafe { CFRetain(self.0) } })
     }
 }
 
 impl Drop for Cf {
     fn drop(&mut self) {
-        unsafe { CFRelease(self.0) }
+        if !self.0.is_null() {
+            unsafe { CFRelease(self.0) }
+        }
     }
 }
 
+/// A new object a creator gave (+1): Core Foundation gives none only when it has no memory, which nothing here can go on without.
+fn created(p: CFTypeRef, what: &str) -> Cf {
+    Cf::take(p).unwrap_or_else(|| panic!("{what} gave nothing"))
+}
+
 pub fn cfstr(s: &str) -> Cf {
-    Cf(unsafe { CFStringCreateWithBytes(std::ptr::null(), s.as_ptr(), s.len() as CFIndex, kCFStringEncodingUTF8, 0) })
+    created(unsafe { CFStringCreateWithBytes(std::ptr::null(), s.as_ptr(), s.len() as CFIndex, kCFStringEncodingUTF8, 0) }, "CFStringCreateWithBytes")
 }
 
 pub fn cfnum_i64(v: i64) -> Cf {
-    Cf(unsafe { CFNumberCreate(std::ptr::null(), kCFNumberSInt64Type, &v as *const i64 as *const c_void) })
+    created(unsafe { CFNumberCreate(std::ptr::null(), kCFNumberSInt64Type, &v as *const i64 as *const c_void) }, "CFNumberCreate")
 }
 
 pub fn cfnum_f64(v: f64) -> Cf {
-    Cf(unsafe { CFNumberCreate(std::ptr::null(), kCFNumberFloat64Type, &v as *const f64 as *const c_void) })
+    created(unsafe { CFNumberCreate(std::ptr::null(), kCFNumberFloat64Type, &v as *const f64 as *const c_void) }, "CFNumberCreate")
 }
 
 pub fn cfbool(v: bool) -> CFTypeRef {
@@ -387,20 +398,21 @@ pub fn cfbool(v: bool) -> CFTypeRef {
 pub fn cfdict(pairs: &[(CFTypeRef, CFTypeRef)]) -> Cf {
     let keys: Vec<CFTypeRef> = pairs.iter().map(|p| p.0).collect();
     let values: Vec<CFTypeRef> = pairs.iter().map(|p| p.1).collect();
-    unsafe {
-        Cf(CFDictionaryCreate(
+    let d = unsafe {
+        CFDictionaryCreate(
             std::ptr::null(),
             keys.as_ptr(),
             values.as_ptr(),
             pairs.len() as CFIndex,
             &kCFTypeDictionaryKeyCallBacks as *const u8 as *const c_void,
             &kCFTypeDictionaryValueCallBacks as *const u8 as *const c_void,
-        ))
-    }
+        )
+    };
+    created(d, "CFDictionaryCreate")
 }
 
 pub fn cfarray(values: &[CFTypeRef]) -> Cf {
-    unsafe { Cf(CFArrayCreate(std::ptr::null(), values.as_ptr(), values.len() as CFIndex, &kCFTypeArrayCallBacks as *const u8 as *const c_void)) }
+    created(unsafe { CFArrayCreate(std::ptr::null(), values.as_ptr(), values.len() as CFIndex, &kCFTypeArrayCallBacks as *const u8 as *const c_void) }, "CFArrayCreate")
 }
 
 /// The items of a `CFArray` (+0, valid while the array is).

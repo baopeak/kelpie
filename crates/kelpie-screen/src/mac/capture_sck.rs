@@ -16,17 +16,34 @@ use objc2::{msg_send, sel};
 use super::ffi::*;
 use crate::geom::Rect;
 
-/// One picture: a retained `CVPixelBuffer` (IOSurface-backed BGRA) and what it changed, when known.
+/// One picture: a retained `CVPixelBuffer` (IOSurface-backed BGRA), what it changed, when known, and where the captured content is in it
+/// (pixels: x, y, width, height), when the capture says.
 pub struct Frame {
     pub picture: Cf,
     pub dirty: Option<Vec<Rect>>,
+    pub content: Option<[f64; 4]>,
 }
+
+/// Why the stream stopped by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopWhy {
+    /// The person stopped it from the Mac (the screen-sharing item in the menu bar).
+    ByPerson,
+    /// The Screen Recording permission was taken back.
+    NoPermission,
+    /// Anything else: the window closed, the display went.
+    Other,
+}
+
+/// `SCStreamErrorUserDeclined`, `SCStreamErrorUserStopped`.
+const SC_USER_DECLINED: isize = -3801;
+const SC_USER_STOPPED: isize = -3817;
 
 #[derive(Default)]
 struct Slot {
     frame: Option<Frame>,
-    /// The stream stopped by itself (the window closed, the display went, the permission was taken back).
-    stopped: bool,
+    /// The stream stopped by itself, with the error code it gave (the window closed, the display went, the permission was taken back).
+    stopped: Option<isize>,
 }
 
 #[derive(Default)]
@@ -52,11 +69,22 @@ impl Mailbox {
         self.ready.notify_one();
     }
 
-    fn stop(&self) {
+    fn stop(&self, code: isize) {
         if let Ok(mut slot) = self.slot.lock() {
-            slot.stopped = true;
+            slot.stopped = Some(code);
             self.ready.notify_one();
         }
+    }
+}
+
+/// Why a stream that stopped with `code` did: the person's stop and a denied permission by their codes, and a permission no longer given
+/// whatever the code.
+fn stop_why(code: isize, permitted: bool) -> StopWhy {
+    match code {
+        SC_USER_STOPPED => StopWhy::ByPerson,
+        SC_USER_DECLINED => StopWhy::NoPermission,
+        _ if !permitted => StopWhy::NoPermission,
+        _ => StopWhy::Other,
     }
 }
 
@@ -72,30 +100,45 @@ fn mailbox_of(this: &AnyObject) -> Option<&Mailbox> {
     (p != 0).then(|| unsafe { &*(p as *const Mailbox) })
 }
 
+/// Runs a callback's body so that a panic in it never unwinds into the frameworks' frames.
+fn guarded(f: impl FnOnce()) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+}
+
 extern "C-unwind" fn on_sample(this: &AnyObject, _cmd: Sel, _stream: *mut AnyObject, sb: *mut c_void, kind: isize) {
     // SCStreamOutputTypeScreen.
     if kind != 0 || sb.is_null() {
         return;
     }
-    let Some(mailbox) = mailbox_of(this) else { return };
-    unsafe {
-        let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, 0);
-        let info = array_items(attachments).first().copied().unwrap_or(std::ptr::null());
-        // SCFrameStatusComplete: a new picture. Idle, blank, suspended, started and stopped frames carry none.
-        if i64_of(dict_get(info, SCStreamFrameInfoStatus)) != Some(0) {
-            return;
+    guarded(|| {
+        let Some(mailbox) = mailbox_of(this) else { return };
+        unsafe {
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, 0);
+            let info = array_items(attachments).first().copied().unwrap_or(std::ptr::null());
+            // SCFrameStatusComplete: a new picture. Idle, blank, suspended, started and stopped frames carry none.
+            if i64_of(dict_get(info, SCStreamFrameInfoStatus)) != Some(0) {
+                return;
+            }
+            let Some(picture) = Cf::retain(CMSampleBufferGetImageBuffer(sb) as CFTypeRef) else { return };
+            let rects = dict_get(info, SCStreamFrameInfoDirtyRects);
+            let dirty = (!rects.is_null()).then(|| array_items(rects).into_iter().filter_map(rect_of).map(|r| r.rect()).collect());
+            // The content's rectangle is in its own points: in the frame's pixels it is that times the source's scale and the content's.
+            let content = rect_of(dict_get(info, SCStreamFrameInfoContentRect)).map(|r| {
+                let f = f64_of(dict_get(info, SCStreamFrameInfoScaleFactor)).unwrap_or(1.0) * f64_of(dict_get(info, SCStreamFrameInfoContentScale)).unwrap_or(1.0);
+                [r.origin.x * f, r.origin.y * f, r.size.width * f, r.size.height * f]
+            });
+            mailbox.put(Frame { picture, dirty, content });
         }
-        let Some(picture) = Cf::retain(CMSampleBufferGetImageBuffer(sb) as CFTypeRef) else { return };
-        let rects = dict_get(info, SCStreamFrameInfoDirtyRects);
-        let dirty = (!rects.is_null()).then(|| array_items(rects).into_iter().filter_map(rect_of).map(|r| r.rect()).collect());
-        mailbox.put(Frame { picture, dirty });
-    }
+    });
 }
 
-extern "C-unwind" fn on_stop(this: &AnyObject, _cmd: Sel, _stream: *mut AnyObject, _error: *mut AnyObject) {
-    if let Some(m) = mailbox_of(this) {
-        m.stop();
-    }
+extern "C-unwind" fn on_stop(this: &AnyObject, _cmd: Sel, _stream: *mut AnyObject, error: *mut AnyObject) {
+    guarded(|| {
+        let code: isize = if error.is_null() { 0 } else { unsafe { msg_send![&*error, code] } };
+        if let Some(m) = mailbox_of(this) {
+            m.stop(code);
+        }
+    });
 }
 
 /// The class that takes the stream's frames and its end (`SCStreamOutput`, `SCStreamDelegate`).
@@ -131,11 +174,13 @@ fn description(error: *mut AnyObject) -> String {
 fn shareable() -> Result<Retained<AnyObject>, String> {
     let (tx, rx) = channel::<Result<Sendable, String>>();
     let block = RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
-        let got = match unsafe { Retained::retain(content) } {
-            Some(c) => Ok(Sendable(c)),
-            None => Err(description(error)),
-        };
-        let _ = tx.send(got);
+        guarded(|| {
+            let got = match unsafe { Retained::retain(content) } {
+                Some(c) => Ok(Sendable(c)),
+                None => Err(description(error)),
+            };
+            let _ = tx.send(got);
+        })
     });
     unsafe {
         let cls = class(c"SCShareableContent").ok_or("ScreenCaptureKit is not available on this Mac")?;
@@ -152,7 +197,9 @@ fn shareable() -> Result<Retained<AnyObject>, String> {
 fn wait_done(start: impl FnOnce(&block2::Block<dyn Fn(*mut AnyObject)>)) -> Result<(), String> {
     let (tx, rx) = channel::<Result<(), String>>();
     let block = RcBlock::new(move |error: *mut AnyObject| {
-        let _ = tx.send(if error.is_null() { Ok(()) } else { Err(description(error)) });
+        guarded(|| {
+            let _ = tx.send(if error.is_null() { Ok(()) } else { Err(description(error)) });
+        })
     });
     start(&block);
     rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|_| Err("the capture did not answer".into()))
@@ -162,8 +209,8 @@ pub enum Grabbed {
     Frame(Frame),
     /// Nothing new yet.
     Idle,
-    /// The stream stopped by itself (the window closed, the display went, the permission was taken back).
-    Stopped,
+    /// The stream stopped by itself (the window closed, the display went, the permission was taken back, the person stopped it).
+    Stopped(StopWhy),
 }
 
 pub enum Source {
@@ -238,6 +285,12 @@ impl Capture {
         let _: () = msg_send![&*config, setShowsCursor: false];
         let _: () = msg_send![&*config, setMinimumFrameInterval: CMTime::new(1, fps.max(1) as i32)];
         let _: () = msg_send![&*config, setQueueDepth: 4isize];
+        // A window's shadow is left out of its picture where the Mac can (macOS 14), so that the picture is the window the clicks map onto.
+        let shadows = sel!(setIgnoreShadowsSingleWindow:);
+        let can: bool = msg_send![&*config, respondsToSelector: shadows];
+        if can {
+            let _: () = msg_send![&*config, setIgnoreShadowsSingleWindow: true];
+        }
 
         let mailbox = Arc::new(Mailbox::default());
         let cls = output_class().ok_or("the capture could not be set up")?;
@@ -266,15 +319,16 @@ impl Capture {
 
     /// The newest frame, waiting at most `wait` for one.
     pub fn grab(&self, wait: Duration) -> Grabbed {
-        let Ok(mut slot) = self.mailbox.slot.lock() else { return Grabbed::Stopped };
-        if slot.frame.is_none() && !slot.stopped && !wait.is_zero() {
+        let Ok(mut slot) = self.mailbox.slot.lock() else { return Grabbed::Stopped(StopWhy::Other) };
+        if slot.frame.is_none() && slot.stopped.is_none() && !wait.is_zero() {
             slot = match self.mailbox.ready.wait_timeout(slot, wait) {
                 Ok((s, _)) => s,
-                Err(_) => return Grabbed::Stopped,
+                Err(_) => return Grabbed::Stopped(StopWhy::Other),
             };
         }
-        if slot.stopped {
-            return Grabbed::Stopped;
+        if let Some(code) = slot.stopped {
+            drop(slot);
+            return Grabbed::Stopped(stop_why(code, unsafe { CGPreflightScreenCaptureAccess() }));
         }
         slot.frame.take().map_or(Grabbed::Idle, Grabbed::Frame)
     }
@@ -300,5 +354,19 @@ impl Drop for Capture {
             slot.frame = None;
         }
         unsafe { dispatch_release(self.queue) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_persons_stop_and_a_permission_taken_back_are_told_from_other_stops() {
+        assert_eq!(stop_why(SC_USER_STOPPED, true), StopWhy::ByPerson);
+        assert_eq!(stop_why(SC_USER_DECLINED, true), StopWhy::NoPermission);
+        assert_eq!(stop_why(-3815, false), StopWhy::NoPermission, "a revoked permission whatever the code");
+        assert_eq!(stop_why(-3815, true), StopWhy::Other);
+        assert_eq!(stop_why(0, true), StopWhy::Other);
     }
 }

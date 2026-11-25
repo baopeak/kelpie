@@ -6,6 +6,7 @@
 //! installed there once (`install_hotkey_handler`). AppKit and Carbon are main-thread APIs: everything here runs there (`ffi::on_main`).
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 
@@ -32,6 +33,8 @@ const DARK: (f64, f64, f64) = (0x14 as f64 / 255.0, 0x18 as f64 / 255.0, 0x23 as
 
 /// Where the hotkey goes while a stream holds it (one stream at a time).
 static HOTKEY: Mutex<Option<Sender<()>>> = Mutex::new(None);
+/// Carbon took the hotkey handler: without it a registered hotkey would do nothing, so no stream starts.
+static HANDLER: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" fn on_hotkey(_call: *mut c_void, _event: *mut c_void, _data: *mut c_void) -> OSStatus {
     if let Ok(h) = HOTKEY.lock() {
@@ -46,15 +49,16 @@ unsafe extern "C" fn on_hotkey(_call: *mut c_void, _event: *mut c_void, _data: *
 /// `kEventHotKeyPressed`).
 pub fn install_hotkey_handler() {
     let spec = EventTypeSpec { class: u32::from_be_bytes(*b"keyb"), kind: 5 };
-    unsafe {
-        let _ = InstallEventHandler(GetApplicationEventTarget(), on_hotkey, 1, &spec, std::ptr::null_mut(), std::ptr::null_mut());
-    }
+    let installed = unsafe { InstallEventHandler(GetApplicationEventTarget(), on_hotkey, 1, &spec, std::ptr::null_mut(), std::ptr::null_mut()) } == 0;
+    HANDLER.store(installed, Ordering::SeqCst);
 }
 
-/// A rectangle of global points (top-left origin, as Core Graphics has it) as AppKit's (bottom-left origin, from the primary display).
-fn cocoa(r: Rect) -> CGRect {
+/// The border window's frame around a rectangle of global points (top-left origin, as Core Graphics has it), as AppKit's (bottom-left origin,
+/// from the primary display): around a window, outside it; on a whole display, inside its edges, where the stroke can be seen.
+fn cocoa(r: Rect, outside: bool) -> CGRect {
     let primary = unsafe { CGDisplayBounds(CGMainDisplayID()) };
-    let (x, y, w, h) = (f64::from(r.x) - THICK, f64::from(r.y) - THICK, f64::from(r.w) + 2.0 * THICK, f64::from(r.h) + 2.0 * THICK);
+    let grow = if outside { THICK } else { 0.0 };
+    let (x, y, w, h) = (f64::from(r.x) - grow, f64::from(r.y) - grow, f64::from(r.w) + 2.0 * grow, f64::from(r.h) + 2.0 * grow);
     CGRect::new(x, primary.size.height - (y + h), w, h)
 }
 
@@ -63,8 +67,8 @@ fn color(c: (f64, f64, f64)) -> Option<Retained<AnyObject>> {
 }
 
 /// The border window, shown. Returns it retained (as an address: it is only ever touched on the main thread).
-unsafe fn make_window(rect: Rect, label: &str) -> Option<usize> {
-    let frame = cocoa(rect);
+unsafe fn make_window(rect: Rect, outside: bool, label: &str) -> Option<usize> {
+    let frame = cocoa(rect, outside);
     let alloc: Allocated<AnyObject> = msg_send![class(c"NSWindow")?, alloc];
     // Borderless, buffered.
     let w: Retained<AnyObject> = msg_send![alloc, initWithContentRect: frame, styleMask: 0usize, backing: 2usize, defer: false];
@@ -110,22 +114,28 @@ pub struct Border {
     window: usize,
     hotkey: usize,
     rect: Mutex<Rect>,
+    outside: bool,
 }
 
 impl Border {
-    /// Shows the border around `rect` (global points) with `label` in its badge, and registers the stop hotkey, which sends on `on_hotkey`. An
-    /// error (no window, or the hotkey held already) means the screen must not be shared: the Mac would not show it or could not stop it.
-    pub fn show(rect: Rect, label: &str, hotkey: Hotkey, on_hotkey: Sender<()>) -> Result<Border, String> {
+    /// Shows the border around `rect` (global points; `outside` it for a window, inside a display's edges) with `label` in its badge, and
+    /// registers the stop hotkey, which sends on `on_hotkey`. An error (no window, the hotkey held already or its handler missing) means the
+    /// screen must not be shared: the Mac would not show it or could not stop it.
+    pub fn show(rect: Rect, outside: bool, label: &str, hotkey: Hotkey, on_hotkey: Sender<()>) -> Result<Border, String> {
         let (code, mods) = mac_hotkey(hotkey).ok_or("the stop hotkey in Settings → Mobile is not one a Mac has")?;
         *HOTKEY.lock().map_err(|_| "the stop hotkey cannot be set")? = Some(on_hotkey);
         let label = label.to_string();
         let made = on_main(move || unsafe {
+            // Read here: the main thread installs the handler before it runs anything sent to it.
+            if !HANDLER.load(Ordering::SeqCst) {
+                return Err("the stop hotkey cannot be set on this Mac, so the screen is not shared".to_string());
+            }
             let mut hk: *mut c_void = std::ptr::null_mut();
             let id = EventHotKeyID { signature: u32::from_be_bytes(*b"Klpe"), id: 1 };
             if RegisterEventHotKey(code, mods, id, GetApplicationEventTarget(), 0, &mut hk) != 0 || hk.is_null() {
                 return Err("another program holds the stop hotkey: pick another in Settings → Mobile".to_string());
             }
-            match objc2::rc::autoreleasepool(|_| make_window(rect, &label)) {
+            match objc2::rc::autoreleasepool(|_| make_window(rect, outside, &label)) {
                 Some(w) => Ok((w, hk as usize)),
                 None => {
                     let _ = UnregisterEventHotKey(hk);
@@ -134,7 +144,7 @@ impl Border {
             }
         });
         match made {
-            Ok((window, hotkey)) => Ok(Border { window, hotkey, rect: Mutex::new(rect) }),
+            Ok((window, hotkey)) => Ok(Border { window, hotkey, rect: Mutex::new(rect), outside }),
             Err(e) => {
                 if let Ok(mut h) = HOTKEY.lock() {
                     *h = None;
@@ -148,11 +158,11 @@ impl Border {
     pub fn place(&self, rect: Rect) {
         let changed = self.rect.lock().map(|mut r| std::mem::replace(&mut *r, rect) != rect).unwrap_or(false);
         if changed {
-            let window = self.window;
+            let (window, outside) = (self.window, self.outside);
             // Queued on the main thread before the border's own end (`Drop` waits behind it), so the window is still there.
             on_main_later(move || unsafe {
                 let w = window as *mut AnyObject;
-                let _: () = msg_send![&*w, setFrame: cocoa(rect), display: true];
+                let _: () = msg_send![&*w, setFrame: cocoa(rect, outside), display: true];
             });
         }
     }

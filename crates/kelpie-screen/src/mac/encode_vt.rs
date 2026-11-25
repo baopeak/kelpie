@@ -22,6 +22,11 @@ struct Shared {
 }
 
 unsafe extern "C" fn on_output(refcon: *mut c_void, frame: *mut c_void, status: OSStatus, flags: u32, sb: CMSampleBufferRef) {
+    // A panic must not unwind into VideoToolbox's frames.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| output(refcon, frame, status, flags, sb)));
+}
+
+unsafe fn output(refcon: *mut c_void, frame: *mut c_void, status: OSStatus, flags: u32, sb: CMSampleBufferRef) {
     let shared = &*(refcon as *const Shared);
     shared.delivered.fetch_add(1, Ordering::SeqCst);
     if status != 0 || sb.is_null() || flags & kVTEncodeInfo_FrameDropped != 0 {
@@ -208,7 +213,15 @@ impl Encoder {
         unsafe { (*self.shared).first_output_ms.lock().ok().and_then(|f| *f) }
     }
 
+    /// The session was let go (`close`) and none replaced it.
+    pub fn closed(&self) -> bool {
+        self.session.is_null() || self.transfer.is_null()
+    }
+
     pub fn set_bitrate(&mut self, kbps: u32) {
+        if self.closed() {
+            return;
+        }
         unsafe {
             let rate = cfnum_i64(i64::from(kbps) * 1000);
             let _ = VTSessionSetProperty(self.session, kVTCompressionPropertyKey_AverageBitRate, rate.ptr());
@@ -218,6 +231,9 @@ impl Encoder {
 
     /// The capture's BGRA picture, scaled into one of the encoder's NV12 buffers.
     pub fn convert(&mut self, picture: &Cf) -> Result<Cf, String> {
+        if self.closed() {
+            return Err("the encoder is closed".into());
+        }
         unsafe {
             let pool = VTCompressionSessionGetPixelBufferPool(self.session);
             if pool.is_null() {
@@ -241,6 +257,9 @@ impl Encoder {
 
     /// Gives the encoder a frame; its output comes from `poll`.
     pub fn encode(&mut self, input: &Cf, time: i64, key: bool) -> Result<bool, String> {
+        if self.closed() {
+            return Err("the encoder is closed".into());
+        }
         unsafe {
             let force = key.then(|| cfdict(&[(kVTEncodeFrameOptionKey_ForceKeyFrame, cfbool(true))]));
             let st = VTCompressionSessionEncodeFrame(
@@ -270,8 +289,8 @@ fn shown(v: CFTypeRef) -> String {
 }
 
 impl Encoder {
-    /// Lets the session go now (before its successor opens: the Mac may have one low-latency encoder at a time). What is called on a closed
-    /// encoder fails, which ends the stream.
+    /// Lets the session go now (before its successor opens: the Mac may have one low-latency encoder at a time). A closed encoder converts
+    /// and encodes nothing (an error) and the stream's backend reads it as not healthy, which ends the stream.
     pub fn close(&mut self) {
         unsafe {
             if !self.session.is_null() {
