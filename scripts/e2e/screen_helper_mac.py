@@ -91,6 +91,14 @@ class Helper:
 
     seen = []
 
+    def drain(self):
+        """Every JSON message come so far, into `seen`."""
+        while True:
+            try:
+                self.seen.append(self.events.get_nowait())
+            except queue.Empty:
+                return
+
     def ask(self, obj, timeout=10):
         self.next_id += 1
         obj = dict(obj, id=self.next_id)
@@ -141,6 +149,7 @@ def display_stream(h, display, seconds, out):
         h.send({"cmd": "input", "sc": sc, "ops": [{"k": "move", "x": src[0] * (0.3 + 0.05 * (t % 4)), "y": src[1] * 0.5}], "t": now_ms()})
 
     acknowledge(h, sc, seconds, wiggle)
+    h.drain()
     vids = h.videos(sc)
     check(len(vids) > 0, "video frames come", f"{len(vids)} frames")
     if not vids:
