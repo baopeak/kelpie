@@ -335,13 +335,15 @@ impl Backend for MacBackend {
         }
     }
 
-    fn resize(&mut self, src: (u32, u32), params: &Params, hardware: bool) -> Result<(), String> {
+    /// The converter is the encoder's (it scales into the encoder's buffers): both are new, the old one closed first.
+    fn resize(&mut self, _src: (u32, u32), params: &Params, hardware: bool) -> Result<(), String> {
+        self.encoder.close();
         self.encoder = Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, hardware)?;
-        let _ = src;
         Ok(())
     }
 
     fn software_encoder(&mut self, params: &Params) -> Result<(), String> {
+        self.encoder.close();
         self.encoder = Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, false)?;
         Ok(())
     }
@@ -448,26 +450,23 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let mut ctl = stream_core::controller(&cfg);
     let mut params = ctl.params();
     let fps = u32::from(params.fps);
-    let encoder = match Encoder::open(params.w, params.h, fps, params.kbps, true).or_else(|_| Encoder::open(params.w, params.h, fps, params.kbps, false)) {
+    let mut opened = Encoder::open(params.w, params.h, fps, params.kbps, true);
+    // No hardware encoder (VideoToolbox gave its software one): the software ladder, and the encoder opened as software for it unless the one
+    // given already is (the old one closed first: the Mac may have one low-latency encoder at a time).
+    if !opened.as_ref().is_ok_and(|e| e.hardware) {
+        ctl.set_software(true);
+        params = ctl.params();
+        let fits = opened.as_ref().is_ok_and(|e| (e.w, e.h) == (params.w, params.h) && !e.refused.iter().any(|r| r == "EnableLowLatencyRateControl"));
+        if !fits {
+            drop(opened);
+            opened = Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, false);
+        }
+    }
+    let encoder = match opened {
         Ok(e) => e,
         Err(e) => {
             let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
             return;
-        }
-    };
-    // No hardware encoder (VideoToolbox gave its software one): the software ladder, and the encoder opened as software for it.
-    let encoder = if encoder.hardware {
-        encoder
-    } else {
-        ctl.set_software(true);
-        params = ctl.params();
-        drop(encoder);
-        match Encoder::open(params.w, params.h, u32::from(params.fps), params.kbps, false) {
-            Ok(e) => e,
-            Err(e) => {
-                let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
-                return;
-            }
         }
     };
     // The border and the hotkey first (the capture leaves the border out, which it must see to): without them nothing is shared.

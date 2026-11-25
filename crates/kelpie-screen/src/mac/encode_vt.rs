@@ -60,6 +60,9 @@ unsafe extern "C" fn on_output(refcon: *mut c_void, frame: *mut c_void, status: 
     }
 }
 
+/// How many times the low-latency encoder is asked for before the ordinary one is taken.
+const LOW_LATENCY_TRIES: u32 = 5;
+
 pub struct Encoder {
     session: VTSessionRef,
     transfer: VTSessionRef,
@@ -104,15 +107,23 @@ impl Encoder {
             }
             specs.push((cfdict(&[(use_hw, hw)]), false));
             let mut last = 0;
-            for (spec, low_latency) in &specs {
-                last = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, kCMVideoCodecType_H264, spec.ptr(), attrs.ptr(), std::ptr::null(), on_output, shared as *mut c_void, &mut e.session);
-                if last == 0 && !e.session.is_null() {
-                    if !low_latency {
-                        e.refused.push("EnableLowLatencyRateControl".into());
+            let last_low = specs.iter().rposition(|s| s.1);
+            'specs: for (i, (spec, low_latency)) in specs.iter().enumerate() {
+                // The low-latency encoder of a session just closed is let go a moment later: the last low-latency try waits for it.
+                let tries = if Some(i) == last_low { LOW_LATENCY_TRIES } else { 1 };
+                for t in 0..tries {
+                    if t > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
-                    break;
+                    last = VTCompressionSessionCreate(std::ptr::null(), w as i32, h as i32, kCMVideoCodecType_H264, spec.ptr(), attrs.ptr(), std::ptr::null(), on_output, shared as *mut c_void, &mut e.session);
+                    if last == 0 && !e.session.is_null() {
+                        if !low_latency {
+                            e.refused.push("EnableLowLatencyRateControl".into());
+                        }
+                        break 'specs;
+                    }
+                    e.session = std::ptr::null_mut();
                 }
-                e.session = std::ptr::null_mut();
             }
             if e.session.is_null() {
                 return Err(format!("no H.264 encoder works on this Mac ({last})"));
@@ -242,20 +253,30 @@ fn shown(v: CFTypeRef) -> String {
     string_of(v).or_else(|| i64_of(v).map(|n| n.to_string())).or_else(|| bool_of(v).map(|b| b.to_string())).unwrap_or_else(|| "?".into())
 }
 
-impl Drop for Encoder {
-    fn drop(&mut self) {
+impl Encoder {
+    /// Lets the session go now (before its successor opens: the Mac may have one low-latency encoder at a time). What is called on a closed
+    /// encoder fails, which ends the stream.
+    pub fn close(&mut self) {
         unsafe {
             if !self.session.is_null() {
                 let _ = VTCompressionSessionCompleteFrames(self.session, CMTime::INVALID);
                 VTCompressionSessionInvalidate(self.session);
                 CFRelease(self.session as CFTypeRef);
+                self.session = std::ptr::null_mut();
             }
             if !self.transfer.is_null() {
                 VTPixelTransferSessionInvalidate(self.transfer);
                 CFRelease(self.transfer as CFTypeRef);
+                self.transfer = std::ptr::null_mut();
             }
-            // No callback comes after the session is invalidated.
-            drop(Box::from_raw(self.shared));
         }
+    }
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        self.close();
+        // No callback comes after the session is invalidated.
+        unsafe { drop(Box::from_raw(self.shared)) };
     }
 }
