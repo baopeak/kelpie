@@ -102,4 +102,16 @@ if [ -n "$signing_key" ]; then
 else
   pnpm tauri build --config src-tauri/tauri.bundle.json ${target_args[@]+"${target_args[@]}"} "$@"
 fi
+# macOS ties Screen Recording and Accessibility to the code signature, and counts the screen helper's as Kelpie's, since it runs inside
+# Kelpie.app and is started by it: the bundler signs every sidecar in Contents/MacOS with the app's identity (APPLE_SIGNING_IDENTITY).
+# Checked here, so a release never ships a helper signed apart from the app.
+for app_dir in "$bundle_dir"/macos/*.app; do
+  [ -d "$app_dir" ] || continue
+  team() { t=$(codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p'); echo "${t:-not set}"; }
+  main_bin="$app_dir/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app_dir/Contents/Info.plist")"
+  if [ "$(team "$main_bin")" != "$(team "$app_dir/Contents/MacOS/kelpie-screen")" ]; then
+    echo "kelpie-screen in $app_dir is not signed with the app's identity ($(team "$main_bin")): macOS would not count its permissions as Kelpie's" >&2
+    exit 1
+  fi
+done
 echo "Bundles: $bundle_dir"
