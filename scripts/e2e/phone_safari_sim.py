@@ -119,9 +119,23 @@ class Page:
         raise TimeoutError(f"{'still there' if gone else 'never shown'}: {sel}")
 
     def click(self, sel):
+        # safaridriver's element click on iOS lands as a press that selects the button's text (the loupe shows); the page's own
+        # handlers are what is tested, so the element is clicked from the page.
+        if not self.js("const e = document.querySelector(arguments[0]); if (!e) return false; e.scrollIntoView({block: 'center'}); e.click(); return true;", sel):
+            raise RuntimeError(f"nothing to click: {sel}")
+
+    def tap(self, sel):
+        """A finger's tap (W3C touch actions): what a passkey needs, since Safari asks for one only on a person's gesture."""
+        from selenium.webdriver.common.actions import interaction
+        from selenium.webdriver.common.actions.action_builder import ActionBuilder
+        from selenium.webdriver.common.actions.pointer_input import PointerInput
         from selenium.webdriver.common.by import By
 
-        self.d.find_element(By.CSS_SELECTOR, sel).click()
+        el = self.d.find_element(By.CSS_SELECTOR, sel)
+        self.js("arguments[0].scrollIntoView({block: 'center'})", el)
+        a = ActionBuilder(self.d, mouse=PointerInput(interaction.POINTER_TOUCH, "finger"))
+        a.pointer_action.move_to(el).pointer_down().pause(0.05).pointer_up()
+        a.perform()
 
     def fill(self, sel, text):
         from selenium.webdriver.common.by import By
@@ -183,7 +197,7 @@ def pair(d, ph, port):
     t = threading.Thread(target=faces, daemon=True)
     t.start()
     try:
-        ph.click("[data-lock-go]")
+        ph.tap("[data-lock-go]")
         time.sleep(3)
         ph.shot("passkey-sheet")
         ph.wait("[data-lock-screen]", 60, gone=True)
