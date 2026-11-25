@@ -4,7 +4,7 @@ import type { RelayStatus } from "../components/settings/mobile-relay-settings";
 import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import {
-  alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
+  alreadyRemoved, approvalChoices, macPermissionRows, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
   OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, permissionLabel, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, turnUsageLine, screenPolicyLine, screenRemoteShown, screenUsageLine,
   telegramChoice, turnOnAccess, withConnection, withNewerConnections, type AccessCalls, type ConnectionNews, type MobileRoute, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
@@ -808,5 +808,13 @@ describe("one phone paired several ways", () => {
     expect(withNewerConnections(reply, news, 5), "nothing heard since the read started").toBe(reply);
     const same = new Map<string, ConnectionNews>([["a", { route: "tailscale", since: 200, seq: 9 }]]);
     expect(withNewerConnections(reply, same, 0)[0].connection, "the same way keeps the daemon's since").toEqual({ route: "tailscale", since: 5 });
+  });
+});
+describe("a Mac's permissions for the screen", () => {
+  it("lists Screen Recording, then Accessibility, each with what it lets a phone do and whether Kelpie has it", () => {
+    const rows = macPermissionRows({ screen: true, accessibility: false });
+    expect(rows.map((r) => [r.id, r.allowed])).toEqual([["screen", true], ["accessibility", false]]);
+    expect(rows[0].label).toBe("Screen Recording");
+    expect(rows[1].what, "without it, the screen is still seen").toContain("only sees the screen");
   });
 });

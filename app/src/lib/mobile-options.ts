@@ -349,6 +349,18 @@ export function screenUsageLine(sc: MobileStatus["screen"]): string | null {
   return sc ? t("{used} MB of {total} MB this month", { used: Math.round(sc.relay_ws_used_mb), total: Math.round(sc.relay_ws_month_mb) }) : null;
 }
 
+/** What a Mac allows Kelpie for the screen (the app's `screen_permissions`; null on any other computer). */
+export type MacPermissions = { screen: boolean; accessibility: boolean };
+export type MacPermissionId = keyof MacPermissions;
+
+/** The Mac's two permissions as Settings → Mobile lists them: what each lets a phone do, and whether Kelpie has it. */
+export function macPermissionRows(p: MacPermissions): { id: MacPermissionId; label: string; what: string; allowed: boolean }[] {
+  return [
+    { id: "screen", label: t("Screen Recording"), what: t("Lets a phone see this Mac's screen."), allowed: p.screen },
+    { id: "accessibility", label: t("Accessibility"), what: t("Lets a phone click and type on this Mac. Without it, a phone only sees the screen."), allowed: p.accessibility },
+  ];
+}
+
 /** What a paired device may be given in its list. Control for one on the hosted app only while the screen without Tailscale is on, and then it means the
  *  screen only: the daemon refuses it otherwise, whatever its lock. */
 export function permissionChoices(d: MobileDevice, api: number, screenRemote = false): MobilePermission[] {
