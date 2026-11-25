@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -103,6 +104,15 @@ class Page:
             simctl("io", self.udid, "screenshot", path)
         except Exception as e:  # noqa: BLE001
             print(f"  (no picture {name}: {e})", flush=True)
+
+    def tap_screen(self, fx, fy):
+        """A click on the simulator's screen at a fraction of its size, for the system's sheets (needs Accessibility for this shell)."""
+        if not getattr(self, "tapper", None):
+            self.tapper = os.path.join(tempfile.mkdtemp(prefix="sim-tap-"), "sim_tap")
+            subprocess.run(["xcrun", "swiftc", "-O", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_tap.swift"), "-o", self.tapper],
+                           check=True, capture_output=True, timeout=300)
+        r = subprocess.run([self.tapper, str(fx), str(fy)], capture_output=True, text=True, timeout=30)
+        print(f"  tap {fx},{fy}: {r.stdout.strip()} {r.stderr.strip()}", flush=True)
 
     def js(self, script, *args):
         return self.d.execute_script(script, *args)
@@ -205,6 +215,10 @@ def pair(d, ph, port):
         ph.click("[data-lock-go]")
         time.sleep(3)
         ph.shot("passkey-sheet")
+        # Safari's own "Save a passkey?" sheet: its Add Passkey button sits at the bottom of the screen, outside the page.
+        ph.tap_screen(0.5, 0.93)
+        time.sleep(2)
+        ph.shot("after-add")
         try:
             ph.wait("[data-lock-screen]", 60, gone=True)
         except TimeoutError:
