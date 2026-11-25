@@ -37,7 +37,13 @@ pub struct Observed {
 
 impl Observed {
     pub fn normal() -> Observed {
-        Observed { desktop: Desktop::Default, session_locked: false, foreground_elevated: false, target_elevated: false, target: TargetSeen::Shown }
+        Observed {
+            desktop: Desktop::Default,
+            session_locked: false,
+            foreground_elevated: false,
+            target_elevated: false,
+            target: TargetSeen::Shown,
+        }
     }
 }
 
@@ -76,7 +82,10 @@ impl State {
 
     /// Whether the picture can still change: frames are expected (and the phone should not count their absence as a freeze).
     pub fn picture_moves(self) -> bool {
-        matches!(self, State::Live | State::Elevated | State::Covered | State::CoveredByDialog)
+        matches!(
+            self,
+            State::Live | State::Elevated | State::Covered | State::CoveredByDialog
+        )
     }
 
     /// Whether the stream ends rather than waits.
@@ -119,10 +128,22 @@ pub struct InputPolicy {
 /// that window and be dropped. An elevated window target takes nothing. A minimized window is restored by a click (the native side does it).
 pub fn input_policy(state: State, window_target: bool) -> InputPolicy {
     match state {
-        State::Live | State::Covered | State::CoveredByDialog => InputPolicy { mouse: true, keys: true },
-        State::Elevated if !window_target => InputPolicy { mouse: true, keys: false },
-        State::Minimized => InputPolicy { mouse: true, keys: false },
-        _ => InputPolicy { mouse: false, keys: false },
+        State::Live | State::Covered | State::CoveredByDialog => InputPolicy {
+            mouse: true,
+            keys: true,
+        },
+        State::Elevated if !window_target => InputPolicy {
+            mouse: true,
+            keys: false,
+        },
+        State::Minimized => InputPolicy {
+            mouse: true,
+            keys: false,
+        },
+        _ => InputPolicy {
+            mouse: false,
+            keys: false,
+        },
     }
 }
 
@@ -137,7 +158,10 @@ pub struct Tracker {
 
 impl Default for Tracker {
     fn default() -> Tracker {
-        Tracker { told: State::Live, candidate: None }
+        Tracker {
+            told: State::Live,
+            candidate: None,
+        }
     }
 }
 
@@ -193,31 +217,106 @@ mod tests {
     #[test]
     fn the_worst_thing_seen_is_the_state() {
         assert_eq!(decide(&Observed::normal(), true), State::Live);
-        assert_eq!(decide(&with(|o| o.session_locked = true), false), State::Locked);
-        assert_eq!(decide(&with(|o| o.desktop = Desktop::Secure), false), State::SecureDesktop);
-        assert_eq!(decide(&with(|o| { o.desktop = Desktop::Secure; o.session_locked = true }), false), State::Locked, "locked says more than secure desktop");
-        assert_eq!(decide(&with(|o| { o.target = TargetSeen::Closed; o.session_locked = true }), true), State::Closed, "a closed window ends the stream whatever else");
-        assert_eq!(decide(&with(|o| o.target = TargetSeen::Minimized), true), State::Minimized);
-        assert_eq!(decide(&with(|o| o.target = TargetSeen::Minimized), false), State::Live, "a monitor is never minimized");
-        assert_eq!(decide(&with(|o| o.foreground_elevated = true), false), State::Elevated);
-        assert_eq!(decide(&with(|o| o.foreground_elevated = true), true), State::Live, "a window target cares about itself, not what is in front");
-        assert_eq!(decide(&with(|o| o.target_elevated = true), true), State::Elevated);
-        assert_eq!(decide(&with(|o| { o.target_elevated = true; o.desktop = Desktop::Secure }), true), State::SecureDesktop);
+        assert_eq!(
+            decide(&with(|o| o.session_locked = true), false),
+            State::Locked
+        );
+        assert_eq!(
+            decide(&with(|o| o.desktop = Desktop::Secure), false),
+            State::SecureDesktop
+        );
+        assert_eq!(
+            decide(
+                &with(|o| {
+                    o.desktop = Desktop::Secure;
+                    o.session_locked = true
+                }),
+                false
+            ),
+            State::Locked,
+            "locked says more than secure desktop"
+        );
+        assert_eq!(
+            decide(
+                &with(|o| {
+                    o.target = TargetSeen::Closed;
+                    o.session_locked = true
+                }),
+                true
+            ),
+            State::Closed,
+            "a closed window ends the stream whatever else"
+        );
+        assert_eq!(
+            decide(&with(|o| o.target = TargetSeen::Minimized), true),
+            State::Minimized
+        );
+        assert_eq!(
+            decide(&with(|o| o.target = TargetSeen::Minimized), false),
+            State::Live,
+            "a monitor is never minimized"
+        );
+        assert_eq!(
+            decide(&with(|o| o.foreground_elevated = true), false),
+            State::Elevated
+        );
+        assert_eq!(
+            decide(&with(|o| o.foreground_elevated = true), true),
+            State::Live,
+            "a window target cares about itself, not what is in front"
+        );
+        assert_eq!(
+            decide(&with(|o| o.target_elevated = true), true),
+            State::Elevated
+        );
+        assert_eq!(
+            decide(
+                &with(|o| {
+                    o.target_elevated = true;
+                    o.desktop = Desktop::Secure
+                }),
+                true
+            ),
+            State::SecureDesktop
+        );
     }
 
     #[test]
     fn input_goes_only_where_it_can_land() {
-        let all = InputPolicy { mouse: true, keys: true };
-        let none = InputPolicy { mouse: false, keys: false };
+        let all = InputPolicy {
+            mouse: true,
+            keys: true,
+        };
+        let none = InputPolicy {
+            mouse: false,
+            keys: false,
+        };
         assert_eq!(input_policy(State::Live, true), all);
         for s in [State::Locked, State::SecureDesktop, State::Closed] {
             assert_eq!(input_policy(s, true), none, "{s:?}");
             assert_eq!(input_policy(s, false), none, "{s:?}");
         }
-        assert_eq!(input_policy(State::Elevated, false), InputPolicy { mouse: true, keys: false }, "a click can still get away from it");
+        assert_eq!(
+            input_policy(State::Elevated, false),
+            InputPolicy {
+                mouse: true,
+                keys: false
+            },
+            "a click can still get away from it"
+        );
         assert_eq!(input_policy(State::Elevated, true), none);
-        assert_eq!(input_policy(State::Minimized, true), InputPolicy { mouse: true, keys: false });
-        assert!(State::Live.picture_moves() && !State::Locked.picture_moves() && !State::Minimized.picture_moves());
+        assert_eq!(
+            input_policy(State::Minimized, true),
+            InputPolicy {
+                mouse: true,
+                keys: false
+            }
+        );
+        assert!(
+            State::Live.picture_moves()
+                && !State::Locked.picture_moves()
+                && !State::Minimized.picture_moves()
+        );
         assert!(State::Closed.ends() && !State::Locked.ends());
     }
 
@@ -228,11 +327,23 @@ mod tests {
         assert_eq!(t.look(&elevated, false), None, "one look is not enough");
         assert_eq!(t.look(&Observed::normal(), false), None, "and it went away");
         assert_eq!(t.look(&elevated, false), None);
-        assert_eq!(t.look(&elevated, false), Some(State::Elevated), "two looks in a row");
+        assert_eq!(
+            t.look(&elevated, false),
+            Some(State::Elevated),
+            "two looks in a row"
+        );
         assert_eq!(t.look(&elevated, false), None, "told once");
-        assert_eq!(t.look(&with(|o| o.session_locked = true), false), Some(State::Locked), "at once");
+        assert_eq!(
+            t.look(&with(|o| o.session_locked = true), false),
+            Some(State::Locked),
+            "at once"
+        );
         assert_eq!(t.look(&Observed::normal(), false), None);
-        assert_eq!(t.look(&Observed::normal(), false), Some(State::Live), "back, after two looks");
+        assert_eq!(
+            t.look(&Observed::normal(), false),
+            Some(State::Live),
+            "back, after two looks"
+        );
         assert_eq!(t.state(), State::Live);
     }
 
@@ -250,8 +361,19 @@ mod tests {
 
     #[test]
     fn states_have_the_names_the_phone_knows() {
-        assert_eq!(serde_json::to_value(State::SecureDesktop).unwrap(), "secure_desktop");
-        for s in [State::Live, State::Locked, State::SecureDesktop, State::Closed, State::Minimized, State::Elevated, State::Covered] {
+        assert_eq!(
+            serde_json::to_value(State::SecureDesktop).unwrap(),
+            "secure_desktop"
+        );
+        for s in [
+            State::Live,
+            State::Locked,
+            State::SecureDesktop,
+            State::Closed,
+            State::Minimized,
+            State::Elevated,
+            State::Covered,
+        ] {
             assert_eq!(serde_json::to_value(s).unwrap(), s.name());
         }
     }

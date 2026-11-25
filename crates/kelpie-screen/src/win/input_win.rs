@@ -16,17 +16,24 @@ use serde_json::Value;
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
-    MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindow, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT, GUITHREADINFO, GW_OWNER, SW_RESTORE,
+    BringWindowToTop, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindow,
+    GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, WindowFromPoint, GA_ROOT,
+    GUITHREADINFO, GW_OWNER, SW_RESTORE,
 };
 
 use super::targets_win::{minimized, window_rect};
 use crate::geom::{self, Rect};
-use crate::input::{drag_step, key_events, keys_reach, press_reach, text_events, DragStep, KeyEvent, Reach, WindowFacts};
+use crate::input::{
+    drag_step, key_events, keys_reach, press_reach, text_events, DragStep, KeyEvent, Reach,
+    WindowFacts,
+};
 use crate::states::InputPolicy;
 
 /// Where input goes now.
@@ -57,18 +64,52 @@ pub enum Outcome {
 }
 
 fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
-    INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: data as _, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: data as _,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 fn key(e: KeyEvent) -> INPUT {
     let (vk, scan, mut flags) = match e {
-        KeyEvent::Vk { vk, extended, .. } => (vk, 0, if extended { KEYEVENTF_EXTENDEDKEY } else { KEYBD_EVENT_FLAGS(0) }),
+        KeyEvent::Vk { vk, extended, .. } => (
+            vk,
+            0,
+            if extended {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                KEYBD_EVENT_FLAGS(0)
+            },
+        ),
         KeyEvent::Unicode { unit, .. } => (0, unit, KEYEVENTF_UNICODE),
     };
-    if matches!(e, KeyEvent::Vk { up: true, .. } | KeyEvent::Unicode { up: true, .. }) {
+    if matches!(
+        e,
+        KeyEvent::Vk { up: true, .. } | KeyEvent::Unicode { up: true, .. }
+    ) {
         flags |= KEYEVENTF_KEYUP;
     }
-    INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } } }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 fn send(inputs: &[INPUT]) -> bool {
@@ -153,7 +194,10 @@ fn keys_now(h: HWND) -> Reach {
     if in_front != Reach::Yes {
         return in_front;
     }
-    let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
     let thread = unsafe { GetWindowThreadProcessId(fg, None) };
     if thread == 0 || unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
         return Reach::Other;
@@ -207,7 +251,10 @@ fn lands_on(h: HWND, x: i32, y: i32) -> Reach {
 }
 
 fn at(op: &Value) -> (f64, f64) {
-    (op["x"].as_f64().unwrap_or(0.0), op["y"].as_f64().unwrap_or(0.0))
+    (
+        op["x"].as_f64().unwrap_or(0.0),
+        op["y"].as_f64().unwrap_or(0.0),
+    )
 }
 
 fn buttons(b: &str) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
@@ -219,7 +266,12 @@ fn buttons(b: &str) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
 }
 
 /// Does the checked ops (`input::checked_ops`). `pressed` keeps the button held by a `down` not yet released, so that the stream's end can let go.
-pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Option<Held>) -> Outcome {
+pub fn run(
+    ops: &[Value],
+    g: &Geometry,
+    policy: InputPolicy,
+    pressed: &mut Option<Held>,
+) -> Outcome {
     if !policy.mouse && !policy.keys {
         // Nothing allowed now: a held button is still let go.
         if ops.iter().any(|op| op["k"] == "release" || op["k"] == "up") {
@@ -246,8 +298,14 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
                     return refusal(r);
                 }
             }
-            let mods: Vec<&str> = op["mods"].as_array().map(|m| m.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-            let events: Vec<INPUT> = key_events(op["key"].as_str().unwrap_or_default(), &mods).into_iter().map(key).collect();
+            let mods: Vec<&str> = op["mods"]
+                .as_array()
+                .map(|m| m.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let events: Vec<INPUT> = key_events(op["key"].as_str().unwrap_or_default(), &mods)
+                .into_iter()
+                .map(key)
+                .collect();
             // Looked at again right before the call: the focus may have moved while the events were made.
             if let Some(h) = g.window {
                 let r = keys_now(h);
@@ -294,7 +352,8 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
                     DragStep::ReleaseAtLastSafe => {
                         if let Some(held) = pressed.take() {
                             let (_, up) = buttons(held.button);
-                            if !send(&[mouse(held.last.0, held.last.1, 0, abs), mouse(0, 0, 0, up)]) {
+                            if !send(&[mouse(held.last.0, held.last.1, 0, abs), mouse(0, 0, 0, up)])
+                            {
                                 return Outcome::Blocked;
                             }
                         }
@@ -328,7 +387,10 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
         match kind {
             "down" => {
                 events.push(mouse(0, 0, 0, down));
-                *pressed = Some(Held { button: b, last: (nx, ny) });
+                *pressed = Some(Held {
+                    button: b,
+                    last: (nx, ny),
+                });
             }
             "move" => {
                 if let Some(held) = pressed.as_mut() {
@@ -347,7 +409,10 @@ pub fn run(ops: &[Value], g: &Geometry, policy: InputPolicy, pressed: &mut Optio
             }
             "wheel" => {
                 // The phone's dy is how far the page should move down: the wheel turned towards the person, which Windows counts as negative.
-                let (dx, dy) = (op["dx"].as_f64().unwrap_or(0.0) as i32, op["dy"].as_f64().unwrap_or(0.0) as i32);
+                let (dx, dy) = (
+                    op["dx"].as_f64().unwrap_or(0.0) as i32,
+                    op["dy"].as_f64().unwrap_or(0.0) as i32,
+                );
                 if dy != 0 {
                     events.push(mouse(0, 0, -dy, MOUSEEVENTF_WHEEL));
                 }

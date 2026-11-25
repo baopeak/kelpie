@@ -142,7 +142,11 @@ impl Reader<'_> {
 
     fn se(&mut self) -> R<i32> {
         let k = self.ue()?;
-        Ok(if k % 2 == 1 { (k / 2 + 1) as i32 } else { -((k / 2) as i32) })
+        Ok(if k % 2 == 1 {
+            (k / 2 + 1) as i32
+        } else {
+            -((k / 2) as i32)
+        })
     }
 }
 
@@ -183,7 +187,11 @@ impl Writer {
     }
 
     pub fn se(&mut self, v: i32) {
-        self.ue(if v > 0 { (v as u32) * 2 - 1 } else { v.unsigned_abs() * 2 });
+        self.ue(if v > 0 {
+            (v as u32) * 2 - 1
+        } else {
+            v.unsigned_abs() * 2
+        });
     }
 
     /// `rbsp_trailing_bits`: a one, then zeros to the byte.
@@ -282,7 +290,13 @@ fn walk(nal: &[u8]) -> R<(Sps, Vec<u8>)> {
         return Err(SpsError::NotSps);
     }
     let rbsp = unescape(&nal[1..]);
-    let mut c = Copier { r: Reader { data: &rbsp, pos: 0 }, w: Writer::default() };
+    let mut c = Copier {
+        r: Reader {
+            data: &rbsp,
+            pos: 0,
+        },
+        w: Writer::default(),
+    };
     let profile_idc = c.u(8)?;
     let constraints = c.u(8)?;
     let level_idc = c.u(8)?;
@@ -354,7 +368,8 @@ fn walk(nal: &[u8]) -> R<(Sps, Vec<u8>)> {
         _ => (2, 2 - frame_mbs_only),
     };
     let width = (width_mbs * 16).saturating_sub(unit_x * (crop[0] + crop[1]));
-    let height = ((2 - frame_mbs_only) * height_units * 16).saturating_sub(unit_y * (crop[2] + crop[3]));
+    let height =
+        ((2 - frame_mbs_only) * height_units * 16).saturating_sub(unit_y * (crop[2] + crop[3]));
 
     // The VUI: copied up to `bitstream_restriction`, which is then written as it should be.
     let vui = c.r.bit()? == 1;
@@ -451,7 +466,10 @@ pub fn rewrite_sps(nal: &[u8]) -> R<Vec<u8>> {
 
 /// The WebCodecs codec string of an SPS: `avc1.PPCCLL`.
 pub fn codec_string(sps: &Sps) -> String {
-    format!("avc1.{:02x}{:02x}{:02x}", sps.profile_idc, sps.constraints, sps.level_idc)
+    format!(
+        "avc1.{:02x}{:02x}{:02x}",
+        sps.profile_idc, sps.constraints, sps.level_idc
+    )
 }
 
 const START: [u8; 4] = [0, 0, 0, 1];
@@ -666,47 +684,118 @@ mod tests {
     }
 
     fn base() -> Make {
-        Make { profile: 66, refs: 1, width_mbs: 120, height_mbs: 68, crop_bottom: 4, vui: None, scaling: false }
+        Make {
+            profile: 66,
+            refs: 1,
+            width_mbs: 120,
+            height_mbs: 68,
+            crop_bottom: 4,
+            vui: None,
+            scaling: false,
+        }
     }
 
     #[test]
     fn an_sps_without_vui_gets_one_that_says_no_reordering_and_nothing_else_changes() {
         let nal = make(&base());
         let before = parse_sps(&nal).unwrap();
-        assert_eq!((before.width, before.height, before.vui, before.max_num_reorder_frames), (1920, 1080, false, None));
+        assert_eq!(
+            (
+                before.width,
+                before.height,
+                before.vui,
+                before.max_num_reorder_frames
+            ),
+            (1920, 1080, false, None)
+        );
         let out = rewrite_sps(&nal).unwrap();
         let after = parse_sps(&out).unwrap();
-        assert_eq!((after.max_num_reorder_frames, after.max_dec_frame_buffering, after.vui), (Some(0), Some(1), true));
-        assert_eq!((after.profile_idc, after.level_idc, after.width, after.height, after.max_num_ref_frames), (66, 40, 1920, 1080, 1));
-        assert_eq!(rewrite_sps(&out).unwrap(), out, "rewriting again changes nothing");
+        assert_eq!(
+            (
+                after.max_num_reorder_frames,
+                after.max_dec_frame_buffering,
+                after.vui
+            ),
+            (Some(0), Some(1), true)
+        );
+        assert_eq!(
+            (
+                after.profile_idc,
+                after.level_idc,
+                after.width,
+                after.height,
+                after.max_num_ref_frames
+            ),
+            (66, 40, 1920, 1080, 1)
+        );
+        assert_eq!(
+            rewrite_sps(&out).unwrap(),
+            out,
+            "rewriting again changes nothing"
+        );
         assert_eq!(codec_string(&after), "avc1.420028");
     }
 
     #[test]
     fn an_sps_with_timing_hrd_and_reordering_keeps_them_and_loses_the_reordering() {
         for restriction in [None, Some((2, 4))] {
-            let nal = make(&Make { profile: 100, refs: 2, vui: Some(Vui { timing: true, hrd: true, restriction }), scaling: true, ..base() });
+            let nal = make(&Make {
+                profile: 100,
+                refs: 2,
+                vui: Some(Vui {
+                    timing: true,
+                    hrd: true,
+                    restriction,
+                }),
+                scaling: true,
+                ..base()
+            });
             let before = parse_sps(&nal).unwrap();
             assert_eq!(before.max_num_reorder_frames, restriction.map(|r| r.0));
             let out = rewrite_sps(&nal).unwrap();
             let after = parse_sps(&out).unwrap();
-            assert_eq!((after.max_num_reorder_frames, after.max_dec_frame_buffering), (Some(0), Some(2)));
-            assert_eq!((after.profile_idc, after.width, after.height, after.chroma_format_idc), (100, 1920, 1080, 1));
+            assert_eq!(
+                (after.max_num_reorder_frames, after.max_dec_frame_buffering),
+                (Some(0), Some(2))
+            );
+            assert_eq!(
+                (
+                    after.profile_idc,
+                    after.width,
+                    after.height,
+                    after.chroma_format_idc
+                ),
+                (100, 1920, 1080, 1)
+            );
             // Everything before the restriction is the same bits: the rewritten SPS starts with what the original said up to it.
             let rbsp_in = unescape(&nal[1..]);
             let rbsp_out = unescape(&out[1..]);
-            let same = rbsp_in.iter().zip(&rbsp_out).take_while(|(a, b)| a == b).count();
+            let same = rbsp_in
+                .iter()
+                .zip(&rbsp_out)
+                .take_while(|(a, b)| a == b)
+                .count();
             assert!(same >= rbsp_in.len() - 6, "{same} of {}", rbsp_in.len());
         }
     }
 
     #[test]
     fn emulation_prevention_round_trips() {
-        let cases: [&[u8]; 6] = [&[0, 0, 0], &[0, 0, 1, 0, 0, 2], &[0, 0, 3, 0, 0, 3], &[1, 0, 0, 4, 0, 0], &[0, 0, 0, 0, 0, 0, 0], &[9, 8, 7]];
+        let cases: [&[u8]; 6] = [
+            &[0, 0, 0],
+            &[0, 0, 1, 0, 0, 2],
+            &[0, 0, 3, 0, 0, 3],
+            &[1, 0, 0, 4, 0, 0],
+            &[0, 0, 0, 0, 0, 0, 0],
+            &[9, 8, 7],
+        ];
         for raw in cases {
             let e = escape(raw);
             assert_eq!(unescape(&e), raw, "{raw:?}");
-            assert!(!e.windows(3).any(|w| w[0] == 0 && w[1] == 0 && w[2] <= 2), "{e:?}");
+            assert!(
+                !e.windows(3).any(|w| w[0] == 0 && w[1] == 0 && w[2] <= 2),
+                "{e:?}"
+            );
         }
         assert_eq!(escape(&[0, 0, 1]), [0, 0, 3, 1]);
     }
@@ -722,7 +811,10 @@ mod tests {
             w.se(v);
         }
         let bytes = w.trailing();
-        let mut r = Reader { data: &bytes, pos: 0 };
+        let mut r = Reader {
+            data: &bytes,
+            pos: 0,
+        };
         for v in values {
             assert_eq!(r.ue().unwrap(), v);
         }
@@ -735,7 +827,10 @@ mod tests {
     fn garbage_is_refused_not_rewritten() {
         assert_eq!(rewrite_sps(&[0x68, 1, 2, 3]), Err(SpsError::NotSps));
         assert_eq!(rewrite_sps(&[0x67, 66]), Err(SpsError::Short));
-        assert!(rewrite_sps(&[0x67, 66, 0, 40, 0, 0, 0, 0, 0]).is_err(), "an Exp-Golomb code that never ends");
+        assert!(
+            rewrite_sps(&[0x67, 66, 0, 40, 0, 0, 0, 0, 0]).is_err(),
+            "an Exp-Golomb code that never ends"
+        );
         let mut nal = make(&base());
         nal.truncate(8);
         assert!(rewrite_sps(&nal).is_err());
@@ -744,7 +839,11 @@ mod tests {
     fn annex_b(nals: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();
         for (i, n) in nals.iter().enumerate() {
-            out.extend_from_slice(if i % 2 == 0 { &[0, 0, 0, 1][..] } else { &[0, 0, 1][..] });
+            out.extend_from_slice(if i % 2 == 0 {
+                &[0, 0, 0, 1][..]
+            } else {
+                &[0, 0, 1][..]
+            });
             out.extend_from_slice(n);
         }
         out
@@ -754,7 +853,10 @@ mod tests {
     fn nal_units_split_on_both_start_codes() {
         let au = annex_b(&[&[0x09, 0x10], &[0x67, 1, 2], &[0x68, 3], &[0x65, 4, 5, 0]]);
         let nals = nal_units(&au);
-        assert_eq!(nals.iter().map(|n| nal_type(n)).collect::<Vec<_>>(), [NAL_AUD, NAL_SPS, NAL_PPS, NAL_IDR]);
+        assert_eq!(
+            nals.iter().map(|n| nal_type(n)).collect::<Vec<_>>(),
+            [NAL_AUD, NAL_SPS, NAL_PPS, NAL_IDR]
+        );
         assert_eq!(nals[3], &[0x65, 4, 5], "trailing zeros are not the NAL's");
         assert!(is_keyframe(&au));
         assert!(!is_keyframe(&annex_b(&[&[0x41, 1]])));
@@ -767,19 +869,38 @@ mod tests {
         let idr: &[u8] = &[0x65, 0x88, 0x84];
         let p_frame: &[u8] = &[0x41, 0x9a, 0x02];
         let mut params = Params::default();
-        let first = params.fix(&annex_b(&[&[0x09, 0xf0], &sps, pps, idr])).unwrap();
+        let first = params
+            .fix(&annex_b(&[&[0x09, 0xf0], &sps, pps, idr]))
+            .unwrap();
         let nals = nal_units(&first);
-        assert_eq!(nals.iter().map(|n| nal_type(n)).collect::<Vec<_>>(), [NAL_SPS, NAL_PPS, NAL_IDR], "the delimiter is dropped");
+        assert_eq!(
+            nals.iter().map(|n| nal_type(n)).collect::<Vec<_>>(),
+            [NAL_SPS, NAL_PPS, NAL_IDR],
+            "the delimiter is dropped"
+        );
         assert_eq!(parse_sps(nals[0]).unwrap().max_num_reorder_frames, Some(0));
-        assert_eq!(params.fix(&annex_b(&[p_frame])).unwrap(), annex_b(&[p_frame]), "a P-frame as it was");
+        assert_eq!(
+            params.fix(&annex_b(&[p_frame])).unwrap(),
+            annex_b(&[p_frame]),
+            "a P-frame as it was"
+        );
         // A keyframe without parameter sets gets them in front.
         let later = params.fix(&annex_b(&[idr])).unwrap();
-        assert_eq!(nal_units(&later).iter().map(|n| nal_type(n)).collect::<Vec<_>>(), [NAL_SPS, NAL_PPS, NAL_IDR]);
+        assert_eq!(
+            nal_units(&later)
+                .iter()
+                .map(|n| nal_type(n))
+                .collect::<Vec<_>>(),
+            [NAL_SPS, NAL_PPS, NAL_IDR]
+        );
         // With no parameter set ever seen, a keyframe cannot be sent.
         assert!(Params::default().fix(&annex_b(&[idr])).is_none());
         let mut seeded = Params::default();
         seeded.seed(&annex_b(&[&sps, pps]));
-        assert!(seeded.fix(&annex_b(&[idr])).is_some(), "the encoder's sequence header is enough");
+        assert!(
+            seeded.fix(&annex_b(&[idr])).is_some(),
+            "the encoder's sequence header is enough"
+        );
         assert_eq!(codec_string(seeded.sps.as_ref().unwrap()), "avc1.420028");
     }
 }

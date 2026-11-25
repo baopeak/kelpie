@@ -2,10 +2,20 @@
 //! session is locked, and whether the window in front (or the target) runs at a higher integrity level than this helper.
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
-use windows::Win32::Security::{GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY};
-use windows::Win32::System::RemoteDesktop::{WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW, WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK};
-use windows::Win32::System::StationsAndDesktops::{CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, UOI_NAME};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::Security::{
+    GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
+use windows::Win32::System::RemoteDesktop::{
+    WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
+    WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK,
+};
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_CONTROL_FLAGS,
+    DESKTOP_READOBJECTS, UOI_NAME,
+};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use super::from_wide;
@@ -15,10 +25,20 @@ use crate::states::{Desktop, Observed, TargetSeen};
 fn input_desktop() -> Desktop {
     unsafe {
         // The secure desktop cannot be opened from the user's session at all; the user's own one is called "Default".
-        let Ok(desk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) else { return Desktop::Secure };
+        let Ok(desk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
+        else {
+            return Desktop::Secure;
+        };
         let mut name = [0u16; 64];
         let mut needed = 0u32;
-        let ok = GetUserObjectInformationW(HANDLE(desk.0), UOI_NAME, Some(name.as_mut_ptr() as *mut _), (name.len() * 2) as u32, Some(&mut needed)).is_ok();
+        let ok = GetUserObjectInformationW(
+            HANDLE(desk.0),
+            UOI_NAME,
+            Some(name.as_mut_ptr() as *mut _),
+            (name.len() * 2) as u32,
+            Some(&mut needed),
+        )
+        .is_ok();
         let _ = CloseDesktop(desk);
         if ok && from_wide(&name).eq_ignore_ascii_case("Default") {
             Desktop::Default
@@ -32,11 +52,21 @@ fn session_locked() -> bool {
     unsafe {
         let mut buf = windows::core::PWSTR::null();
         let mut len = 0u32;
-        if WTSQuerySessionInformationW(Some(WTS_CURRENT_SERVER_HANDLE), WTS_CURRENT_SESSION, WTSSessionInfoEx, &mut buf, &mut len).is_err() || buf.is_null() {
+        if WTSQuerySessionInformationW(
+            Some(WTS_CURRENT_SERVER_HANDLE),
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buf,
+            &mut len,
+        )
+        .is_err()
+            || buf.is_null()
+        {
             return false;
         }
         let info = &*(buf.0 as *const WTSINFOEXW);
-        let locked = info.Level == 1 && info.Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK as i32;
+        let locked = info.Level == 1
+            && info.Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK as i32;
         WTSFreeMemory(buf.0 as *mut _);
         locked
     }
@@ -51,13 +81,22 @@ fn integrity(process: HANDLE) -> Option<u32> {
         // Aligned for `TOKEN_MANDATORY_LABEL` (pointer-sized fields): a byte buffer would not be.
         let mut buf = [0u64; 8];
         let mut len = 0u32;
-        let got = GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr() as *mut _), std::mem::size_of_val(&buf) as u32, &mut len);
+        let got = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            std::mem::size_of_val(&buf) as u32,
+            &mut len,
+        );
         let _ = CloseHandle(token);
         got.ok()?;
         let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
         let sid = label.Label.Sid;
         let count = *windows::Win32::Security::GetSidSubAuthorityCount(sid);
-        Some(*windows::Win32::Security::GetSidSubAuthority(sid, u32::from(count.saturating_sub(1))))
+        Some(*windows::Win32::Security::GetSidSubAuthority(
+            sid,
+            u32::from(count.saturating_sub(1)),
+        ))
     }
 }
 
@@ -71,7 +110,9 @@ fn elevated(h: HWND, mine: u32) -> bool {
     }
     let pid = process_of(h);
     unsafe {
-        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return true };
+        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return true;
+        };
         let level = integrity(p);
         let _ = CloseHandle(p);
         level.is_none_or(|l| l > mine)
@@ -84,7 +125,9 @@ pub struct Looker {
 
 impl Looker {
     pub fn new() -> Looker {
-        Looker { mine: own_integrity() }
+        Looker {
+            mine: own_integrity(),
+        }
     }
 
     /// `window`: the target window and its process, for a window target.
@@ -96,9 +139,22 @@ impl Looker {
         let (target, target_elevated) = match window {
             None => (TargetSeen::Shown, false),
             Some((h, pid)) if !exists(h, pid) => (TargetSeen::Closed, false),
-            Some((h, _)) => (if minimized(h) { TargetSeen::Minimized } else { TargetSeen::Shown }, elevated(h, self.mine)),
+            Some((h, _)) => (
+                if minimized(h) {
+                    TargetSeen::Minimized
+                } else {
+                    TargetSeen::Shown
+                },
+                elevated(h, self.mine),
+            ),
         };
-        Observed { desktop, session_locked, foreground_elevated, target_elevated, target }
+        Observed {
+            desktop,
+            session_locked,
+            foreground_elevated,
+            target_elevated,
+            target,
+        }
     }
 }
 

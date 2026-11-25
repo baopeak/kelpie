@@ -41,7 +41,9 @@ impl Pacer {
         if self.in_encoder > 0 && !encoder_asks {
             return None;
         }
-        let Some(last) = self.last_start else { return Some(0) };
+        let Some(last) = self.last_start else {
+            return Some(0);
+        };
         let next = last as f64 + interval_ms.max(MIN_GAP_MS);
         Some((next - now as f64).max(0.0).ceil() as u64)
     }
@@ -112,7 +114,8 @@ pub struct ReencodeGate {
 
 impl ReencodeGate {
     pub fn ready(&self, now: u64) -> bool {
-        self.last.is_none_or(|l| now.saturating_sub(l) >= REENCODE_GAP_MS)
+        self.last
+            .is_none_or(|l| now.saturating_sub(l) >= REENCODE_GAP_MS)
     }
 
     pub fn used(&mut self, now: u64) {
@@ -248,7 +251,10 @@ impl EncoderRate {
 
 /// The pixels a list of rectangles covers (they may overlap: the sum, which only errs high).
 pub fn area(rects: &[crate::geom::Rect]) -> u64 {
-    rects.iter().map(|r| u64::from(r.w.max(0) as u32) * u64::from(r.h.max(0) as u32)).sum()
+    rects
+        .iter()
+        .map(|r| u64::from(r.w.max(0) as u32) * u64::from(r.h.max(0) as u32))
+        .sum()
 }
 
 #[cfg(test)]
@@ -258,14 +264,38 @@ mod tests {
     #[test]
     fn captures_follow_a_timer_from_the_last_start_with_one_frame_in_the_encoder_unless_it_asks() {
         let mut p = Pacer::default();
-        assert_eq!(p.due_in(100.0, 0, false), Some(0), "the first capture at once");
+        assert_eq!(
+            p.due_in(100.0, 0, false),
+            Some(0),
+            "the first capture at once"
+        );
         p.started(0);
-        assert_eq!(p.due_in(100.0, 10, false), None, "a frame in the encoder: nothing scheduled");
-        assert_eq!(p.due_in(100.0, 10, true), Some(90), "the encoder asks for more: the next at the rung's time");
+        assert_eq!(
+            p.due_in(100.0, 10, false),
+            None,
+            "a frame in the encoder: nothing scheduled"
+        );
+        assert_eq!(
+            p.due_in(100.0, 10, true),
+            Some(90),
+            "the encoder asks for more: the next at the rung's time"
+        );
         p.done();
-        assert_eq!(p.due_in(100.0, 40, false), Some(60), "anchored to the last start, not to when it finished");
-        assert_eq!(p.due_in(100.0, 150, false), Some(0), "late is now, never queued up");
-        assert_eq!(p.due_in(0.2, 0, false), Some(1), "never under CRD's 1 ms floor");
+        assert_eq!(
+            p.due_in(100.0, 40, false),
+            Some(60),
+            "anchored to the last start, not to when it finished"
+        );
+        assert_eq!(
+            p.due_in(100.0, 150, false),
+            Some(0),
+            "late is now, never queued up"
+        );
+        assert_eq!(
+            p.due_in(0.2, 0, false),
+            Some(1),
+            "never under CRD's 1 ms floor"
+        );
         p.started(10);
         p.clear();
         assert!(!p.pending(), "a new encoder holds nothing");
@@ -289,8 +319,15 @@ mod tests {
             }
             t += 5;
         }
-        assert!(out.len() >= 18, "about ten frames a second at 100 ms, not one: {}", out.len());
-        assert!(out.iter().all(|(into, back)| back - into <= 105), "each comes back one frame later, not after a second's give-up: {out:?}");
+        assert!(
+            out.len() >= 18,
+            "about ten frames a second at 100 ms, not one: {}",
+            out.len()
+        );
+        assert!(
+            out.iter().all(|(into, back)| back - into <= 105),
+            "each comes back one frame later, not after a second's give-up: {out:?}"
+        );
     }
 
     #[test]
@@ -299,7 +336,11 @@ mod tests {
         d.start(77, 1500);
         assert!(d.active());
         assert_eq!(d.left(76), None, "another frame");
-        assert_eq!(d.left(77), Some(1500), "out, dropped or given up on: the bitrate goes back");
+        assert_eq!(
+            d.left(77),
+            Some(1500),
+            "out, dropped or given up on: the bitrate goes back"
+        );
         assert!(!d.active());
         assert_eq!(d.left(77), None, "once");
         d.start(80, 900);
@@ -310,7 +351,8 @@ mod tests {
     const BIG: u64 = 100_000;
 
     #[test]
-    fn a_still_picture_is_topped_off_on_crd_s_timer_until_the_encoder_says_it_is_as_good_as_it_gets() {
+    fn a_still_picture_is_topped_off_on_crd_s_timer_until_the_encoder_says_it_is_as_good_as_it_gets(
+    ) {
         assert_eq!(TopOff::gap_ms(33.3), 37, "1.1 × 33.3 is more than 33.3 + 2");
         assert_eq!(TopOff::gap_ms(10.0), 12, "10 + 2 is more than 1.1 × 10");
         let mut t = TopOff::default();
@@ -347,7 +389,10 @@ mod tests {
         for i in 0..TOP_OFF_MAX - 2 {
             c.passed(130 + u64::from(i) * 40, 33.3, 5000, None);
         }
-        assert!(!c.active(), "the caret did not start the passes over: still bounded by the first count");
+        assert!(
+            !c.active(),
+            "the caret did not start the passes over: still bounded by the first count"
+        );
     }
 
     #[test]
@@ -376,7 +421,10 @@ mod tests {
     #[test]
     fn a_still_window_s_last_picture_is_encoded_again_at_most_once_a_second() {
         let mut g = ReencodeGate::default();
-        assert!(g.ready(0), "the first keyframe owed on a still window goes at once");
+        assert!(
+            g.ready(0),
+            "the first keyframe owed on a still window goes at once"
+        );
         g.used(0);
         // Every turn of the loop wants it again (a failure that persists): no more than once a second.
         let encodes = (4..=3000u64).step_by(4).filter(|t| {

@@ -23,7 +23,12 @@ impl Rect {
 
     /// From a Win32 `RECT`'s edges.
     pub fn from_edges(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
-        Rect { x: left, y: top, w: (right - left).max(0), h: (bottom - top).max(0) }
+        Rect {
+            x: left,
+            y: top,
+            w: (right - left).max(0),
+            h: (bottom - top).max(0),
+        }
     }
 
     pub fn right(self) -> i32 {
@@ -43,7 +48,12 @@ impl Rect {
     }
 
     pub fn intersect(self, o: Rect) -> Option<Rect> {
-        let r = Rect::from_edges(self.x.max(o.x), self.y.max(o.y), self.right().min(o.right()), self.bottom().min(o.bottom()));
+        let r = Rect::from_edges(
+            self.x.max(o.x),
+            self.y.max(o.y),
+            self.right().min(o.right()),
+            self.bottom().min(o.bottom()),
+        );
         (!r.is_empty()).then_some(r)
     }
 
@@ -54,12 +64,20 @@ impl Rect {
         if o.is_empty() {
             return self;
         }
-        Rect::from_edges(self.x.min(o.x), self.y.min(o.y), self.right().max(o.right()), self.bottom().max(o.bottom()))
+        Rect::from_edges(
+            self.x.min(o.x),
+            self.y.min(o.y),
+            self.right().max(o.right()),
+            self.bottom().max(o.bottom()),
+        )
     }
 
     /// The nearest point inside.
     pub fn clamp(self, x: i32, y: i32) -> (i32, i32) {
-        (x.clamp(self.x, (self.right() - 1).max(self.x)), y.clamp(self.y, (self.bottom() - 1).max(self.y)))
+        (
+            x.clamp(self.x, (self.right() - 1).max(self.x)),
+            y.clamp(self.y, (self.bottom() - 1).max(self.y)),
+        )
     }
 }
 
@@ -86,7 +104,9 @@ pub fn scale_percent(dpi: u32) -> u32 {
 
 /// The rectangle around every monitor (`SM_XVIRTUALSCREEN` … in a per-monitor aware process).
 pub fn virtual_desktop(monitors: &[Monitor]) -> Rect {
-    monitors.iter().fold(Rect::default(), |acc, m| acc.union(m.rect))
+    monitors
+        .iter()
+        .fold(Rect::default(), |acc, m| acc.union(m.rect))
 }
 
 /// The monitor a screen point is on, else the nearest one (a window partly off every monitor).
@@ -113,7 +133,13 @@ pub fn source_to_screen(sx: f64, sy: f64, src_w: u32, src_h: u32, target: Rect) 
 }
 
 /// A screen pixel → the source picture's pixel, for the cursor: None when it is outside the target.
-pub fn screen_to_source(x: i32, y: i32, target: Rect, src_w: u32, src_h: u32) -> Option<(i32, i32)> {
+pub fn screen_to_source(
+    x: i32,
+    y: i32,
+    target: Rect,
+    src_w: u32,
+    src_h: u32,
+) -> Option<(i32, i32)> {
     if !target.contains(x, y) || src_w == 0 || src_h == 0 {
         return None;
     }
@@ -137,14 +163,21 @@ pub fn to_absolute(x: i32, y: i32, desktop: Rect) -> (i32, i32) {
 
 /// The pixel a unit lands on, as Windows works it out (for tests, and to check `to_absolute`).
 pub fn from_absolute(nx: i32, ny: i32, desktop: Rect) -> (i32, i32) {
-    let px = |n: i32, origin: i32, size: i32| origin + (i64::from(n) * i64::from(size) / 65536) as i32;
+    let px =
+        |n: i32, origin: i32, size: i32| origin + (i64::from(n) * i64::from(size) / 65536) as i32;
     (px(nx, desktop.x, desktop.w), px(ny, desktop.y, desktop.h))
 }
 
 /// The encoder's picture for a source at `scale` percent: even sides (NV12 and H.264 need them), never larger than the source, and no taller
 /// than `max_lines`; `min_lines` (a window's floor) wins over the scale but not over the source or `max_lines`.
 pub fn scaled(src_w: u32, src_h: u32, scale: u8, min_lines: u32, max_lines: u32) -> (u32, u32) {
-    fitted(src_w, src_h, (u64::from(src_h) * u64::from(scale.clamp(1, 100)) / 100) as u32, min_lines, max_lines)
+    fitted(
+        src_w,
+        src_h,
+        (u64::from(src_h) * u64::from(scale.clamp(1, 100)) / 100) as u32,
+        min_lines,
+        max_lines,
+    )
 }
 
 /// The same for a picture `lines` tall before the bounds.
@@ -152,7 +185,10 @@ pub fn fitted(src_w: u32, src_h: u32, lines: u32, min_lines: u32, max_lines: u32
     if src_w == 0 || src_h == 0 {
         return (0, 0);
     }
-    let h = u64::from(lines).max(u64::from(min_lines)).min(u64::from(max_lines)).min(u64::from(src_h));
+    let h = u64::from(lines)
+        .max(u64::from(min_lines))
+        .min(u64::from(max_lines))
+        .min(u64::from(src_h));
     let w = (u64::from(src_w) * h / u64::from(src_h)).max(2);
     let even = |v: u64| ((v & !1).max(2)) as u32;
     (even(w), even(h.max(2)))
@@ -192,25 +228,58 @@ mod tests {
     fn the_first_frame_after_the_duplication_is_made_again_counts_as_all_changed() {
         let mut fresh = true;
         let small = Some(vec![Rect::new(0, 0, 10, 10)]);
-        assert_eq!(after_reopen(&mut fresh, small.clone()), None, "whatever its metadata says");
-        assert_eq!(after_reopen(&mut fresh, small.clone()), small, "then what DXGI says");
+        assert_eq!(
+            after_reopen(&mut fresh, small.clone()),
+            None,
+            "whatever its metadata says"
+        );
+        assert_eq!(
+            after_reopen(&mut fresh, small.clone()),
+            small,
+            "then what DXGI says"
+        );
     }
     #[test]
     fn a_scroll_updates_where_the_pixels_came_from_and_went_and_an_unmoved_move_nothing() {
         let dirty = [Rect::new(0, 900, 1920, 180), Rect::new(5, 5, 0, 10)];
-        let moves = [(0, 100, Rect::new(0, 60, 1920, 840)), (10, 10, Rect::new(10, 10, 50, 50))];
-        assert_eq!(updated_region(&dirty, &moves), [Rect::new(0, 100, 1920, 840), Rect::new(0, 60, 1920, 840), Rect::new(0, 900, 1920, 180)]);
+        let moves = [
+            (0, 100, Rect::new(0, 60, 1920, 840)),
+            (10, 10, Rect::new(10, 10, 50, 50)),
+        ];
+        assert_eq!(
+            updated_region(&dirty, &moves),
+            [
+                Rect::new(0, 100, 1920, 840),
+                Rect::new(0, 60, 1920, 840),
+                Rect::new(0, 900, 1920, 180)
+            ]
+        );
         assert!(updated_region(&[], &[]).is_empty());
     }
 
     fn monitors() -> Vec<Monitor> {
         vec![
             // A 4K monitor at 200 % on the right, the primary.
-            Monitor { name: r"\\.\DISPLAY1".into(), rect: Rect::new(0, 0, 3840, 2160), dpi: 192, primary: true },
+            Monitor {
+                name: r"\\.\DISPLAY1".into(),
+                rect: Rect::new(0, 0, 3840, 2160),
+                dpi: 192,
+                primary: true,
+            },
             // A 1080p monitor at 100 % to its left, its top 300 px higher: negative origin on both axes.
-            Monitor { name: r"\\.\DISPLAY2".into(), rect: Rect::new(-1920, -300, 1920, 1080), dpi: 96, primary: false },
+            Monitor {
+                name: r"\\.\DISPLAY2".into(),
+                rect: Rect::new(-1920, -300, 1920, 1080),
+                dpi: 96,
+                primary: false,
+            },
             // A laptop panel at 150 % below the primary.
-            Monitor { name: r"\\.\DISPLAY3".into(), rect: Rect::new(0, 2160, 1920, 1200), dpi: 144, primary: false },
+            Monitor {
+                name: r"\\.\DISPLAY3".into(),
+                rect: Rect::new(0, 2160, 1920, 1200),
+                dpi: 144,
+                primary: false,
+            },
         ]
     }
 
@@ -218,7 +287,13 @@ mod tests {
     fn the_virtual_desktop_spans_every_monitor_with_negative_origins() {
         let vd = virtual_desktop(&monitors());
         assert_eq!(vd, Rect::new(-1920, -300, 5760, 3660));
-        assert_eq!(monitors().iter().map(Monitor::scale_percent).collect::<Vec<_>>(), [200, 100, 150]);
+        assert_eq!(
+            monitors()
+                .iter()
+                .map(Monitor::scale_percent)
+                .collect::<Vec<_>>(),
+            [200, 100, 150]
+        );
         assert_eq!(scale_percent(120), 125);
         assert_eq!(scale_percent(168), 175);
     }
@@ -228,15 +303,26 @@ mod tests {
         let ms = monitors();
         let vd = virtual_desktop(&ms);
         for m in &ms {
-            for (x, y) in [(m.rect.x, m.rect.y), (m.rect.right() - 1, m.rect.bottom() - 1), (m.rect.x + m.rect.w / 2, m.rect.y + 7), (m.rect.x + 1, m.rect.bottom() - 2)] {
+            for (x, y) in [
+                (m.rect.x, m.rect.y),
+                (m.rect.right() - 1, m.rect.bottom() - 1),
+                (m.rect.x + m.rect.w / 2, m.rect.y + 7),
+                (m.rect.x + 1, m.rect.bottom() - 2),
+            ] {
                 let (nx, ny) = to_absolute(x, y, vd);
-                assert!((0..=65535).contains(&nx) && (0..=65535).contains(&ny), "{x},{y} -> {nx},{ny}");
+                assert!(
+                    (0..=65535).contains(&nx) && (0..=65535).contains(&ny),
+                    "{x},{y} -> {nx},{ny}"
+                );
                 assert_eq!(from_absolute(nx, ny, vd), (x, y), "{} at {x},{y}", m.name);
             }
         }
         // Outside the desktop: the nearest edge, never a wrap.
         assert_eq!(to_absolute(-5000, -5000, vd), (0, 0));
-        assert_eq!(to_absolute(99_999, 99_999, vd), to_absolute(vd.right() - 1, vd.bottom() - 1, vd));
+        assert_eq!(
+            to_absolute(99_999, 99_999, vd),
+            to_absolute(vd.right() - 1, vd.bottom() - 1, vd)
+        );
     }
 
     #[test]
@@ -245,21 +331,38 @@ mod tests {
         let win = Rect::new(-1800, -200, 1200, 800);
         assert_eq!(source_to_screen(600.0, 400.0, 1200, 800, win), (-1200, 200));
         assert_eq!(source_to_screen(0.0, 0.0, 1200, 800, win), (-1800, -200));
-        assert_eq!(source_to_screen(1200.0, 800.0, 1200, 800, win), (-601, 599), "the far edge stays inside");
-        assert_eq!(source_to_screen(-50.0, 5000.0, 1200, 800, win), (-1800, 599));
+        assert_eq!(
+            source_to_screen(1200.0, 800.0, 1200, 800, win),
+            (-601, 599),
+            "the far edge stays inside"
+        );
+        assert_eq!(
+            source_to_screen(-50.0, 5000.0, 1200, 800, win),
+            (-1800, 599)
+        );
         // The window grew to 2400×1600 since the frame: the same point keeps its place in proportion.
         let bigger = Rect::new(-1800, -200, 2400, 1600);
-        assert_eq!(source_to_screen(600.0, 400.0, 1200, 800, bigger), (-600, 600));
+        assert_eq!(
+            source_to_screen(600.0, 400.0, 1200, 800, bigger),
+            (-600, 600)
+        );
         // A 4K monitor at 200 %: physical pixels throughout, the scale changes nothing.
         let m = monitors()[0].rect;
-        assert_eq!(source_to_screen(1920.5, 1080.0, 3840, 2160, m), (1920, 1080));
+        assert_eq!(
+            source_to_screen(1920.5, 1080.0, 3840, 2160, m),
+            (1920, 1080)
+        );
     }
 
     #[test]
     fn the_cursor_is_found_in_the_picture_and_lost_outside_it() {
         let win = Rect::new(100, -300, 800, 600);
         assert_eq!(screen_to_source(500, 0, win, 800, 600), Some((400, 300)));
-        assert_eq!(screen_to_source(500, 0, win, 400, 300), Some((200, 150)), "a picture scaled down by half");
+        assert_eq!(
+            screen_to_source(500, 0, win, 400, 300),
+            Some((200, 150)),
+            "a picture scaled down by half"
+        );
         assert_eq!(screen_to_source(99, 0, win, 800, 600), None);
         assert_eq!(screen_to_source(900, 0, win, 800, 600), None);
     }
@@ -267,9 +370,19 @@ mod tests {
     #[test]
     fn a_point_off_every_monitor_belongs_to_the_nearest() {
         let ms = monitors();
-        assert_eq!(monitor_at(&ms, -10, 500).map(|m| m.name.as_str()), Some(r"\\.\DISPLAY2"));
-        assert_eq!(monitor_at(&ms, 100, 3000).map(|m| m.name.as_str()), Some(r"\\.\DISPLAY3"));
-        assert_eq!(monitor_at(&ms, 3000, 3000).map(|m| m.name.as_str()), Some(r"\\.\DISPLAY1"), "below the 4K one, right of the laptop: nearest edge");
+        assert_eq!(
+            monitor_at(&ms, -10, 500).map(|m| m.name.as_str()),
+            Some(r"\\.\DISPLAY2")
+        );
+        assert_eq!(
+            monitor_at(&ms, 100, 3000).map(|m| m.name.as_str()),
+            Some(r"\\.\DISPLAY3")
+        );
+        assert_eq!(
+            monitor_at(&ms, 3000, 3000).map(|m| m.name.as_str()),
+            Some(r"\\.\DISPLAY1"),
+            "below the 4K one, right of the laptop: nearest edge"
+        );
     }
 
     #[test]
@@ -278,9 +391,17 @@ mod tests {
         assert_eq!(scaled(1920, 1080, 75, 0, 1080), (1440, 810));
         assert_eq!(scaled(1920, 1080, 50, 540, 1080), (960, 540));
         assert_eq!(scaled(1920, 1080, 50, 0, 1080), (960, 540));
-        assert_eq!(scaled(1920, 1080, 25, 540, 1080), (960, 540), "a window never under 540 lines");
+        assert_eq!(
+            scaled(1920, 1080, 25, 540, 1080),
+            (960, 540),
+            "a window never under 540 lines"
+        );
         assert_eq!(scaled(3840, 2160, 100, 0, 1080), (1920, 1080), "a load cap");
-        assert_eq!(scaled(1001, 501, 100, 540, 1080), (1000, 500), "a small window: its own size, made even, never raised to the floor");
+        assert_eq!(
+            scaled(1001, 501, 100, 540, 1080),
+            (1000, 500),
+            "a small window: its own size, made even, never raised to the floor"
+        );
         assert_eq!(scaled(0, 0, 100, 0, 1080), (0, 0));
     }
 }

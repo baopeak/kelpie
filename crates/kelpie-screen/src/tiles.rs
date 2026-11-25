@@ -55,7 +55,17 @@ impl Grid {
         let cols = w.div_ceil(TILE) as usize;
         let rows = h.div_ceil(TILE) as usize;
         let n = cols * rows;
-        Grid { w, h, cols, rows, hash: vec![0; n], changed: vec![now; n], painted: vec![false; n], seen: false, last_area: 0 }
+        Grid {
+            w,
+            h,
+            cols,
+            rows,
+            hash: vec![0; n],
+            changed: vec![now; n],
+            painted: vec![false; n],
+            seen: false,
+            last_area: 0,
+        }
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -65,14 +75,24 @@ impl Grid {
     fn cell_rect(&self, col: usize, row: usize) -> Rect {
         let x = col as u32 * TILE;
         let y = row as u32 * TILE;
-        Rect::new(x as i32, y as i32, TILE.min(self.w - x) as i32, TILE.min(self.h - y) as i32)
+        Rect::new(
+            x as i32,
+            y as i32,
+            TILE.min(self.w - x) as i32,
+            TILE.min(self.h - y) as i32,
+        )
     }
 
     /// The cells a rectangle touches.
     fn cells_in(&self, r: Rect) -> impl Iterator<Item = (usize, usize)> + '_ {
         let clip = r.intersect(Rect::new(0, 0, self.w as i32, self.h as i32));
         let (c0, c1, r0, r1) = match clip {
-            Some(c) => (c.x as usize / TILE as usize, (c.right() as usize - 1) / TILE as usize, c.y as usize / TILE as usize, (c.bottom() as usize - 1) / TILE as usize),
+            Some(c) => (
+                c.x as usize / TILE as usize,
+                (c.right() as usize - 1) / TILE as usize,
+                c.y as usize / TILE as usize,
+                (c.bottom() as usize - 1) / TILE as usize,
+            ),
             None => (1, 0, 1, 0),
         };
         (r0..=r1).flat_map(move |row| (c0..=c1).map(move |col| (col, row)))
@@ -80,25 +100,49 @@ impl Grid {
 
     /// A captured picture (BGRA, `stride` bytes a row, this grid's size). `dirty`, when the capture says what changed (DXGI), limits the
     /// cells looked at. The painted regions that changed are returned, to be unpainted with the next video frame (merged along rows).
-    pub fn update(&mut self, px: &[u8], stride: usize, now: u64, dirty: Option<&[Rect]>) -> Vec<Rect> {
-        assert!(stride >= self.w as usize * 4 && px.len() >= stride * (self.h as usize).saturating_sub(1) + self.w as usize * 4, "a picture smaller than its grid");
+    pub fn update(
+        &mut self,
+        px: &[u8],
+        stride: usize,
+        now: u64,
+        dirty: Option<&[Rect]>,
+    ) -> Vec<Rect> {
+        assert!(
+            stride >= self.w as usize * 4
+                && px.len() >= stride * (self.h as usize).saturating_sub(1) + self.w as usize * 4,
+            "a picture smaller than its grid"
+        );
         let first = !self.seen;
         self.seen = true;
         let cells: Vec<(usize, usize)> = match dirty {
             Some(rects) if !first => {
-                let mut v: Vec<(usize, usize)> = rects.iter().flat_map(|r| self.cells_in(*r)).collect();
+                let mut v: Vec<(usize, usize)> =
+                    rects.iter().flat_map(|r| self.cells_in(*r)).collect();
                 v.sort_unstable_by_key(|(c, r)| (*r, *c));
                 v.dedup();
                 v
             }
-            _ => (0..self.rows).flat_map(|row| (0..self.cols).map(move |col| (col, row))).collect(),
+            _ => (0..self.rows)
+                .flat_map(|row| (0..self.cols).map(move |col| (col, row)))
+                .collect(),
         };
         let mut unpaint: Vec<Rect> = Vec::new();
-        self.last_area = if first { u64::from(self.w) * u64::from(self.h) } else { 0 };
+        self.last_area = if first {
+            u64::from(self.w) * u64::from(self.h)
+        } else {
+            0
+        };
         for (col, row) in cells {
             let i = row * self.cols + col;
             let r = self.cell_rect(col, row);
-            let h = cell_hash(px, stride, r.x as usize, r.y as usize, r.w as usize, r.h as usize);
+            let h = cell_hash(
+                px,
+                stride,
+                r.x as usize,
+                r.y as usize,
+                r.w as usize,
+                r.h as usize,
+            );
             if first {
                 self.hash[i] = h;
                 continue;
@@ -109,7 +153,9 @@ impl Grid {
                 self.last_area += r.w as u64 * r.h as u64;
                 if std::mem::take(&mut self.painted[i]) {
                     match unpaint.last_mut() {
-                        Some(last) if last.y == r.y && last.h == r.h && last.right() == r.x => last.w += r.w,
+                        Some(last) if last.y == r.y && last.h == r.h && last.right() == r.x => {
+                            last.w += r.w
+                        }
                         _ => unpaint.push(r),
                     }
                 }
@@ -125,12 +171,16 @@ impl Grid {
 
     /// Whether every cell has stood still for `STABLE_MS`.
     pub fn all_still(&self, now: u64) -> bool {
-        self.changed.iter().all(|c| now.saturating_sub(*c) >= STABLE_MS)
+        self.changed
+            .iter()
+            .all(|c| now.saturating_sub(*c) >= STABLE_MS)
     }
 
     /// Whether any cell waits to be painted now.
     pub fn any_due(&self, now: u64) -> bool {
-        self.seen && (0..self.hash.len()).any(|i| !self.painted[i] && now.saturating_sub(self.changed[i]) >= STABLE_MS)
+        self.seen
+            && (0..self.hash.len())
+                .any(|i| !self.painted[i] && now.saturating_sub(self.changed[i]) >= STABLE_MS)
     }
 
     /// Still regions to paint now, up to `max_cells` cells in all, as rectangles of up to `MAX_RUN`×`MAX_ROWS` cells. They count as painted
@@ -151,7 +201,11 @@ impl Grid {
             }
             v
         });
-        let ready = |g: &Grid, i: usize| !g.painted[i] && now.saturating_sub(g.changed[i]) >= STABLE_MS && inside.as_ref().is_none_or(|v| v[i]);
+        let ready = |g: &Grid, i: usize| {
+            !g.painted[i]
+                && now.saturating_sub(g.changed[i]) >= STABLE_MS
+                && inside.as_ref().is_none_or(|v| v[i])
+        };
         let mut out = Vec::new();
         let mut budget = max_cells;
         for row in 0..self.rows {
@@ -162,11 +216,19 @@ impl Grid {
                     continue;
                 }
                 let mut run = 1;
-                while col + run < self.cols && run < MAX_RUN && run < budget && ready(self, row * self.cols + col + run) {
+                while col + run < self.cols
+                    && run < MAX_RUN
+                    && run < budget
+                    && ready(self, row * self.cols + col + run)
+                {
                     run += 1;
                 }
                 let mut rows = 1;
-                while row + rows < self.rows && rows < MAX_ROWS && (rows + 1) * run <= budget && (0..run).all(|k| ready(self, (row + rows) * self.cols + col + k)) {
+                while row + rows < self.rows
+                    && rows < MAX_ROWS
+                    && (rows + 1) * run <= budget
+                    && (0..run).all(|k| ready(self, (row + rows) * self.cols + col + k))
+                {
                     rows += 1;
                 }
                 for dr in 0..rows {
@@ -177,7 +239,12 @@ impl Grid {
                 budget -= run * rows;
                 let first = self.cell_rect(col, row);
                 let last = self.cell_rect(col + run - 1, row + rows - 1);
-                out.push(Rect::from_edges(first.x, first.y, last.right(), last.bottom()));
+                out.push(Rect::from_edges(
+                    first.x,
+                    first.y,
+                    last.right(),
+                    last.bottom(),
+                ));
                 col += run;
             }
         }
@@ -221,7 +288,13 @@ pub const SHARPEN_BUDGET: usize = 256 * 1024;
 impl Sharpen {
     /// The phone asked at `now`. Nothing when crisp tiles go anyway (`crisp_on`), or within `SHARPEN_GAP_MS` of the last one. True when it starts.
     pub fn ask(&mut self, rect: Rect, crisp_on: bool, now: u64) -> bool {
-        if crisp_on || rect.w <= 0 || rect.h <= 0 || self.at.is_some_and(|at| now.saturating_sub(at) < SHARPEN_GAP_MS) {
+        if crisp_on
+            || rect.w <= 0
+            || rect.h <= 0
+            || self
+                .at
+                .is_some_and(|at| now.saturating_sub(at) < SHARPEN_GAP_MS)
+        {
             return false;
         }
         self.at = Some(now);
@@ -259,7 +332,10 @@ mod tests {
         fn new(w: usize, h: usize) -> Picture {
             // A stride with padding, as a mapped texture has.
             let stride = w * 4 + 64;
-            Picture { stride, px: vec![0x20; stride * h] }
+            Picture {
+                stride,
+                px: vec![0x20; stride * h],
+            }
         }
 
         fn set(&mut self, x: usize, y: usize, v: u8) {
@@ -273,19 +349,29 @@ mod tests {
         let mut p = Picture::new(200, 130);
         let mut g = Grid::new(200, 130, 0);
         assert_eq!((g.cols, g.rows), (4, 3));
-        assert!(g.update(&p.px, p.stride, 0, None).is_empty(), "the first picture is the baseline");
+        assert!(
+            g.update(&p.px, p.stride, 0, None).is_empty(),
+            "the first picture is the baseline"
+        );
         assert_eq!(g.last_changed_area(), 200 * 130, "all of it is new");
         p.set(70, 70, 0xff);
         g.update(&p.px, p.stride, 100, None);
         let changed: Vec<usize> = (0..12).filter(|i| g.changed[*i] == 100).collect();
         assert_eq!(changed, [5], "column 1, row 1");
-        assert_eq!(g.last_changed_area(), 64 * 64, "one cell's pixels: what the large-frame guard measures");
+        assert_eq!(
+            g.last_changed_area(),
+            64 * 64,
+            "one cell's pixels: what the large-frame guard measures"
+        );
         // The padding past each row is not the picture: changing it changes nothing.
         let pad = p.stride - 1;
         p.px[pad] ^= 0xff;
         g.update(&p.px, p.stride, 200, None);
         assert!((0..12).all(|i| g.changed[i] != 200));
-        assert_ne!(cell_hash(&[1u8; 64 * 4], 64 * 4, 0, 0, 64, 1), cell_hash(&[2u8; 64 * 4], 64 * 4, 0, 0, 64, 1));
+        assert_ne!(
+            cell_hash(&[1u8; 64 * 4], 64 * 4, 0, 0, 64, 1),
+            cell_hash(&[2u8; 64 * 4], 64 * 4, 0, 0, 64, 1)
+        );
     }
 
     #[test]
@@ -300,10 +386,16 @@ mod tests {
         let mut p = Picture::new(640, 256);
         let mut g = Grid::new(640, 256, 0);
         g.update(&p.px, p.stride, 0, None);
-        assert!(g.due(STABLE_MS - 1, 1000).is_empty(), "not still for long enough");
+        assert!(
+            g.due(STABLE_MS - 1, 1000).is_empty(),
+            "not still for long enough"
+        );
         let tiles = g.due(STABLE_MS, 1000);
         // 10 columns × 4 rows: one 8×4 tile and one 2×4 tile.
-        assert_eq!(tiles, [Rect::new(0, 0, 512, 256), Rect::new(512, 0, 128, 256)]);
+        assert_eq!(
+            tiles,
+            [Rect::new(0, 0, 512, 256), Rect::new(512, 0, 128, 256)]
+        );
         assert_eq!(g.painted_count(), 40);
         assert!(g.due(STABLE_MS + 1000, 1000).is_empty(), "painted once");
         // Two neighbouring cells of the second row change: unpainted together, the rest stays painted.
@@ -313,7 +405,11 @@ mod tests {
         assert_eq!(unpaint, [Rect::new(0, 64, 128, 64)]);
         assert_eq!(g.painted_count(), 38);
         assert!(!g.all_still(2000) && g.all_still(2000 + STABLE_MS));
-        assert_eq!(g.due(2000 + STABLE_MS, 1000), [Rect::new(0, 64, 128, 64)], "painted again once still");
+        assert_eq!(
+            g.due(2000 + STABLE_MS, 1000),
+            [Rect::new(0, 64, 128, 64)],
+            "painted again once still"
+        );
         // A change in an unpainted cell unpaints nothing.
         let mut g2 = Grid::new(640, 256, 0);
         g2.update(&p.px, p.stride, 0, None);
@@ -327,10 +423,21 @@ mod tests {
         let mut g = Grid::new(640, 256, 0);
         g.update(&p.px, p.stride, 0, None);
         // The part the phone shows: columns 1 and 2, rows 0 and 1.
-        assert_eq!(g.due_within(STABLE_MS, 1000, Some(Rect::new(100, 30, 50, 60))), [Rect::new(64, 0, 128, 128)]);
+        assert_eq!(
+            g.due_within(STABLE_MS, 1000, Some(Rect::new(100, 30, 50, 60))),
+            [Rect::new(64, 0, 128, 128)]
+        );
         assert_eq!(g.painted_count(), 4, "only those");
-        assert_eq!(g.due_within(STABLE_MS, 1000, Some(Rect::new(1000, 1000, 10, 10))), [], "nothing outside the picture");
-        assert_eq!(g.due(STABLE_MS, 1000).len(), 3, "the rest is left for the usual painting");
+        assert_eq!(
+            g.due_within(STABLE_MS, 1000, Some(Rect::new(1000, 1000, 10, 10))),
+            [],
+            "nothing outside the picture"
+        );
+        assert_eq!(
+            g.due(STABLE_MS, 1000).len(),
+            3,
+            "the rest is left for the usual painting"
+        );
     }
 
     #[test]
@@ -340,14 +447,20 @@ mod tests {
         assert!(!s.ask(r, true, 0), "crisp tiles go anyway");
         assert!(s.ask(r, false, 0));
         assert_eq!(s.rect, Some(r));
-        assert!(!s.ask(r, false, SHARPEN_GAP_MS - 1), "not again within three seconds");
+        assert!(
+            !s.ask(r, false, SHARPEN_GAP_MS - 1),
+            "not again within three seconds"
+        );
         assert!(s.spend(200 * 1024));
         assert!(!s.spend(100 * 1024), "past its budget: over");
         assert_eq!(s.rect, None);
         assert!(s.ask(r, false, SHARPEN_GAP_MS));
         s.done();
         assert!(!s.spend(1), "nothing after it is done");
-        assert!(!s.ask(Rect::new(0, 0, 0, 10), false, 10 * SHARPEN_GAP_MS), "an empty part");
+        assert!(
+            !s.ask(Rect::new(0, 0, 0, 10), false, 10 * SHARPEN_GAP_MS),
+            "an empty part"
+        );
     }
 
     #[test]
@@ -358,7 +471,10 @@ mod tests {
         let first = g.due(STABLE_MS, 6);
         assert_eq!(first, [Rect::new(0, 0, 384, 64)], "six cells");
         let next = g.due(STABLE_MS, 6);
-        let cells: i32 = next.iter().map(|r| ((r.w + 63) / 64) * ((r.h + 63) / 64)).sum();
+        let cells: i32 = next
+            .iter()
+            .map(|r| ((r.w + 63) / 64) * ((r.h + 63) / 64))
+            .sum();
         assert_eq!(cells, 6);
         assert!(g.any_due(STABLE_MS));
         g.forget_painted();

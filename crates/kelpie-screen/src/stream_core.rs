@@ -22,7 +22,9 @@ use serde_json::{json, Value};
 
 use crate::control::{Controller, Event, Flight, Params, Stats, MAX_KBPS, MIN_KBPS};
 use crate::geom::{self, Rect};
-use crate::pace::{self, BigFrame, Dip, EncoderRate, Pacer, ReencodeGate, TopOff, BIG_FRAME_PERCENT};
+use crate::pace::{
+    self, BigFrame, Dip, EncoderRate, Pacer, ReencodeGate, TopOff, BIG_FRAME_PERCENT,
+};
 use crate::sps;
 use crate::states::{input_policy, InputPolicy, Observed, State, Tracker};
 use crate::tile_image;
@@ -46,7 +48,9 @@ const TILE_CELLS_AT_ONCE: usize = 32;
 
 /// Wall-clock milliseconds, the clock the daemon stamps input with.
 pub fn wall_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// One event or reply for the app, on its way to stdout.
@@ -58,7 +62,17 @@ pub fn emit(out: &SyncSender<Vec<u8>>, v: Value) {
 pub enum Cmd {
     /// `link_full_ms`: how long the daemon has seen the link's window full (`Bandwidth::on_link_window`); `win`: the daemon takes a window
     /// sized to the link (`Controller::window`), said with the `window` event.
-    Flow { acked: u32, rtt_ms: u32, level: u8, lost_tiles: bool, dropped_through: u32, raw: u64, wire: u64, link_full_ms: u64, win: bool },
+    Flow {
+        acked: u32,
+        rtt_ms: u32,
+        level: u8,
+        lost_tiles: bool,
+        dropped_through: u32,
+        raw: u64,
+        wire: u64,
+        link_full_ms: u64,
+        win: bool,
+    },
     Keyframe,
     /// The part of the picture the phone shows, sent crisp once (`tiles::Sharpen`).
     Sharpen(Rect),
@@ -97,7 +111,12 @@ impl Cmd {
             },
             "sharpen" => {
                 let rect = &req["rect"];
-                let v = |k: &str| rect[k].as_u64().filter(|v| *v <= u64::from(u16::MAX)).map(|v| v as i32);
+                let v = |k: &str| {
+                    rect[k]
+                        .as_u64()
+                        .filter(|v| *v <= u64::from(u16::MAX))
+                        .map(|v| v as i32)
+                };
                 match (v("x"), v("y"), v("w"), v("h")) {
                     (Some(x), Some(y), Some(w), Some(h)) => Cmd::Sharpen(Rect::new(x, y, w, h)),
                     _ => return Parsed::Nothing,
@@ -106,7 +125,11 @@ impl Cmd {
             "keyframe" => Cmd::Keyframe,
             "pause" => Cmd::Pause(req["paused"].as_bool() == Some(true)),
             "resume_load" => Cmd::ResumeLoad,
-            "cap" => Cmd::Cap(req["max_kbps"].as_u64().map(|k| k.min(u64::from(u32::MAX)) as u32)),
+            "cap" => Cmd::Cap(
+                req["max_kbps"]
+                    .as_u64()
+                    .map(|k| k.min(u64::from(u32::MAX)) as u32),
+            ),
             _ => return Parsed::Unknown,
         })
     }
@@ -172,7 +195,12 @@ pub struct Encoded {
 pub enum Grab<P> {
     /// A new picture, `size` pixels (a window that was resized says so here), and the rectangles it changed when the capture knows them.
     /// `first_full`: whether the capture's first picture said everything changed (kept for the stats).
-    Frame { picture: P, size: (u32, u32), dirty: Option<Vec<Rect>>, first_full: Option<bool> },
+    Frame {
+        picture: P,
+        size: (u32, u32),
+        dirty: Option<Vec<Rect>>,
+        first_full: Option<bool>,
+    },
     /// Nothing new yet.
     Idle,
     /// The capture failed (counted: many in a row make the loop ask whether the device is still there).
@@ -234,7 +262,12 @@ pub trait Backend {
     /// What the encoder finished.
     fn poll(&mut self) -> Result<Vec<Encoded>, String>;
     /// Reads the picture (or the `dirty` part of it) back as BGRA into the buffer `pixels` returns: false when it could not.
-    fn readback(&mut self, picture: &Self::Picture, src: (u32, u32), dirty: Option<&[Rect]>) -> bool;
+    fn readback(
+        &mut self,
+        picture: &Self::Picture,
+        src: (u32, u32),
+        dirty: Option<&[Rect]>,
+    ) -> bool;
     /// The last readback: BGRA and its row stride (0 before the first one).
     fn pixels(&self) -> (&[u8], usize);
     /// The system cursor: its shape, whether it shows, and where on the screen.
@@ -246,7 +279,12 @@ pub trait Backend {
 
 /// `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS`: added to every encode, to drive the ladder where there is no GPU worth measuring.
 fn test_delay() -> Option<Duration> {
-    std::env::var("KELPIE_SCREEN_TEST_ENCODE_DELAY_MS").ok()?.parse::<u64>().ok().filter(|ms| *ms > 0 && *ms <= 2000).map(Duration::from_millis)
+    std::env::var("KELPIE_SCREEN_TEST_ENCODE_DELAY_MS")
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .filter(|ms| *ms > 0 && *ms <= 2000)
+        .map(Duration::from_millis)
 }
 
 /// A frame in the encoder: its time (the encoder's key for it), when it went in, when its picture was taken (ms since the stream started),
@@ -263,7 +301,14 @@ struct InEncoder {
 
 /// Runs a stream to its end, which it says (`ended`) before it returns. The backend has its encoder open for `ctl.params()`, its border and
 /// hotkey up and its input running: what is said here is `started`, the encoder, and from then on everything the phone sees.
-pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: Receiver<Cmd>, out: SyncSender<Vec<u8>>, started: Sender<Result<Value, String>>) {
+pub fn run<B: Backend>(
+    cfg: Config,
+    mut ctl: Controller,
+    backend: &mut B,
+    cmds: Receiver<Cmd>,
+    out: SyncSender<Vec<u8>>,
+    started: Sender<Result<Value, String>>,
+) {
     let sc = cfg.sc.as_str();
     let window = cfg.window;
     let mut rect = cfg.rect;
@@ -280,7 +325,10 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         ps.seed(h);
     }
     let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": cfg.title, "exe": cfg.exe, "w": src.0, "h": src.1, "encoder": if info.hardware { "hw" } else { "sw" }, "encoder_name": info.name, "refused": info.refused, "t0": t0})));
-    emit(&out, json!({"event": "encoder", "sc": sc, "encoder": if info.hardware { "hw" } else { "sw" }, "name": info.name, "refused": info.refused, "first_output_ms": info.first_output_ms}));
+    emit(
+        &out,
+        json!({"event": "encoder", "sc": sc, "encoder": if info.hardware { "hw" } else { "sw" }, "name": info.name, "refused": info.refused, "first_output_ms": info.first_output_ms}),
+    );
 
     let mut tracker = Tracker::default();
     let mut stats = Stats::new(0);
@@ -299,7 +347,8 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
     let mut link_paused = false;
     let (mut unpaint, mut unpaint_all) = (Vec::<Rect>::new(), false);
     let (mut tile_id, mut tile_tokens, mut tile_at) = (0u32, TILE_BURST, now_ms());
-    let (mut last_look, mut last_desktop, mut last_cursor) = (Instant::now() - LOOK_EVERY, Instant::now(), Instant::now());
+    let (mut last_look, mut last_desktop, mut last_cursor) =
+        (Instant::now() - LOOK_EVERY, Instant::now(), Instant::now());
     let mut cursor_told: Option<(u8, bool, i32, i32)> = None;
     // The last picture taken: encoded again when a keyframe is owed and nothing new came (a still window sends no frames by itself), and for
     // the top-off passes of a still one.
@@ -333,7 +382,17 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         loop {
             match cmds.try_recv() {
                 Ok(Cmd::Stop(r)) => break 'stream r,
-                Ok(Cmd::Flow { acked, rtt_ms, level, lost_tiles, dropped_through, raw, wire, link_full_ms, win }) => {
+                Ok(Cmd::Flow {
+                    acked,
+                    rtt_ms,
+                    level,
+                    lost_tiles,
+                    dropped_through,
+                    raw,
+                    wire,
+                    link_full_ms,
+                    win,
+                }) => {
                     ctl.set_win(win);
                     flight.acked(acked);
                     ctl.bandwidth.on_link_window(link_full_ms);
@@ -356,10 +415,14 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
                 // Only with crisp tiles on in Settings, only while they are off for the link (else they go anyway), and not on a machine at L3,
                 // which has no CPU for them.
                 Ok(Cmd::Sharpen(r)) => {
-                    if grid.is_some() && ctl.level() < 3 && sharpen.ask(r, ctl.crisp_ok(flight.inflight(), now), now) {
+                    if grid.is_some()
+                        && ctl.level() < 3
+                        && sharpen.ask(r, ctl.crisp_ok(flight.inflight(), now), now)
+                    {
                         top_off.again(now);
                         // Paced as tiles are, at their share of the video's rate: no burst ahead of the video on the slow link it is for.
-                        tile_tokens = tile_tokens.min(f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE);
+                        tile_tokens =
+                            tile_tokens.min(f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE);
                     }
                 }
                 Ok(Cmd::Pause(p)) => {
@@ -378,7 +441,10 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
                 Ok(Cmd::ResumeLoad) => {
                     ctl.resume(now);
                     flight.restart();
-                    emit(&out, json!({"event": "state", "sc": sc, "state": tracker.state().name()}));
+                    emit(
+                        &out,
+                        json!({"event": "state", "sc": sc, "state": tracker.state().name()}),
+                    );
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break 'stream "app_closed".to_string(),
@@ -399,7 +465,10 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
                         emit(&out, json!({"event": "state", "sc": sc, "state": s.name()}));
                     }
                 }
-                InputSignal::NotFront => emit(&out, json!({"event": "input_refused", "sc": sc, "why": "not_front"})),
+                InputSignal::NotFront => emit(
+                    &out,
+                    json!({"event": "input_refused", "sc": sc, "why": "not_front"}),
+                ),
                 InputSignal::Blocked => emit(&out, json!({"event": "input_blocked", "sc": sc})),
             }
         }
@@ -426,7 +495,12 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
             if refresh_desktop {
                 last_desktop = Instant::now();
             }
-            backend.publish(rect, src, input_policy(tracker.state(), window), refresh_desktop);
+            backend.publish(
+                rect,
+                src,
+                input_policy(tracker.state(), window),
+                refresh_desktop,
+            );
         }
         flight.tick(now);
         if let Some(Event::PausedForLoad) = ctl.tick(flight.inflight(), now) {
@@ -436,7 +510,10 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         let link_window = ctl.window();
         if ctl.win() && window_told != Some(link_window) {
             window_told = Some(link_window);
-            emit(&out, json!({"event": "window", "sc": sc, "frames": link_window.0, "bytes": link_window.1}));
+            emit(
+                &out,
+                json!({"event": "window", "sc": sc, "frames": link_window.0, "bytes": link_window.1}),
+            );
         }
         // What the ladder says now: a new size is a new converter and encoder; a new bitrate is set live, when it is worth a reconfiguration
         // (`pace::EncoderRate`), and not while a big frame's dip holds.
@@ -464,7 +541,10 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         // A frame the encoder never gave back (it may drop one) is not waited for after a second, and counts as a second's encode: an encoder
         // stalled behind a game on the GPU is slow, not instant, and may give way to the software one.
         let mut stalled = false;
-        while in_encoder.front().is_some_and(|f| f.began.elapsed() > Duration::from_secs(1)) {
+        while in_encoder
+            .front()
+            .is_some_and(|f| f.began.elapsed() > Duration::from_secs(1))
+        {
             if let Some(gone) = in_encoder.pop_front() {
                 if let Some(back) = dip.left(gone.time) {
                     backend.set_bitrate(back);
@@ -479,18 +559,29 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         let interval = ctl.interval_ms();
         let due = pacer.due_in(interval, now, backend.asks_for_input());
         // Room for a frame on the link, nothing gating a keyframe, a picture that may move: then the pacer says when.
-        let ready = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), flight.inflight_bytes(), None);
+        let ready = !link_paused
+            && !flight.gated()
+            && tracker.state().picture_moves()
+            && ctl.may_encode(flight.inflight(), flight.inflight_bytes(), None);
         let may = ready && due == Some(0);
-        let top_off_due = may && top_off.due(now) && (ctl.crisp_ok(flight.inflight(), now) || sharpen.rect.is_some()) && last_picture.is_some();
+        let top_off_due = may
+            && top_off.due(now)
+            && (ctl.crisp_ok(flight.inflight(), now) || sharpen.rect.is_some())
+            && last_picture.is_some();
         // A keyframe owed on a still window: the last picture again, at most once a second (`pace::ReencodeGate`).
-        let reencode_due = may && flight.wants_key() && last_picture.is_some() && reencode.ready(now);
+        let reencode_due =
+            may && flight.wants_key() && last_picture.is_some() && reencode.ready(now);
         // While a frame is in the encoder the loop comes back within a few milliseconds to take it, so that its time is the encoder's own;
         // once due it waits for the next change (a still picture gives nothing until then), but not past a top-off pass that is due.
         let wait_ms = if pacer.pending() {
             ENCODER_POLL_MS
         } else if may {
             // Something to encode again at once (a keyframe owed, a top-off pass): no waiting for a change first.
-            if top_off_due || reencode_due { 0 } else { CAPTURE_WAIT_MS }
+            if top_off_due || reencode_due {
+                0
+            } else {
+                CAPTURE_WAIT_MS
+            }
         } else if ready {
             due.unwrap_or(ENCODER_POLL_MS).clamp(1, CAPTURE_WAIT_MS)
         } else {
@@ -501,7 +592,12 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
             None
         } else {
             match backend.grab(wait_ms) {
-                Grab::Frame { picture, size, dirty, first_full } => {
+                Grab::Frame {
+                    picture,
+                    size,
+                    dirty,
+                    first_full,
+                } => {
                     if let Some(full) = first_full {
                         stats.dxgi_first_full = Some(u8::from(full));
                     }
@@ -581,9 +677,16 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
                 // it is out. A keyframe and a top-off pass are what they are.
                 // A keyframe is the whole picture: guarded too, so that no media message takes most of the link for long (a reply waits for at
                 // most the one being written).
-                let area = if key { u64::from(src.0) * u64::from(src.1) } else { area };
+                let area = if key {
+                    u64::from(src.0) * u64::from(src.1)
+                } else {
+                    area
+                };
                 // On a slow link (the lowest rungs) a keyframe always takes the dip, so that it stays small.
-                if !pass && !dip.active() && (big.check(area, params.kbps, interval) || ctl.key_dip(key)) {
+                if !pass
+                    && !dip.active()
+                    && (big.check(area, params.kbps, interval) || ctl.key_dip(key))
+                {
                     backend.set_bitrate((params.kbps * BIG_FRAME_PERCENT / 100).max(MIN_KBPS));
                     dip.start(time, rate.applied);
                     stats.big_frames += 1;
@@ -596,7 +699,14 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
                         }
                         pacer.started(now);
                         flight.encoded(key, now);
-                        in_encoder.push_back(InEncoder { time, began, captured: now, convert_ms, pass, area });
+                        in_encoder.push_back(InEncoder {
+                            time,
+                            began,
+                            captured: now,
+                            convert_ms,
+                            pass,
+                            area,
+                        });
                         while in_encoder.len() > 8 {
                             if let Some(gone) = in_encoder.pop_front() {
                                 if let Some(back) = dip.left(gone.time) {
@@ -631,16 +741,24 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         match backend.poll() {
             Ok(done) => {
                 for e in done {
-                    let entry = in_encoder.iter().position(|f| f.time == e.time).and_then(|i| in_encoder.remove(i));
+                    let entry = in_encoder
+                        .iter()
+                        .position(|f| f.time == e.time)
+                        .and_then(|i| in_encoder.remove(i));
                     // One frame in the encoder at a time: the next capture may be scheduled.
                     pacer.done();
                     // Output that matches no frame given (one already counted as a second's stall) is not timed: it would read as instant.
-                    let measured = entry.as_ref().map(|f| f.began.elapsed().as_secs_f64() * 1000.0 + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0));
+                    let measured = entry.as_ref().map(|f| {
+                        f.began.elapsed().as_secs_f64() * 1000.0
+                            + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0)
+                    });
                     let encode_ms = measured.unwrap_or(0.0);
                     if let Some(back) = dip.left(e.time) {
                         backend.set_bitrate(back);
                     }
-                    if let Some(Event::UseSoftware) = measured.and_then(|ms| ctl.on_encoded(ms, now)) {
+                    if let Some(Event::UseSoftware) =
+                        measured.and_then(|ms| ctl.on_encoded(ms, now))
+                    {
                         if to_software!("slow") {
                             break;
                         }
@@ -652,7 +770,15 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
                     };
                     let key = e.key || sps::is_keyframe(&au);
                     let captured = entry.as_ref().map_or(now, |f| f.captured);
-                    let v = Video { key, seq: flight.seq() + 1, capture_ms: captured as u32, src: (src.0 as u16, src.1 as u16), coded: (params.w as u16, params.h as u16), unpaint: std::mem::take(&mut unpaint), unpaint_all: std::mem::take(&mut unpaint_all) };
+                    let v = Video {
+                        key,
+                        seq: flight.seq() + 1,
+                        capture_ms: captured as u32,
+                        src: (src.0 as u16, src.1 as u16),
+                        coded: (params.w as u16, params.h as u16),
+                        unpaint: std::mem::take(&mut unpaint),
+                        unpaint_all: std::mem::take(&mut unpaint_all),
+                    };
                     let msg = wire::video(&v, &au);
                     if msg.len() > wire::MAX_MEDIA {
                         // Too large for one message: not sent. Its unpaint goes with the next frame, less bitrate, and a keyframe.
@@ -668,13 +794,22 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
                     stats.frame(msg.len(), key, encode_ms);
                     let _ = out.send(wire::out_media(sc, &msg));
                     let sent_at = now_ms();
-                    stats.timing(sent_at, sent_at.saturating_sub(captured) as f64, entry.as_ref().map_or(0.0, |f| f.convert_ms));
+                    stats.timing(
+                        sent_at,
+                        sent_at.saturating_sub(captured) as f64,
+                        entry.as_ref().map_or(0.0, |f| f.convert_ms),
+                    );
                     // A new picture starts the top-off of what follows it; a pass says how far it got.
                     if entry.as_ref().is_some_and(|f| f.pass) {
                         stats.top_off += 1;
                         top_off.passed(sent_at, interval, msg.len(), e.qp);
                     } else {
-                        top_off.changed(sent_at, interval, e.qp, entry.as_ref().map_or(u64::MAX, |f| f.area));
+                        top_off.changed(
+                            sent_at,
+                            interval,
+                            e.qp,
+                            entry.as_ref().map_or(u64::MAX, |f| f.area),
+                        );
                     }
                 }
             }
@@ -684,36 +819,59 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         // refined the video itself (tiles then cover what the codec cannot: text at the source's own resolution and colour).
         if let Some(g) = &mut grid {
             let rate_bytes = f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE;
-            tile_tokens = (tile_tokens + rate_bytes * now.saturating_sub(tile_at) as f64 / 1000.0).min(TILE_BURST);
+            tile_tokens = (tile_tokens + rate_bytes * now.saturating_sub(tile_at) as f64 / 1000.0)
+                .min(TILE_BURST);
             tile_at = now;
             let (px, stride) = backend.pixels();
-            let tiles_may = flight.seq() > 0 && !flight.wants_key() && !top_off.active() && !link_paused && stride > 0 && g.size() == src;
+            let tiles_may = flight.seq() > 0
+                && !flight.wants_key()
+                && !top_off.active()
+                && !link_paused
+                && stride > 0
+                && g.size() == src;
             // Sharpen: the part the phone shows, once its top-off is done, within its own budget whatever the link says of crisp tiles, and
             // at the tiles' share of the rate.
             if tiles_may && sharpen.rect.is_some() {
-                let parts = if tile_tokens > 32_768.0 { g.due_within(now, TILE_CELLS_AT_ONCE, sharpen.rect) } else { Vec::new() };
+                let parts = if tile_tokens > 32_768.0 {
+                    g.due_within(now, TILE_CELLS_AT_ONCE, sharpen.rect)
+                } else {
+                    Vec::new()
+                };
                 if parts.is_empty() && tile_tokens > 32_768.0 {
                     sharpen.done();
                 }
                 for r in parts {
                     match tile_image::encode(px, stride, r) {
-                        Some((format, image)) if (image.len() as f64) <= tile_tokens && sharpen.spend(image.len()) => {
+                        Some((format, image))
+                            if (image.len() as f64) <= tile_tokens
+                                && sharpen.spend(image.len()) =>
+                        {
                             tile_id = tile_id.wrapping_add(1);
                             tile_tokens -= image.len() as f64;
-                            let _ = out.send(wire::out_media(sc, &wire::tile(flight.seq(), tile_id, r, format, &image)));
+                            let _ = out.send(wire::out_media(
+                                sc,
+                                &wire::tile(flight.seq(), tile_id, r, format, &image),
+                            ));
                         }
                         _ => g.unmark(r),
                     }
                 }
             }
             // Off by itself while the link is slow or was just cut (`Controller::crisp_ok`): the video needs the room.
-            else if tiles_may && ctl.crisp_ok(flight.inflight(), now) && tile_tokens > 32_768.0 && g.any_due(now) {
+            else if tiles_may
+                && ctl.crisp_ok(flight.inflight(), now)
+                && tile_tokens > 32_768.0
+                && g.any_due(now)
+            {
                 for r in g.due(now, TILE_CELLS_AT_ONCE) {
                     match tile_image::encode(px, stride, r) {
                         Some((format, image)) if (image.len() as f64) <= tile_tokens => {
                             tile_id = tile_id.wrapping_add(1);
                             tile_tokens -= image.len() as f64;
-                            let _ = out.send(wire::out_media(sc, &wire::tile(flight.seq(), tile_id, r, format, &image)));
+                            let _ = out.send(wire::out_media(
+                                sc,
+                                &wire::tile(flight.seq(), tile_id, r, format, &image),
+                            ));
                         }
                         _ => g.unmark(r),
                     }
@@ -725,10 +883,18 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
             last_cursor = Instant::now();
             let (shape, shows, x, y) = backend.cursor();
             let at = geom::screen_to_source(x, y, rect, src.0, src.1);
-            let now_c = (shape as u8, shows && at.is_some(), at.map_or(0, |p| p.0), at.map_or(0, |p| p.1));
+            let now_c = (
+                shape as u8,
+                shows && at.is_some(),
+                at.map_or(0, |p| p.0),
+                at.map_or(0, |p| p.1),
+            );
             if cursor_told != Some(now_c) {
                 cursor_told = Some(now_c);
-                let _ = out.send(wire::out_media(sc, &wire::cursor(shape, now_c.1, now_c.2, now_c.3)));
+                let _ = out.send(wire::out_media(
+                    sc,
+                    &wire::cursor(shape, now_c.1, now_c.2, now_c.3),
+                ));
             }
         }
         let crisp = cfg.tiles.then(|| ctl.crisp_ok(flight.inflight(), now));
@@ -737,7 +903,15 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         }
         stats.link_cuts = ctl.bandwidth.cut_counts;
         stats.inflight_limit = link_window.0;
-        if let Some(r) = stats.report_with(now, &params, ctl.level(), ctl.software(), crisp, backend.held(), backend.first_output_ms()) {
+        if let Some(r) = stats.report_with(
+            now,
+            &params,
+            ctl.level(),
+            ctl.software(),
+            crisp,
+            backend.held(),
+            backend.first_output_ms(),
+        ) {
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["event"] = json!("stats");
             v["sc"] = json!(sc);
@@ -776,7 +950,16 @@ mod tests {
 
     impl Script {
         fn new() -> Script {
-            Script { pixels: vec![128; (SIZE * SIZE * 4) as usize], hold: false, hotkey: false, end: None, panic_on_encode: false, encodes: Vec::new(), finished: 0, dropped: false }
+            Script {
+                pixels: vec![128; (SIZE * SIZE * 4) as usize],
+                hold: false,
+                hotkey: false,
+                end: None,
+                panic_on_encode: false,
+                encodes: Vec::new(),
+                finished: 0,
+                dropped: false,
+            }
         }
     }
 
@@ -861,7 +1044,12 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(wait_ms.min(2)));
             self.pictures += 1;
-            Grab::Frame { picture: self.pictures, size: (SIZE, SIZE), dirty: None, first_full: None }
+            Grab::Frame {
+                picture: self.pictures,
+                size: (SIZE, SIZE),
+                dirty: None,
+                first_full: None,
+            }
         }
         fn resize(&mut self, _: (u32, u32), _: &Params, _: bool) -> Result<(), String> {
             Ok(())
@@ -870,7 +1058,11 @@ mod tests {
             Ok(())
         }
         fn encoder_info(&self) -> EncoderInfo {
-            EncoderInfo { hardware: true, name: "fake".into(), ..EncoderInfo::default() }
+            EncoderInfo {
+                hardware: true,
+                name: "fake".into(),
+                ..EncoderInfo::default()
+            }
         }
         fn hardware(&self) -> bool {
             true
@@ -899,7 +1091,12 @@ mod tests {
             }
             if !hold {
                 // A quantizer at the best there is: a still picture is not topped off, so that only the tiles under test follow.
-                self.ready.push(Encoded { data: access_unit(key), key, time, qp: Some(8) });
+                self.ready.push(Encoded {
+                    data: access_unit(key),
+                    key,
+                    time,
+                    qp: Some(8),
+                });
             }
             Ok(true)
         }
@@ -911,7 +1108,14 @@ mod tests {
             true
         }
         fn pixels(&self) -> (&[u8], usize) {
-            (&self.buf, if self.buf.is_empty() { 0 } else { (SIZE * 4) as usize })
+            (
+                &self.buf,
+                if self.buf.is_empty() {
+                    0
+                } else {
+                    (SIZE * 4) as usize
+                },
+            )
         }
         fn cursor(&mut self) -> (Shape, bool, i32, i32) {
             (Shape::Arrow, false, 0, 0)
@@ -923,8 +1127,16 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq)]
     enum Seen {
-        Video { key: bool, seq: u32, unpaint: Vec<Rect>, unpaint_all: bool, at: Duration },
-        Tile { rect: Rect },
+        Video {
+            key: bool,
+            seq: u32,
+            unpaint: Vec<Rect>,
+            unpaint_all: bool,
+            at: Duration,
+        },
+        Tile {
+            rect: Rect,
+        },
         Cursor,
         Event(Value),
     }
@@ -953,7 +1165,12 @@ mod tests {
     }
 
     fn rect_at(m: &[u8], i: usize) -> Rect {
-        Rect::new(u16_at(m, i), u16_at(m, i + 2), u16_at(m, i + 4), u16_at(m, i + 6))
+        Rect::new(
+            u16_at(m, i),
+            u16_at(m, i + 2),
+            u16_at(m, i + 4),
+            u16_at(m, i + 6),
+        )
     }
 
     /// A stream on the fake machine, driven as the app would: its commands in, its stdout frames out.
@@ -981,16 +1198,49 @@ mod tests {
                 // As the host runs one: a stream that panics is said to have ended, and the machine is let go of.
                 crate::guarded(
                     || {
-                        let cfg = Config { sc: "sc1".into(), window: false, src: (SIZE, SIZE), rect: Rect::new(0, 0, SIZE as i32, SIZE as i32), level: 0, tiles, max_kbps: None, title: "Screen 1".into(), exe: String::new() };
+                        let cfg = Config {
+                            sc: "sc1".into(),
+                            window: false,
+                            src: (SIZE, SIZE),
+                            rect: Rect::new(0, 0, SIZE as i32, SIZE as i32),
+                            level: 0,
+                            tiles,
+                            max_kbps: None,
+                            title: "Screen 1".into(),
+                            exe: String::new(),
+                        };
                         let ctl = controller(&cfg);
-                        let mut fake = Fake { script: fake_script, pictures: 0, ready: Vec::new(), buf: Vec::new() };
+                        let mut fake = Fake {
+                            script: fake_script,
+                            pictures: 0,
+                            ready: Vec::new(),
+                            buf: Vec::new(),
+                        };
                         run(cfg, ctl, &mut fake, cmd_rx, out, started_tx);
                     },
-                    || emit(&told, json!({"event": "ended", "sc": "sc1", "reason": "failed"})),
+                    || {
+                        emit(
+                            &told,
+                            json!({"event": "ended", "sc": "sc1", "reason": "failed"}),
+                        )
+                    },
                 );
             });
-            let started = started_rx.recv_timeout(Duration::from_secs(5)).ok().and_then(Result::ok).unwrap_or(Value::Null);
-            Run { cmds: Some(cmds), out: out_rx, deframer: Deframer::default(), script, thread: Some(thread), began, ack: true, started }
+            let started = started_rx
+                .recv_timeout(Duration::from_secs(5))
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or(Value::Null);
+            Run {
+                cmds: Some(cmds),
+                out: out_rx,
+                deframer: Deframer::default(),
+                script,
+                thread: Some(thread),
+                began,
+                ack: true,
+                started,
+            }
         }
 
         fn send(&self, cmd: Cmd) {
@@ -1000,7 +1250,17 @@ mod tests {
         }
 
         fn flow(acked: u32) -> Cmd {
-            Cmd::Flow { acked, rtt_ms: 0, level: 0, lost_tiles: false, dropped_through: 0, raw: 0, wire: 0, link_full_ms: 0, win: false }
+            Cmd::Flow {
+                acked,
+                rtt_ms: 0,
+                level: 0,
+                lost_tiles: false,
+                dropped_through: 0,
+                raw: 0,
+                wire: 0,
+                link_full_ms: 0,
+                win: false,
+            }
         }
 
         fn see(&mut self, o: Out) -> Option<Seen> {
@@ -1010,14 +1270,25 @@ mod tests {
                     assert_eq!(media[0], MEDIA);
                     match media[1] {
                         KIND_VIDEO => {
-                            let (n, seq) = (usize::from(media[3]), u32::from_le_bytes([media[4], media[5], media[6], media[7]]));
+                            let (n, seq) = (
+                                usize::from(media[3]),
+                                u32::from_le_bytes([media[4], media[5], media[6], media[7]]),
+                            );
                             let unpaint = (0..n).map(|i| rect_at(&media, 20 + i * 8)).collect();
                             if self.ack {
                                 self.send(Run::flow(seq));
                             }
-                            Some(Seen::Video { key: media[2] & wire::FLAG_KEY != 0, seq, unpaint, unpaint_all: media[2] & wire::FLAG_UNPAINT_ALL != 0, at: self.began.elapsed() })
+                            Some(Seen::Video {
+                                key: media[2] & wire::FLAG_KEY != 0,
+                                seq,
+                                unpaint,
+                                unpaint_all: media[2] & wire::FLAG_UNPAINT_ALL != 0,
+                                at: self.began.elapsed(),
+                            })
                         }
-                        KIND_TILE => Some(Seen::Tile { rect: rect_at(&media, 12) }),
+                        KIND_TILE => Some(Seen::Tile {
+                            rect: rect_at(&media, 12),
+                        }),
                         _ => Some(Seen::Cursor),
                     }
                 }
@@ -1058,7 +1329,8 @@ mod tests {
         /// The stream's end: what was left to say, with the thread joined.
         fn end(&mut self) -> Vec<Seen> {
             if let Some(t) = self.thread.take() {
-                t.join().expect("the stream thread ends without a panic escaping");
+                t.join()
+                    .expect("the stream thread ends without a panic escaping");
             }
             let mut seen = Vec::new();
             while let Ok(bytes) = self.out.try_recv() {
@@ -1080,7 +1352,11 @@ mod tests {
             let mut seen = self.pump(0);
             seen.extend(self.end());
             let last = seen.last().expect("the stream said something");
-            assert_eq!(last.event(), Some("ended"), "the end is the last thing said: {last:?}");
+            assert_eq!(
+                last.event(),
+                Some("ended"),
+                "the end is the last thing said: {last:?}"
+            );
             match last {
                 Seen::Event(v) => v["reason"].as_str().unwrap_or_default().to_string(),
                 _ => unreachable!(),
@@ -1100,12 +1376,40 @@ mod tests {
     #[test]
     fn a_stream_says_how_it_started_and_its_first_frame_is_a_keyframe() {
         let mut run = Run::start(false, Script::new());
-        assert_eq!((run.started["kind"].as_str(), run.started["w"].as_u64(), run.started["encoder"].as_str(), run.started["encoder_name"].as_str()), (Some("monitor"), Some(128), Some("hw"), Some("fake")));
+        assert_eq!(
+            (
+                run.started["kind"].as_str(),
+                run.started["w"].as_u64(),
+                run.started["encoder"].as_str(),
+                run.started["encoder_name"].as_str()
+            ),
+            (Some("monitor"), Some(128), Some("hw"), Some("fake"))
+        );
         let seen = run.until(3000, |s| videos(s).len() >= 4);
-        assert_eq!(seen[0].event(), Some("encoder"), "the encoder is told before any frame");
-        let keys: Vec<bool> = videos(&seen).iter().map(|v| matches!(v, Seen::Video { key: true, .. })).collect();
-        assert_eq!(&keys[..4], &[true, false, false, false], "a keyframe first, then deltas");
-        let seqs: Vec<u32> = videos(&seen).iter().map(|v| if let Seen::Video { seq, .. } = v { *seq } else { 0 }).collect();
+        assert_eq!(
+            seen[0].event(),
+            Some("encoder"),
+            "the encoder is told before any frame"
+        );
+        let keys: Vec<bool> = videos(&seen)
+            .iter()
+            .map(|v| matches!(v, Seen::Video { key: true, .. }))
+            .collect();
+        assert_eq!(
+            &keys[..4],
+            &[true, false, false, false],
+            "a keyframe first, then deltas"
+        );
+        let seqs: Vec<u32> = videos(&seen)
+            .iter()
+            .map(|v| {
+                if let Seen::Video { seq, .. } = v {
+                    *seq
+                } else {
+                    0
+                }
+            })
+            .collect();
         assert_eq!(&seqs[..4], &[1, 2, 3, 4]);
     }
 
@@ -1118,17 +1422,38 @@ mod tests {
         run.send(Cmd::Keyframe);
         let is_key = |s: &Seen| matches!(s, Seen::Video { key: true, .. });
         let seen = run.until(3000, |s| s.iter().any(is_key));
-        let at_of = |s: &Seen| if let Seen::Video { at, .. } = s { *at } else { Duration::ZERO };
-        let Some(key) = seen.iter().find(|s| is_key(s)) else { panic!("no keyframe came after the request") };
-        assert!(at_of(key) >= Duration::from_millis(900), "not within a second of the first keyframe: {:?}", at_of(key));
+        let at_of = |s: &Seen| {
+            if let Seen::Video { at, .. } = s {
+                *at
+            } else {
+                Duration::ZERO
+            }
+        };
+        let Some(key) = seen.iter().find(|s| is_key(s)) else {
+            panic!("no keyframe came after the request")
+        };
+        assert!(
+            at_of(key) >= Duration::from_millis(900),
+            "not within a second of the first keyframe: {:?}",
+            at_of(key)
+        );
         // While the keyframe waits for its second, no other frame is encoded (it would only be dropped): what came before it was already on
         // its way when it was asked for.
         for v in videos(&seen).into_iter().filter(|s| !is_key(s)) {
-            assert!(at_of(v) < asked + Duration::from_millis(250), "a frame at {:?} while the keyframe waited", at_of(v));
+            assert!(
+                at_of(v) < asked + Duration::from_millis(250),
+                "a frame at {:?} while the keyframe waited",
+                at_of(v)
+            );
         }
         let after = run.pump(400);
         assert!(!videos(&after).is_empty());
-        assert!(videos(&after).iter().all(|v| matches!(v, Seen::Video { key: false, .. })), "asked twice, made once");
+        assert!(
+            videos(&after)
+                .iter()
+                .all(|v| matches!(v, Seen::Video { key: false, .. })),
+            "asked twice, made once"
+        );
     }
 
     #[test]
@@ -1136,28 +1461,51 @@ mod tests {
         let mut run = Run::start(false, Script::new());
         run.ack = false;
         let seen = run.pump(700);
-        assert_eq!(videos(&seen).len(), crate::control::MIN_WINDOW as usize, "no more than the window in flight");
+        assert_eq!(
+            videos(&seen).len(),
+            crate::control::MIN_WINDOW as usize,
+            "no more than the window in flight"
+        );
         run.send(Run::flow(3));
         let more = run.until(3000, |s| videos(s).len() >= 2);
-        assert!(videos(&more).len() >= 2, "room again once it is acknowledged");
+        assert!(
+            videos(&more).len() >= 2,
+            "room again once it is acknowledged"
+        );
     }
 
     #[test]
     fn one_frame_is_in_the_encoder_until_it_comes_back_or_a_second_has_passed() {
-        let script = Script { hold: true, ..Script::new() };
+        let script = Script {
+            hold: true,
+            ..Script::new()
+        };
         let mut run = Run::start(false, script);
         run.pump(600);
-        assert_eq!(run.script.lock().unwrap().encodes.len(), 1, "the next picture waits for the frame in the encoder");
+        assert_eq!(
+            run.script.lock().unwrap().encodes.len(),
+            1,
+            "the next picture waits for the frame in the encoder"
+        );
         run.pump(900);
-        assert!(run.script.lock().unwrap().encodes.len() >= 2, "a frame the encoder never gives back is given up on");
+        assert!(
+            run.script.lock().unwrap().encodes.len() >= 2,
+            "a frame the encoder never gives back is given up on"
+        );
     }
 
     #[test]
     fn a_painted_tile_is_unpainted_with_the_next_frame_when_its_cell_changes() {
         let mut run = Run::start(true, Script::new());
         let seen = run.until(4000, |s| s.iter().any(Seen::is_tile));
-        let Some(Seen::Tile { rect }) = seen.iter().find(|s| s.is_tile()) else { panic!("no tile came for a still picture") };
-        assert_eq!(*rect, Rect::new(0, 0, SIZE as i32, SIZE as i32), "the still cells come as one region");
+        let Some(Seen::Tile { rect }) = seen.iter().find(|s| s.is_tile()) else {
+            panic!("no tile came for a still picture")
+        };
+        assert_eq!(
+            *rect,
+            Rect::new(0, 0, SIZE as i32, SIZE as i32),
+            "the still cells come as one region"
+        );
         assert!(videos(&seen).iter().all(|v| matches!(v, Seen::Video { unpaint, unpaint_all: false, .. } if unpaint.is_empty())), "nothing was painted before");
         {
             let mut s = run.script.lock().unwrap();
@@ -1166,9 +1514,25 @@ mod tests {
                 s.pixels[start..start + 64 * 4].fill(250);
             }
         }
-        let seen = run.until(3000, |s| s.iter().any(|v| matches!(v, Seen::Video { unpaint, .. } if !unpaint.is_empty())));
-        let Some(Seen::Video { unpaint, unpaint_all, .. }) = seen.iter().find(|v| matches!(v, Seen::Video { unpaint, .. } if !unpaint.is_empty())) else { panic!("the changed cell was never unpainted") };
-        assert_eq!((unpaint.as_slice(), *unpaint_all), (&[Rect::new(0, 0, 64, 64)][..], false), "only the cell that changed");
+        let seen = run.until(3000, |s| {
+            s.iter()
+                .any(|v| matches!(v, Seen::Video { unpaint, .. } if !unpaint.is_empty()))
+        });
+        let Some(Seen::Video {
+            unpaint,
+            unpaint_all,
+            ..
+        }) = seen
+            .iter()
+            .find(|v| matches!(v, Seen::Video { unpaint, .. } if !unpaint.is_empty()))
+        else {
+            panic!("the changed cell was never unpainted")
+        };
+        assert_eq!(
+            (unpaint.as_slice(), *unpaint_all),
+            (&[Rect::new(0, 0, 64, 64)][..], false),
+            "only the cell that changed"
+        );
     }
 
     #[test]
@@ -1177,21 +1541,41 @@ mod tests {
         run.until(4000, |s| s.iter().any(Seen::is_tile));
         run.send(Cmd::Pause(true));
         run.pump(100);
-        assert!(videos(&run.pump(400)).is_empty(), "nothing is sent to a link that is paused");
+        assert!(
+            videos(&run.pump(400)).is_empty(),
+            "nothing is sent to a link that is paused"
+        );
         run.send(Cmd::Pause(false));
         let seen = run.until(3000, |s| s.iter().any(Seen::is_video));
-        assert!(matches!(seen.iter().find(|s| s.is_video()), Some(Seen::Video { key: true, unpaint_all: true, .. })), "{seen:?}");
+        assert!(
+            matches!(
+                seen.iter().find(|s| s.is_video()),
+                Some(Seen::Video {
+                    key: true,
+                    unpaint_all: true,
+                    ..
+                })
+            ),
+            "{seen:?}"
+        );
     }
 
     #[test]
-    fn a_sharpen_sends_the_part_asked_for_before_any_other_tile() {
+    fn a_sharpen_sends_only_the_part_asked_for_when_the_link_is_too_slow_for_tiles() {
         let mut run = Run::start(true, Script::new());
-        run.until(2000, |s| !videos(s).is_empty());
-        // Asked for before any cell is still long enough to be painted by itself: while it lasts, only its cells go.
+        // Below the bitrate crisp tiles need: they do not go by themselves.
+        run.send(Cmd::Cap(Some(500)));
+        let before = run.pump(3000);
+        assert!(
+            !before.iter().any(Seen::is_tile),
+            "no crisp tile on a slow link"
+        );
         run.send(Cmd::Sharpen(Rect::new(0, 0, 64, 64)));
-        let seen = run.until(8000, |s| s.iter().any(Seen::is_tile));
-        let Some(Seen::Tile { rect }) = seen.iter().find(|s| s.is_tile()) else { panic!("no tile came for the part asked for") };
-        assert_eq!(*rect, Rect::new(0, 0, 64, 64), "the first tile is the part the phone shows");
+        let seen = run.until(6000, |s| s.iter().any(Seen::is_tile));
+        let Some(Seen::Tile { rect }) = seen.iter().find(|s| s.is_tile()) else {
+            panic!("no tile came for the part asked for; before: {before:?}; after: {seen:?}")
+        };
+        assert_eq!(*rect, Rect::new(0, 0, 64, 64));
     }
 
     #[test]
@@ -1202,11 +1586,23 @@ mod tests {
         assert_eq!(run.script.lock().unwrap().finished, 1);
         assert!(run.script.lock().unwrap().dropped);
 
-        let mut run = Run::start(false, Script { hotkey: true, ..Script::new() });
+        let mut run = Run::start(
+            false,
+            Script {
+                hotkey: true,
+                ..Script::new()
+            },
+        );
         assert_eq!(run.ended(), "hotkey");
         assert_eq!(run.script.lock().unwrap().finished, 1);
 
-        let mut run = Run::start(false, Script { end: Some("display_changed"), ..Script::new() });
+        let mut run = Run::start(
+            false,
+            Script {
+                end: Some("display_changed"),
+                ..Script::new()
+            },
+        );
         assert_eq!(run.ended(), "display_changed", "what the capture says");
         assert_eq!(run.script.lock().unwrap().finished, 1);
 
@@ -1219,7 +1615,13 @@ mod tests {
 
     #[test]
     fn a_stream_that_panics_says_it_ended_and_still_lets_the_machine_go() {
-        let mut run = Run::start(false, Script { panic_on_encode: true, ..Script::new() });
+        let mut run = Run::start(
+            false,
+            Script {
+                panic_on_encode: true,
+                ..Script::new()
+            },
+        );
         assert_eq!(run.ended(), "failed");
         let s = run.script.lock().unwrap();
         assert!(s.dropped, "the backend is dropped as the panic unwinds");
@@ -1229,13 +1631,44 @@ mod tests {
     #[test]
     fn the_loops_commands_are_read_from_a_line_and_the_rest_are_left_to_the_host() {
         let flow = json!({"acked": 7, "rtt_ms": 90_000, "level": 9, "lost_tiles": true, "link_full_ms": 99_999_999, "win": true});
-        assert!(matches!(Cmd::parse("flow", &flow), Parsed::Cmd(Cmd::Flow { acked: 7, rtt_ms: 60_000, level: 3, lost_tiles: true, link_full_ms: 3_600_000, win: true, .. })));
-        assert!(matches!(Cmd::parse("sharpen", &json!({"rect": {"x": 1, "y": 2, "w": 3, "h": 4}})), Parsed::Cmd(Cmd::Sharpen(r)) if r == Rect::new(1, 2, 3, 4)));
-        assert!(matches!(Cmd::parse("sharpen", &json!({"rect": {"x": 1, "y": 2, "w": 70_000, "h": 4}})), Parsed::Nothing), "not a rectangle the picture can have");
-        assert!(matches!(Cmd::parse("cap", &json!({"max_kbps": 500})), Parsed::Cmd(Cmd::Cap(Some(500)))));
-        assert!(matches!(Cmd::parse("pause", &json!({"paused": true})), Parsed::Cmd(Cmd::Pause(true))));
+        assert!(matches!(
+            Cmd::parse("flow", &flow),
+            Parsed::Cmd(Cmd::Flow {
+                acked: 7,
+                rtt_ms: 60_000,
+                level: 3,
+                lost_tiles: true,
+                link_full_ms: 3_600_000,
+                win: true,
+                ..
+            })
+        ));
+        assert!(
+            matches!(Cmd::parse("sharpen", &json!({"rect": {"x": 1, "y": 2, "w": 3, "h": 4}})), Parsed::Cmd(Cmd::Sharpen(r)) if r == Rect::new(1, 2, 3, 4))
+        );
+        assert!(
+            matches!(
+                Cmd::parse(
+                    "sharpen",
+                    &json!({"rect": {"x": 1, "y": 2, "w": 70_000, "h": 4}})
+                ),
+                Parsed::Nothing
+            ),
+            "not a rectangle the picture can have"
+        );
+        assert!(matches!(
+            Cmd::parse("cap", &json!({"max_kbps": 500})),
+            Parsed::Cmd(Cmd::Cap(Some(500)))
+        ));
+        assert!(matches!(
+            Cmd::parse("pause", &json!({"paused": true})),
+            Parsed::Cmd(Cmd::Pause(true))
+        ));
         for host_only in ["input", "text", "stop", "nonsense"] {
-            assert!(matches!(Cmd::parse(host_only, &json!({})), Parsed::Unknown), "{host_only}");
+            assert!(
+                matches!(Cmd::parse(host_only, &json!({})), Parsed::Unknown),
+                "{host_only}"
+            );
         }
     }
 }

@@ -31,7 +31,9 @@ use crate::control::Params;
 use crate::geom::{self, Rect};
 use crate::input::{fresh, parse_hotkey, Hotkey, QUEUE};
 use crate::states::{input_policy, InputPolicy, Observed, State};
-use crate::stream_core::{self, emit, Backend, Cmd, Config, Encoded, EncoderInfo, Grab, InputSignal, Parsed};
+use crate::stream_core::{
+    self, emit, Backend, Cmd, Config, Encoded, EncoderInfo, Grab, InputSignal, Parsed,
+};
 use crate::targets::{self, TargetId};
 use crate::wire::Shape;
 
@@ -99,13 +101,44 @@ impl Host {
     /// Starts a stream (ending the one before, if any): its kind, title and size once its first look is done.
     pub fn start(&mut self, req: &Value) -> Result<Value, String> {
         self.stop("replaced");
-        let sc = req["sc"].as_str().filter(|s| !s.is_empty() && s.len() <= 64).ok_or("missing sc")?.to_string();
-        let target = req["target"].as_str().and_then(TargetId::parse).ok_or("not a target this computer has")?;
-        let device: String = req["device"].as_str().unwrap_or("a phone").chars().filter(|c| !c.is_control()).take(40).collect();
-        let hotkey_text = req["hotkey"].as_str().unwrap_or(crate::input::DEFAULT_HOTKEY).to_string();
+        let sc = req["sc"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 64)
+            .ok_or("missing sc")?
+            .to_string();
+        let target = req["target"]
+            .as_str()
+            .and_then(TargetId::parse)
+            .ok_or("not a target this computer has")?;
+        let device: String = req["device"]
+            .as_str()
+            .unwrap_or("a phone")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(40)
+            .collect();
+        let hotkey_text = req["hotkey"]
+            .as_str()
+            .unwrap_or(crate::input::DEFAULT_HOTKEY)
+            .to_string();
         // The stop hotkey is always on: a screen is not shared without one that works.
-        let hotkey = parse_hotkey(&hotkey_text).ok_or("the stop hotkey in Settings → Mobile is not one that can be used")?;
-        let opts = Opts { sc: sc.clone(), target, device, hotkey, hotkey_text, level: req["level"].as_u64().unwrap_or(0).min(3) as u8, tiles: req["tiles"].as_bool() != Some(false), max_kbps: req["max_kbps"].as_u64().map(|k| k.clamp(u64::from(crate::control::MIN_KBPS), u64::from(crate::control::MAX_KBPS)) as u32) };
+        let hotkey = parse_hotkey(&hotkey_text)
+            .ok_or("the stop hotkey in Settings → Mobile is not one that can be used")?;
+        let opts = Opts {
+            sc: sc.clone(),
+            target,
+            device,
+            hotkey,
+            hotkey_text,
+            level: req["level"].as_u64().unwrap_or(0).min(3) as u8,
+            tiles: req["tiles"].as_bool() != Some(false),
+            max_kbps: req["max_kbps"].as_u64().map(|k| {
+                k.clamp(
+                    u64::from(crate::control::MIN_KBPS),
+                    u64::from(crate::control::MAX_KBPS),
+                ) as u32
+            }),
+        };
         let (cmds, cmd_rx) = channel();
         let (input, input_rx) = sync_channel(QUEUE);
         let (started_tx, started_rx) = channel();
@@ -120,11 +153,20 @@ impl Host {
                 || run(opts, cmd_rx, input_rx, out, started_tx, flag),
                 || {
                     system::streaming(false);
-                    emit(&told, json!({"event": "ended", "sc": told_sc, "reason": "failed"}));
+                    emit(
+                        &told,
+                        json!({"event": "ended", "sc": told_sc, "reason": "failed"}),
+                    );
                 },
             );
         });
-        let mut running = Running { sc, cmds, input, stopping, thread: Some(thread) };
+        let mut running = Running {
+            sc,
+            cmds,
+            input,
+            stopping,
+            thread: Some(thread),
+        };
         match started_rx.recv_timeout(START_WAIT) {
             Ok(Ok(v)) => {
                 self.running = Some(running);
@@ -153,7 +195,9 @@ impl Host {
     }
 
     fn current(&self, req: &Value) -> Option<&Running> {
-        self.running.as_ref().filter(|r| Some(r.sc.as_str()) == req["sc"].as_str())
+        self.running
+            .as_ref()
+            .filter(|r| Some(r.sc.as_str()) == req["sc"].as_str())
     }
 
     pub fn stop(&mut self, reason: &str) {
@@ -186,12 +230,20 @@ impl Host {
                 None
             }
             "text" => {
-                let Some(text) = req["text"].as_str().and_then(crate::input::checked_text) else { return Some(Err("not text that can be typed".into())) };
-                Some(match r.input.try_send(InputCmd::Text(text.to_string(), t, req["id"].as_u64().unwrap_or(0))) {
-                    // The answer comes from the input thread, once typed.
-                    Ok(()) => return None,
-                    Err(_) => Err("too much input waiting".into()),
-                })
+                let Some(text) = req["text"].as_str().and_then(crate::input::checked_text) else {
+                    return Some(Err("not text that can be typed".into()));
+                };
+                Some(
+                    match r.input.try_send(InputCmd::Text(
+                        text.to_string(),
+                        t,
+                        req["id"].as_u64().unwrap_or(0),
+                    )) {
+                        // The answer comes from the input thread, once typed.
+                        Ok(()) => return None,
+                        Err(_) => Err("too much input waiting".into()),
+                    },
+                )
             }
             _ => match Cmd::parse(cmd, req) {
                 Parsed::Cmd(c) => {
@@ -225,13 +277,27 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
             let outputs = d3d::outputs().map_err(|e| e.to_string())?;
             let mut sorted: Vec<_> = outputs.into_iter().collect();
             sorted.sort_by_key(|(m, ..)| !m.primary);
-            let index = sorted.iter().position(|(m, ..)| &m.name == name).ok_or("that screen is no longer connected")?;
+            let index = sorted
+                .iter()
+                .position(|(m, ..)| &m.name == name)
+                .ok_or("that screen is no longer connected")?;
             let (monitor, adapter, output) = sorted.swap_remove(index);
             let device = Device::on(&adapter).map_err(|e| e.to_string())?;
             let dxgi = Dxgi::new(&device, output, monitor.rect)?;
             // The encoder's sides must be even: the picture is the monitor's top-left even part.
-            let tex = device.frame_texture(monitor.rect.w.max(2) as u32 & !1, monitor.rect.h.max(2) as u32 & !1).map_err(|e| e.to_string())?;
-            Ok((device, Source::Monitor(dxgi, tex), monitor.rect, format!("Screen {}", index + 1), String::new()))
+            let tex = device
+                .frame_texture(
+                    monitor.rect.w.max(2) as u32 & !1,
+                    monitor.rect.h.max(2) as u32 & !1,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok((
+                device,
+                Source::Monitor(dxgi, tex),
+                monitor.rect,
+                format!("Screen {}", index + 1),
+                String::new(),
+            ))
         }
         TargetId::Window { hwnd: h, pid } => {
             let win = hwnd(*h);
@@ -244,9 +310,11 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
                 return Err("that window cannot be shared".into());
             }
             let rect = targets_win::window_rect(win).ok_or("that window cannot be shown")?;
-            let adapter = d3d::adapter_at(rect.x + rect.w / 2, rect.y + rect.h / 2).map_err(|e| e.to_string())?;
+            let adapter = d3d::adapter_at(rect.x + rect.w / 2, rect.y + rect.h / 2)
+                .map_err(|e| e.to_string())?;
             let device = Device::on(&adapter).map_err(|e| e.to_string())?;
-            let wgc = Wgc::start(&device, win).map_err(|e| format!("this window cannot be captured: {e}"))?;
+            let wgc = Wgc::start(&device, win)
+                .map_err(|e| format!("this window cannot be captured: {e}"))?;
             let title = info.title.chars().take(120).collect();
             Ok((device, Source::Window(wgc, *h, *pid), rect, title, info.exe))
         }
@@ -339,13 +407,23 @@ impl Backend for WinBackend {
     fn grab(&mut self, wait_ms: u64) -> Grab<ID3D11Texture2D> {
         match &mut self.source {
             Source::Monitor(dxgi, tex) => match dxgi.grab(&self.d, wait_ms as u32, tex) {
-                capture_dxgi::Grab::Frame { dirty } => Grab::Frame { picture: tex.clone(), size: self.src, dirty, first_full: dxgi.first_full.take() },
+                capture_dxgi::Grab::Frame { dirty } => Grab::Frame {
+                    picture: tex.clone(),
+                    size: self.src,
+                    dirty,
+                    first_full: dxgi.first_full.take(),
+                },
                 capture_dxgi::Grab::Changed => Grab::End("display_changed"),
                 capture_dxgi::Grab::Unavailable => Grab::Failed,
                 _ => Grab::Idle,
             },
             Source::Window(wgc, ..) => match wgc.grab(Duration::from_millis(wait_ms)) {
-                (capture_wgc::Grab::Frame { w, h }, Some(t)) => Grab::Frame { picture: t, size: (w, h), dirty: None, first_full: None },
+                (capture_wgc::Grab::Frame { w, h }, Some(t)) => Grab::Frame {
+                    picture: t,
+                    size: (w, h),
+                    dirty: None,
+                    first_full: None,
+                },
                 (capture_wgc::Grab::Failed, _) => Grab::Failed,
                 _ => {
                     if wgc.closed.load(Ordering::SeqCst) {
@@ -360,7 +438,10 @@ impl Backend for WinBackend {
 
     fn resize(&mut self, src: (u32, u32), params: &Params, hardware: bool) -> Result<(), String> {
         let fps = u32::from(params.fps);
-        match (Converter::new(&self.d, src, (params.w, params.h), fps), Encoder::open(&self.d, params.w, params.h, fps, params.kbps, hardware)) {
+        match (
+            Converter::new(&self.d, src, (params.w, params.h), fps),
+            Encoder::open(&self.d, params.w, params.h, fps, params.kbps, hardware),
+        ) {
             (Ok(c), Ok(e)) => {
                 self.conv = c;
                 self.encoder = e;
@@ -373,12 +454,26 @@ impl Backend for WinBackend {
     }
 
     fn software_encoder(&mut self, params: &Params) -> Result<(), String> {
-        self.encoder = Encoder::open(&self.d, params.w, params.h, u32::from(params.fps), params.kbps, false).map_err(|e| e.to_string())?;
+        self.encoder = Encoder::open(
+            &self.d,
+            params.w,
+            params.h,
+            u32::from(params.fps),
+            params.kbps,
+            false,
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     fn encoder_info(&self) -> EncoderInfo {
-        EncoderInfo { hardware: self.encoder.hardware, name: self.encoder.name.clone(), refused: self.encoder.refused.clone(), first_output_ms: self.encoder.first_output_ms, sequence_header: self.encoder.sequence_header.clone() }
+        EncoderInfo {
+            hardware: self.encoder.hardware,
+            name: self.encoder.name.clone(),
+            refused: self.encoder.refused.clone(),
+            first_output_ms: self.encoder.first_output_ms,
+            sequence_header: self.encoder.sequence_header.clone(),
+        }
     }
 
     fn hardware(&self) -> bool {
@@ -406,16 +501,33 @@ impl Backend for WinBackend {
     }
 
     fn encode(&mut self, input: &ID3D11Texture2D, time: i64, key: bool) -> Result<bool, String> {
-        self.encoder.encode(&self.d, input, time, key).map_err(|e| e.to_string())
+        self.encoder
+            .encode(&self.d, input, time, key)
+            .map_err(|e| e.to_string())
     }
 
     fn poll(&mut self) -> Result<Vec<Encoded>, String> {
         let done = self.encoder.poll().map_err(|e| e.to_string())?;
-        Ok(done.into_iter().map(|e| Encoded { data: e.data, key: e.key, time: e.time, qp: e.qp }).collect())
+        Ok(done
+            .into_iter()
+            .map(|e| Encoded {
+                data: e.data,
+                key: e.key,
+                time: e.time,
+                qp: e.qp,
+            })
+            .collect())
     }
 
-    fn readback(&mut self, picture: &ID3D11Texture2D, src: (u32, u32), dirty: Option<&[Rect]>) -> bool {
-        self.readback.read_regions(&self.d, picture, src.0, src.1, dirty).is_ok()
+    fn readback(
+        &mut self,
+        picture: &ID3D11Texture2D,
+        src: (u32, u32),
+        dirty: Option<&[Rect]>,
+    ) -> bool {
+        self.readback
+            .read_regions(&self.d, picture, src.0, src.1, dirty)
+            .is_ok()
     }
 
     fn pixels(&self) -> (&[u8], usize) {
@@ -436,7 +548,14 @@ impl Backend for WinBackend {
     }
 }
 
-fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncSender<Vec<u8>>, started: Sender<Result<Value, String>>, stopping: Arc<AtomicBool>) {
+fn run(
+    opts: Opts,
+    cmds: Receiver<Cmd>,
+    input_rx: Receiver<InputCmd>,
+    out: SyncSender<Vec<u8>>,
+    started: Sender<Result<Value, String>>,
+    stopping: Arc<AtomicBool>,
+) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
@@ -455,10 +574,37 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         _ => None,
     };
     let src = (rect.w.max(2) as u32 & !1, rect.h.max(2) as u32 & !1);
-    let cfg = Config { sc: opts.sc.clone(), window, src, rect, level: opts.level, tiles: opts.tiles, max_kbps: opts.max_kbps, title, exe };
+    let cfg = Config {
+        sc: opts.sc.clone(),
+        window,
+        src,
+        rect,
+        level: opts.level,
+        tiles: opts.tiles,
+        max_kbps: opts.max_kbps,
+        title,
+        exe,
+    };
     let mut ctl = stream_core::controller(&cfg);
     let mut params = ctl.params();
-    let mut encoder = match Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, true).or_else(|_| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false)) {
+    let encoder = match Encoder::open(
+        &d,
+        params.w,
+        params.h,
+        u32::from(params.fps),
+        params.kbps,
+        true,
+    )
+    .or_else(|_| {
+        Encoder::open(
+            &d,
+            params.w,
+            params.h,
+            u32::from(params.fps),
+            params.kbps,
+            false,
+        )
+    }) {
         Ok(e) => e,
         Err(e) => {
             let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
@@ -472,13 +618,18 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let conv = match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps)) {
         Ok(c) => c,
         Err(e) => {
-            let _ = started.send(Err(format!("the picture cannot be converted for the encoder: {e}")));
+            let _ = started.send(Err(format!(
+                "the picture cannot be converted for the encoder: {e}"
+            )));
             return;
         }
     };
     // The border and the hotkey first: without them nothing is shared, and the phone is told why.
     let (hk_tx, hk_rx) = channel();
-    let label = format!("Shared with {} · {} stops it", opts.device, opts.hotkey_text);
+    let label = format!(
+        "Shared with {} · {} stops it",
+        opts.device, opts.hotkey_text
+    );
     let border = match Border::show(rect, &label, opts.hotkey, hk_tx) {
         Ok(b) => b,
         Err(e) => {
@@ -489,19 +640,54 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     system::streaming(true);
     // Input: its own thread, with the place and the policy the stream thread keeps up to date.
     let desktop = geom::virtual_desktop(&d3d::monitors());
-    let shared = Arc::new(Mutex::new(Shared { geometry: Geometry { window: window_handle.map(|(h, _)| h), rect, src, desktop }, policy: input_policy(State::Live, window) }));
+    let shared = Arc::new(Mutex::new(Shared {
+        geometry: Geometry {
+            window: window_handle.map(|(h, _)| h),
+            rect,
+            src,
+            desktop,
+        },
+        policy: input_policy(State::Live, window),
+    }));
     let (outcome_tx, outcome_rx) = channel::<Outcome>();
     let input_guard = {
         let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
-        InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping))) }
+        InputGuard {
+            stopping: stopping.clone(),
+            thread: Some(std::thread::spawn(move || {
+                input_loop(input_rx, shared, outcome_tx, out, stopping)
+            })),
+        }
     };
-    let mut backend = WinBackend { input_guard: Some(input_guard), border: Some(border), shared: Some(shared), hk_rx, outcome_rx, stopping, readback: Readback::new(), looker: Looker::new(), window_handle, desktop, src, conv, encoder, source, d };
+    let mut backend = WinBackend {
+        input_guard: Some(input_guard),
+        border: Some(border),
+        shared: Some(shared),
+        hk_rx,
+        outcome_rx,
+        stopping,
+        readback: Readback::new(),
+        looker: Looker::new(),
+        window_handle,
+        desktop,
+        src,
+        conv,
+        encoder,
+        source,
+        d,
+    };
     stream_core::run(cfg, ctl, &mut backend, cmds, out, started);
 }
 
 /// The phone's input, in the order it came, as long as it is fresh, the stream is not stopping and the state allows it. A button a `down` left
 /// pressed is released when it ends.
-fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Sender<Outcome>, out: SyncSender<Vec<u8>>, stopping: Arc<AtomicBool>) {
+fn input_loop(
+    rx: Receiver<InputCmd>,
+    shared: Arc<Mutex<Shared>>,
+    outcomes: Sender<Outcome>,
+    out: SyncSender<Vec<u8>>,
+    stopping: Arc<AtomicBool>,
+) {
     let _mmcss = system::Mmcss::capture();
     let mut pressed: Option<input_win::Held> = None;
     loop {
@@ -559,7 +745,9 @@ fn input_loop(rx: Receiver<InputCmd>, shared: Arc<Mutex<Shared>>, outcomes: Send
                             let _ = outcomes.send(Outcome::NotFront);
                             json!({"id": id, "err": format!("not_front_partial: another window took the focus after {typed} characters; the rest was not typed")})
                         }
-                        (Outcome::Blocked, _) => json!({"id": id, "err": "Windows did not take it: an app run as administrator, or a secure screen"}),
+                        (Outcome::Blocked, _) => {
+                            json!({"id": id, "err": "Windows did not take it: an app run as administrator, or a secure screen"})
+                        }
                         _ => json!({"id": id, "err": "typing is not possible in this state"}),
                     }
                 };
