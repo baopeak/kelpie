@@ -8,6 +8,8 @@ use kelpie_screen::wire::Video;
 enum Start {
     Ok,
     Fail,
+    /// As the helper on a Mac without the Screen Recording permission.
+    NoPermission,
     /// After this many milliseconds.
     Slow(u64),
     /// As the real helper does: a frame streamed under the new screen first, then the answer after this many milliseconds.
@@ -58,6 +60,7 @@ fn rig_with(lane: usize, start: Start) -> Rig {
                             match start {
                                 Start::Ok => ok,
                                 Start::Fail => json!({"error": {"message": "that window was closed"}}),
+                                Start::NoPermission => json!({"error": {"message": "no_screen_permission: the helper's own words"}}),
                                 Start::Slow(ms) => {
                                     tokio::time::sleep(Duration::from_millis(ms)).await;
                                     ok
@@ -75,6 +78,7 @@ fn rig_with(lane: usize, start: Start) -> Rig {
                             "elsewhere" => json!({"error": {"message": "not_front: the shared window is not in front on the computer, so nothing was typed"}}),
                             "moved" => json!({"error": {"message": "not_front_partial: another window took the focus after 3 characters; the rest was not typed"}}),
                             "dialog" => json!({"error": {"message": "covered_dialog: a dialog of another program is in front of the shared window, so nothing was typed"}}),
+                            "untrusted" => json!({"error": {"message": "no_accessibility: the helper's own words"}}),
                             // A long text: typed for a while.
                             "slow" => {
                                 tokio::time::sleep(Duration::from_millis(400)).await;
@@ -181,6 +185,7 @@ async fn targets_come_from_the_app_checked_and_the_stream_goes_on_the_media_lane
     let rows = listed["targets"].as_array().unwrap();
     assert_eq!(rows.len(), 2, "unknown ids and kinds are left out: {rows:?}");
     assert_eq!((rows[1]["title"].as_str(), rows[1]["shortcut"].as_str()), (Some("main.rs — kelpie"), Some("ide")));
+    assert_eq!(listed["os"], HOST_OS, "the picker knows which computer it is");
     let sc = r.start().await;
     r.send(&sc, &video(1, true, 2000));
     r.send(&sc, &video(2, false, 500));
@@ -584,7 +589,31 @@ async fn typing_the_focus_refused_says_why_to_the_phone() {
     let e = refusal("dialog").await;
     assert_eq!(e.code, "covered");
     assert!(e.message.contains("Share the whole monitor to type into this dialog"), "{}", e.message);
+    let e = refusal("untrusted").await;
+    assert_eq!(e.code, "no_accessibility", "a Mac that has not allowed Kelpie to control it");
+    assert!(e.message.contains("Privacy & Security → Accessibility") && !e.message.contains("helper"), "the daemon's plain words: {}", e.message);
     assert_eq!(r.verb("sc_text", json!({"sc": sc, "text": "fine", "st": now_millis()})).await.unwrap().unwrap()["result"], "sent");
+}
+
+#[tokio::test]
+async fn a_mac_without_screen_recording_refuses_the_start_with_the_plain_reason() {
+    let r = rig_with(8, Start::NoPermission);
+    let e = r.verb("sc_start", json!({"target": "w:66:7"})).await.unwrap_err();
+    assert_eq!(e.code, "no_screen_permission");
+    assert!(e.message.contains("Privacy & Security → Screen Recording") && !e.message.contains("helper"), "the daemon's plain words: {}", e.message);
+    assert_eq!(r.told_now("screen.stop").await.len(), 1, "the app is still told to let go");
+    assert_eq!(r.d.screen.count(), 0);
+}
+
+#[tokio::test]
+async fn the_phone_is_told_which_computer_this_is() {
+    assert_eq!(HOST_OS, if cfg!(target_os = "macos") { "mac" } else { "windows" });
+    let mut r = rig();
+    let started = r.verb("sc_start", json!({"target": "w:66:7"})).await.unwrap().unwrap();
+    assert_eq!(started["os"], HOST_OS, "the key bar shows the computer's own modifiers");
+    // A password field holding a Mac's keyboard reaches the phone.
+    r.d.screen.on_event(&r.d, APP, &json!({"sc": started["sc"], "kind": "state", "state": "secure_input"}));
+    assert_eq!(r.next("sc_state").await.unwrap()["state"], "secure_input");
 }
 
 #[tokio::test]
