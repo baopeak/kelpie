@@ -141,8 +141,11 @@ class Page:
         from selenium.webdriver.common.by import By
 
         el = self.d.find_element(By.CSS_SELECTOR, sel)
-        el.clear()
-        el.send_keys(text)
+        # safaridriver's typing on iOS does not reach the field; the value is set as an input would set it.
+        self.js("""const e = arguments[0]; e.focus();
+                   const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), 'value').set; set.call(e, arguments[1]);
+                   e.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: arguments[1]}));
+                   e.dispatchEvent(new Event('change', {bubbles: true}));""", el, text)
 
     def text(self, sel):
         return (self.js("const e = document.querySelector(arguments[0]); return e ? e.textContent : ''", sel) or "").strip()
