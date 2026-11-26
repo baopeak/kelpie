@@ -155,8 +155,9 @@ class MacRun(Run):
         self.d = driver
 
 
-def capture_mac(run, projects, out, programs, port):
-    """The Mac's own pictures, after the shared tour: simulated agents, Settings → Mobile, more settings pages, the hero."""
+def capture_mac(run, projects, out, programs, port, mac=True):
+    """The Mac's own pictures, after the shared tour: simulated agents, Settings → Mobile, more settings pages, the hero.
+    `mac=False` (linux_shots.py): no Screen Recording / Accessibility rows, and the hero at the tour's own window size."""
     d = run.d
     shots = {}
 
@@ -221,12 +222,13 @@ def capture_mac(run, projects, out, programs, port):
     d.js(f"{S}.openSettings('mobile')")
     readme_shots_wait(lambda: d.js("return !!document.querySelector('[data-mobile-advanced]')"), 15)
     shot("settings-mobile", "Settings → Mobile, phone access on in an isolated daemon (no pairing code shown)")
-    d.js("const e = document.querySelector('[data-mobile-advanced]'); e.open = true; e.dispatchEvent(new Event('toggle'));")
-    found = readme_shots_wait(lambda: d.js("const e = document.querySelector('[data-mac-permissions]'); if (!e) return false; e.scrollIntoView({block: 'start'}); "
-                                         "let s = e.parentElement; while (s && !(s.scrollHeight > s.clientHeight && /auto|scroll/.test(getComputedStyle(s).overflowY))) s = s.parentElement; "
-                                         "if (s) s.scrollTop -= 170; return true"), 20)
-    run.check("Settings → Mobile shows the Mac's Screen Recording and Accessibility rows", bool(found))
-    shot("mobile-permissions", "Settings → Mobile → Advanced: the Mac's Screen Recording and Accessibility rows")
+    if mac:
+        d.js("const e = document.querySelector('[data-mobile-advanced]'); e.open = true; e.dispatchEvent(new Event('toggle'));")
+        found = readme_shots_wait(lambda: d.js("const e = document.querySelector('[data-mac-permissions]'); if (!e) return false; e.scrollIntoView({block: 'start'}); "
+                                             "let s = e.parentElement; while (s && !(s.scrollHeight > s.clientHeight && /auto|scroll/.test(getComputedStyle(s).overflowY))) s = s.parentElement; "
+                                             "if (s) s.scrollTop -= 170; return true"), 20)
+        run.check("Settings → Mobile shows the Mac's Screen Recording and Accessibility rows", bool(found))
+        shot("mobile-permissions", "Settings → Mobile → Advanced: the Mac's Screen Recording and Accessibility rows")
     d.keys("escape")
     for section in ("notifications", "layouts", "remote", "commands", "daemon", "voice", "about"):
         d.js(f"{S}.openSettings(arguments[0])", section)
@@ -241,12 +243,15 @@ def capture_mac(run, projects, out, programs, port):
     hero_chat = chat(atlas, "Coupon fix (simulated)", "chat_work", "right")
     readme_shots_wait(lambda: any("Fixed." in i for i in items_of(hero_chat["id"])), 30)
     # The window as large as the screen lets it be (macOS keeps it above the Dock), pictured on its own.
-    d.window((0, 0, 1600, 1200))
+    if mac:
+        d.window((0, 0, 1600, 1200))
     time.sleep(2.5)
     d.screenshot(str(out / "hero.png"))
-    shots["hero"] = {"how": "the window as large as the 1600x1200 screen allows: two shells and a chat fed by a simulated agent", "agent": "simulated"}
+    shots["hero"] = {"how": ("the window as large as the 1600x1200 screen allows" if mac else "the 1920x1080 window")
+                     + ": two shells and a chat fed by a simulated agent", "agent": "simulated"}
     print("SHOT hero", flush=True)
-    d.window(FRAME)
+    if mac:
+        d.window(FRAME)
     return shots, simulated
 
 

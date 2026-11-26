@@ -1,0 +1,96 @@
+name: readme-media
+
+# README pictures made on a hosted runner, started by hand (Actions → readme-media → Run workflow, or
+# `gh workflow run readme-media.yml --ref <branch>`):
+# - the Linux app under Xvfb at 1920x1080 (scripts/e2e/linux_shots.py: the readme_shots tour plus simulated-agent chat pictures);
+# - the phone page in an iPhone- and a Pixel-sized Chromium, English and Vietnamese, dark and light (scripts/e2e/phone_tour.py).
+# Every picture is optimised with pngquant and uploaded as the artifact `readme-media`; choosing and committing them is done by hand
+# (docs/screenshots/README-media.json lists each one with what made it). Demo projects and simulated agents only: no sign-in, no model.
+on:
+  workflow_dispatch:
+
+env:
+  KELPIE_REQUIRE_PHONE: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # As ci.yml's Linux build, plus a Secret Service (gnome-keyring: phone access keeps its key there), pngquant and the fonts the
+      # app asks for first (Inter, JetBrains Mono) with colour emoji.
+      - name: Linux system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf libasound2-dev xdg-utils \
+            webkit2gtk-driver xvfb xauth dbus-x11 gnome-keyring libsecret-tools pngquant \
+            fonts-inter fonts-jetbrains-mono fonts-noto-color-emoji
+      - name: Python packages and Playwright's Chromium
+        run: |
+          python -m pip install websockets cryptography psutil Pillow playwright
+          python -m playwright install --with-deps chromium
+      - name: Frontend and phone client
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:phone
+      - name: Debug daemon
+        run: cargo build -p kelpied
+      - name: Debug app with its frontend embedded
+        working-directory: app
+        run: pnpm tauri build --debug --no-bundle
+      - name: tauri-driver
+        run: cargo install tauri-driver --locked
+      - name: Linux app pictures (Xvfb 1920x1200, window 1920x1080)
+        timeout-minutes: 40
+        env:
+          # No GPU under Xvfb: WebKitGTK's DMA-BUF renderer and compositing can leave the window blank there.
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+        run: |
+          mkdir -p out/linux
+          dbus-run-session -- bash -c '
+            printf "readme\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            xvfb-run -a -s "-screen 0 1920x1200x24" python scripts/e2e/linux_shots.py out/linux "$HOME/kelpie-demo"'
+      - name: Phone pictures (Chromium as an iPhone and a Pixel)
+        if: always()
+        timeout-minutes: 30
+        run: |
+          mkdir -p out/phone-tour
+          dbus-run-session -- bash -c '
+            printf "readme\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            python scripts/e2e/phone_tour.py target/debug/kelpied out/phone-tour --devices iphone,pixel --locales en,vi'
+      - name: Optimise
+        if: always()
+        run: |
+          before=$(du -sb out | cut -f1)
+          find out -name '*.png' -print0 | xargs -0 -r -n 16 pngquant --quality 65-92 --skip-if-larger --strip --force --ext .png || true
+          echo "bytes: $before -> $(du -sb out | cut -f1)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: readme-media
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 7
