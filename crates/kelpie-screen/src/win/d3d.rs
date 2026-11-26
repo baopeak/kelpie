@@ -23,20 +23,28 @@ pub struct Device {
     /// Whether the device has the video processor and can feed a hardware encoder. Without it (a virtual machine's display adapter, a cloud
     /// desktop) the picture is converted on the CPU for the software encoder.
     pub video: bool,
+    /// Whether it is WARP (the CPU's renderer), not the adapter's own: a window can be captured on it, a monitor cannot (Desktop Duplication
+    /// needs the device of the monitor's adapter).
+    pub warp: bool,
+    /// Why the device has no video support, when the first attempt failed (`no_video_device: …`): said with the first encoder event.
+    pub fallback: Option<String>,
 }
 
 /// What a device is asked for, in order: video support on the monitor's adapter (conversion and encoding on the GPU), then capture alone
-/// on that adapter, then capture alone on WARP (a window can still be captured there).
+/// on that adapter, then capture alone on WARP (for a window only).
 const ATTEMPTS: [(bool, bool); 3] = [(true, false), (false, false), (false, true)];
 
 impl Device {
     /// A device on `adapter`, safe to use from the capture callback's thread and the stream's (multithread protection on): one with video
     /// support where the graphics have it, else one that can only capture (`video` false). The error is the first attempt's.
     pub fn on(adapter: &IDXGIAdapter1) -> Result<Device> {
-        let mut first = None;
+        let mut first: Option<windows::core::Error> = None;
         for (video, warp) in ATTEMPTS {
             match Device::make(adapter, video, warp) {
-                Ok(d) => return Ok(d),
+                Ok(mut d) => {
+                    d.fallback = first.as_ref().map(|e| format!("no_video_device: {e}"));
+                    return Ok(d);
+                }
                 Err(e) => {
                     first.get_or_insert(e);
                 }
@@ -65,7 +73,7 @@ impl Device {
                 let _ = mt.SetMultithreadProtected(true);
             }
         }
-        Ok(Device { device, ctx, adapter: adapter.clone(), video })
+        Ok(Device { device, ctx, adapter: adapter.clone(), video, warp, fallback: None })
     }
 
     pub fn texture(&self, w: u32, h: u32, format: DXGI_FORMAT, bind: D3D11_BIND_FLAG) -> Result<ID3D11Texture2D> {

@@ -41,8 +41,11 @@ const START_WAIT: Duration = Duration::from_secs(7);
 /// What the phone is told when not even a device that only captures can be made (the graphics' own error code means nothing there).
 const NO_GRAPHICS: &str = "this computer's graphics cannot capture the screen";
 
-/// What the phone is told when this Windows has no window capture (0x80070424: its service is not installed).
+/// What the phone is told when this Windows has no window capture (not supported, or 0x80070424: its service is not installed).
 const NO_WINDOW_CAPTURE: &str = "this computer cannot capture a single window: share its whole screen instead";
+
+/// What the phone is told for a monitor when only WARP (the CPU's renderer) could make a device.
+const ONLY_WINDOWS: &str = "this computer's graphics can share only a single window: pick one of its windows instead";
 
 enum InputCmd {
     Ops(Vec<Value>, Option<u64>),
@@ -234,6 +237,10 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
             let index = sorted.iter().position(|(m, ..)| &m.name == name).ok_or("that screen is no longer connected")?;
             let (monitor, adapter, output) = sorted.swap_remove(index);
             let device = Device::on(&adapter).map_err(|_| NO_GRAPHICS.to_string())?;
+            // Desktop Duplication needs a device of the monitor's own adapter: WARP captures windows only.
+            if device.warp {
+                return Err(ONLY_WINDOWS.into());
+            }
             let dxgi = Dxgi::new(&device, output, monitor.rect)?;
             // The encoder's sides must be even: the picture is the monitor's top-left even part.
             let tex = device.frame_texture(monitor.rect.w.max(2) as u32 & !1, monitor.rect.h.max(2) as u32 & !1).map_err(|e| e.to_string())?;
@@ -250,10 +257,14 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
                 return Err("that window cannot be shared".into());
             }
             let rect = targets_win::window_rect(win).ok_or("that window cannot be shown")?;
+            // No Windows Graphics Capture on this edition of Windows (a server, some cloud desktops): said plainly, with what still works.
+            if !windows::Graphics::Capture::GraphicsCaptureSession::IsSupported().unwrap_or(false) {
+                return Err(NO_WINDOW_CAPTURE.into());
+            }
             let adapter = d3d::adapter_at(rect.x + rect.w / 2, rect.y + rect.h / 2).map_err(|e| e.to_string())?;
             let device = Device::on(&adapter).map_err(|_| NO_GRAPHICS.to_string())?;
             let wgc = Wgc::start(&device, win).map_err(|e| {
-                // No Windows Graphics Capture on this edition of Windows (a server, some cloud desktops): said plainly, with what still works.
+                // Some say they support it and lack its service (0x80070424).
                 if e.code() == windows::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST.to_hresult() {
                     NO_WINDOW_CAPTURE.to_string()
                 } else {
@@ -278,6 +289,8 @@ struct WinBackend {
     readback: Readback,
     /// The CPU conversion's picture is already read back, whole (the tiles' readback of this frame).
     read_whole: bool,
+    /// Why the stream converts on the CPU though it did not choose to (the first encoder event says it).
+    fallback: Option<String>,
     looker: Looker,
     /// The window target and its process.
     window_handle: Option<(HWND, u32)>,
@@ -395,7 +408,7 @@ impl Backend for WinBackend {
     }
 
     fn encoder_info(&self) -> EncoderInfo {
-        EncoderInfo { hardware: self.encoder.hardware, name: self.encoder.name.clone(), refused: self.encoder.refused.clone(), first_output_ms: self.encoder.first_output_ms, sequence_header: self.encoder.sequence_header.clone() }
+        EncoderInfo { hardware: self.encoder.hardware, name: self.encoder.name.clone(), refused: self.encoder.refused.clone(), first_output_ms: self.encoder.first_output_ms, sequence_header: self.encoder.sequence_header.clone(), fallback: self.fallback.clone() }
     }
 
     fn hardware(&self) -> bool {
@@ -483,6 +496,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let mut params = ctl.params();
     // Graphics without video support: the picture is converted on the CPU, for the software encoder.
     let mut cpu = !d.video;
+    let mut fallback = d.fallback.clone();
     let open = |hardware: bool, params: &Params| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, hardware);
     // The software encoder is opened at the software rung's size and rate, which the converter is made for too: an encoder of another size
     // refuses every frame (MF_E_BUFFERTOOSMALL).
@@ -501,8 +515,9 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let conv = match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps), cpu) {
         Ok(c) => c,
         // A video processor that cannot be made: the CPU converts, and the software encoder takes it.
-        Err(_) => {
+        Err(e) => {
             cpu = true;
+            fallback = Some(format!("no_video_processor: {e}"));
             if encoder.hardware {
                 ctl.set_software(true);
                 params = ctl.params();
@@ -542,7 +557,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
         InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping))) }
     };
-    let mut backend = WinBackend { input_guard: Some(input_guard), border: Some(border), shared: Some(shared), hk_rx, outcome_rx, stopping, readback: Readback::new(), read_whole: false, looker: Looker::new(), window_handle, desktop, src, conv, encoder, source, d };
+    let mut backend = WinBackend { input_guard: Some(input_guard), border: Some(border), shared: Some(shared), hk_rx, outcome_rx, stopping, readback: Readback::new(), read_whole: false, fallback, looker: Looker::new(), window_handle, desktop, src, conv, encoder, source, d };
     stream_core::run(cfg, ctl, &mut backend, cmds, out, started);
 }
 

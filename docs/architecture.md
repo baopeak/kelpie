@@ -1177,8 +1177,11 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   the picture); a one-slot mailbox (DXGI keeps only the newest picture; the WGC handler keeps only the newest frame and does no Direct3D: the stream's thread
   copies it, since a copy on the pool's thread under the mailbox's lock deadlocked with the stream holding the immediate context); BGRA → NV12 and scaling on the GPU (D3D11 video
   processor), or, on graphics without video support (a virtual machine's or cloud desktop's display adapter: the device is then made without
-  `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`, on WARP as a last resort), on the CPU from the tiles' readback (`cpu_convert.rs`, the same BT.709 limited range) for
-  the software encoder, which the `encoder` event and the stats then say (`sw`); Media Foundation H.264, the adapter's hardware encoder first (asynchronous, D3D11 surfaces), the inbox software encoder as the fallback, never
+  `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`, on WARP as a last resort for a window only: Desktop Duplication needs the monitor's own adapter, so a monitor is then
+  refused in plain words), on the CPU from the tiles' readback (`cpu_convert.rs`: bilinear, a box average past a 2× reduction, the same BT.709 limited range,
+  chroma on the left column) for the software encoder, which the `encoder` event and the stats then say (`sw`, with the first event's `why`:
+  `no_video_device` or `no_video_processor`, also in the daemon's `screen encoder` line); a Windows without Graphics Capture refuses a window in plain words;
+  Media Foundation H.264, the adapter's hardware encoder first (asynchronous, D3D11 surfaces), the inbox software encoder as the fallback, never
   openh264: CBR with a buffer of about two frames, no B-frames, keyframes only when asked, `AVLowLatencyMode`, one reference, `QualityVsSpeed` towards speed,
   live bitrate; each setting is read back after it is set, and the daemon's log names the encoder, what it refused or did not keep and its first output's
   delay (`screen encoder`). One frame is in the encoder at a time unless the encoder asks for another (the hardware encoder's `METransformNeedInput`, or

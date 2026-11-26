@@ -1,13 +1,13 @@
 //! BGRA → NV12 at the encoder's size on the CPU, for a computer whose graphics have no video processor (a virtual machine, a cloud desktop):
-//! a bilinear scale and BT.709 limited range, the colours the GPU path gives (`win/convert.rs`). Every buffer is made with the scaler, none
-//! per frame.
+//! a bilinear scale (a box average on an axis reduced more than twice, so that a thin line is never skipped), and BT.709 limited range, the
+//! colours the GPU path gives (`win/convert.rs`). The scaler makes its own buffers once; the NV12 it writes into is the caller's.
 //!
 //! NV12 here is the Y plane (`w` bytes a row, `h` rows) followed by the interleaved CbCr plane (a pair for every 2×2 block, `chroma_w(w) * 2`
 //! bytes a row, `(h + 1) / 2` rows): for the even sizes an encoder takes, that is `w * h * 3 / 2` bytes with both planes `w` bytes a row.
+//! Chroma is sited as H.264 assumes by default (MPEG-2's): on the left column of its pair, between its two rows.
 
-/// Fractional bits of a sample position.
-const FRAC: u32 = 8;
-const ONE: u32 = 1 << FRAC;
+/// Weights are in 1/256.
+const ONE: u32 = 256;
 
 /// Full-range RGB to BT.709 limited range, in 1/65536: Y = 16 + 219/255 (0.2126 R + 0.7152 G + 0.0722 B), Cb and Cr scaled by 224/255
 /// (each row of Cb and Cr adds up to zero, so a grey has no colour).
@@ -25,36 +25,66 @@ pub fn nv12_len(w: u32, h: u32) -> usize {
     w as usize * h as usize + chroma_w(w) * 2 * (h as usize).div_ceil(2)
 }
 
-/// Where an output sample is taken in the source: the left (or top) source pixel and the weight of the next one, in 1/256.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Tap {
-    at: usize,
-    next: usize,
-    frac: u32,
+/// For each output pixel of one axis, the source pixels it is made of and their weights (adding up to `ONE`).
+#[derive(Debug)]
+struct Axis {
+    at: Vec<usize>,
+    weight: Vec<u32>,
+    /// Output `i`'s taps are `start[i]..start[i + 1]`.
+    start: Vec<usize>,
 }
 
-/// Pixel centres mapped onto each other (as a GPU sampler does), clamped at the edges.
-fn taps(src: u32, out: u32) -> Vec<Tap> {
-    let last = src as usize - 1;
-    (0..u64::from(out))
-        .map(|i| {
-            // ((i + ½) · src / out − ½) in 1/256.
-            let pos = ((2 * i + 1) * u64::from(src) * u64::from(ONE) / (2 * u64::from(out))).saturating_sub(u64::from(ONE / 2));
-            let at = (pos >> FRAC) as usize;
-            if at >= last {
-                Tap { at: last, next: last, frac: 0 }
+impl Axis {
+    fn new(src: u32, out: u32) -> Axis {
+        let mut axis = Axis { at: Vec::new(), weight: Vec::new(), start: vec![0] };
+        let (s, o) = (u64::from(src), u64::from(out));
+        let last = src as usize - 1;
+        for i in 0..o {
+            if s > 2 * o {
+                // A box: each source pixel by how much of it the output pixel covers (positions in 1/256 of a pixel).
+                let (a, b) = (i * s * 256 / o, (i + 1) * s * 256 / o);
+                let first = axis.at.len();
+                for p in (a >> 8)..b.div_ceil(256) {
+                    let covered = b.min((p + 1) << 8) - a.max(p << 8);
+                    axis.at.push((p as usize).min(last));
+                    axis.weight.push((covered * u64::from(ONE) / (b - a)) as u32);
+                }
+                // Rounding leaves the sum a little short: the rest goes to the largest weight.
+                let short = ONE - axis.weight[first..].iter().sum::<u32>();
+                if let Some(w) = axis.weight[first..].iter_mut().max() {
+                    *w += short;
+                }
             } else {
-                Tap { at, next: at + 1, frac: (pos as u32) & (ONE - 1) }
+                // Bilinear: pixel centres mapped onto each other (as a GPU sampler does), clamped at the edges.
+                let pos = ((2 * i + 1) * s * u64::from(ONE) / (2 * o)).saturating_sub(u64::from(ONE / 2));
+                let at = (pos >> 8) as usize;
+                if at >= last {
+                    axis.at.push(last);
+                    axis.weight.push(ONE);
+                } else {
+                    let frac = (pos as u32) & (ONE - 1);
+                    axis.at.extend([at, at + 1]);
+                    axis.weight.extend([ONE - frac, frac]);
+                }
             }
-        })
-        .collect()
+            axis.start.push(axis.at.len());
+        }
+        axis
+    }
+
+    fn taps(&self, i: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
+        let r = self.start[i]..self.start[i + 1];
+        self.at[r.clone()].iter().copied().zip(self.weight[r].iter().copied())
+    }
 }
 
 pub struct Scaler {
     pub src: (u32, u32),
     pub out: (u32, u32),
-    cols: Vec<Tap>,
-    rows: Vec<Tap>,
+    cols: Axis,
+    rows: Axis,
+    /// One source-wide row of R, G, B mixed from the source rows of an output row (×256).
+    mixed: Vec<u32>,
     /// Two output rows, scaled, as R, G, B: the pair a row of chroma is made from.
     scratch: Vec<u8>,
 }
@@ -63,7 +93,7 @@ impl Scaler {
     /// A scaler from `src` to `out` (each side at least 1).
     pub fn new(src: (u32, u32), out: (u32, u32)) -> Scaler {
         let (src, out) = ((src.0.max(1), src.1.max(1)), (out.0.max(1), out.1.max(1)));
-        Scaler { src, out, cols: taps(src.0, out.0), rows: taps(src.1, out.1), scratch: vec![0; out.0 as usize * 3 * 2] }
+        Scaler { src, out, cols: Axis::new(src.0, out.0), rows: Axis::new(src.1, out.1), mixed: vec![0; src.0 as usize * 3], scratch: vec![0; out.0 as usize * 3 * 2] }
     }
 
     /// The bytes `convert` writes.
@@ -88,9 +118,9 @@ impl Scaler {
             let top = pair * 2;
             // A last row of its own (an odd height) is its own pair.
             let bottom = (top + 1).min(oh - 1);
-            scale_row(bgra, stride, &self.cols, self.rows[top], first);
+            scale_row(bgra, stride, sw, &self.cols, &self.rows, top, &mut self.mixed, first);
             if bottom != top {
-                scale_row(bgra, stride, &self.cols, self.rows[bottom], second);
+                scale_row(bgra, stride, sw, &self.cols, &self.rows, bottom, &mut self.mixed, second);
             } else {
                 second.copy_from_slice(first);
             }
@@ -104,18 +134,28 @@ impl Scaler {
     }
 }
 
-/// One output row, bilinear, as R, G, B.
-fn scale_row(bgra: &[u8], stride: usize, cols: &[Tap], row: Tap, out: &mut [u8]) {
-    let (a, b) = (&bgra[row.at * stride..], &bgra[row.next * stride..]);
-    let fy = row.frac;
-    for (x, c) in cols.iter().enumerate() {
-        let (l, r) = (c.at * 4, c.next * 4);
-        for ch in 0..3 {
+/// Output row `y` as R, G, B: its source rows mixed (into `mixed`), then each output pixel's columns.
+#[allow(clippy::too_many_arguments)]
+fn scale_row(bgra: &[u8], stride: usize, sw: usize, cols: &Axis, rows: &Axis, y: usize, mixed: &mut [u32], out: &mut [u8]) {
+    mixed.fill(0);
+    for (row, wy) in rows.taps(y) {
+        let line = &bgra[row * stride..row * stride + sw * 4];
+        for (px, m) in line.chunks_exact(4).zip(mixed.chunks_exact_mut(3)) {
             // BGRA in, RGB out.
-            let i = 2 - ch;
-            let top = u32::from(a[l + i]) * (ONE - c.frac) + u32::from(a[r + i]) * c.frac;
-            let bot = u32::from(b[l + i]) * (ONE - c.frac) + u32::from(b[r + i]) * c.frac;
-            out[x * 3 + ch] = ((top * (ONE - fy) + bot * fy + (1 << (2 * FRAC - 1))) >> (2 * FRAC)) as u8;
+            m[0] += u32::from(px[2]) * wy;
+            m[1] += u32::from(px[1]) * wy;
+            m[2] += u32::from(px[0]) * wy;
+        }
+    }
+    for (x, o) in out.chunks_exact_mut(3).enumerate() {
+        let mut acc = [0u32; 3];
+        for (col, wx) in cols.taps(x) {
+            for ch in 0..3 {
+                acc[ch] += mixed[col * 3 + ch] * wx;
+            }
+        }
+        for ch in 0..3 {
+            o[ch] = ((acc[ch] + (1 << 15)) >> 16) as u8;
         }
     }
 }
@@ -127,22 +167,23 @@ fn luma_row(rgb: &[u8], y: &mut [u8]) {
     }
 }
 
-/// Cb and Cr of each 2×2 block of the two rows (a last column of its own, an odd width, counts twice).
+/// Cb and Cr of each pair of columns, sited on its left column: that column, half of each neighbour ([1, 2, 1], clamped at the edges), the
+/// two rows averaged.
 fn chroma_row(first: &[u8], second: &[u8], w: usize, uv: &mut [u8]) {
     for (i, pair) in uv.chunks_exact_mut(2).enumerate() {
-        let (l, r) = (i * 2 * 3, (i * 2 + 1).min(w - 1) * 3);
+        let (l, c, r) = ((2 * i).saturating_sub(1) * 3, 2 * i * 3, (2 * i + 1).min(w - 1) * 3);
         let mut sum = [0i32; 3];
         for (ch, s) in sum.iter_mut().enumerate() {
-            *s = i32::from(first[l + ch]) + i32::from(first[r + ch]) + i32::from(second[l + ch]) + i32::from(second[r + ch]);
+            let row = |p: &[u8]| i32::from(p[l + ch]) + 2 * i32::from(p[c + ch]) + i32::from(p[r + ch]);
+            *s = row(first) + row(second);
         }
-        // Four pixels summed: 1/65536 · 1/4 is 1/2^18.
-        let cb = CB_RGB[0] * sum[0] + CB_RGB[1] * sum[1] + CB_RGB[2] * sum[2] + (128 << 18) + (1 << 17);
-        let cr = CR_RGB[0] * sum[0] + CR_RGB[1] * sum[1] + CR_RGB[2] * sum[2] + (128 << 18) + (1 << 17);
-        pair[0] = (cb >> 18).clamp(0, 255) as u8;
-        pair[1] = (cr >> 18).clamp(0, 255) as u8;
+        // Eight weights summed: 1/65536 · 1/8 is 1/2^19.
+        let cb = CB_RGB[0] * sum[0] + CB_RGB[1] * sum[1] + CB_RGB[2] * sum[2] + (128 << 19) + (1 << 18);
+        let cr = CR_RGB[0] * sum[0] + CR_RGB[1] * sum[1] + CR_RGB[2] * sum[2] + (128 << 19) + (1 << 18);
+        pair[0] = (cb >> 19).clamp(0, 255) as u8;
+        pair[1] = (cr >> 19).clamp(0, 255) as u8;
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn the_same_size_copies_every_pixel_and_chroma_averages_each_block() {
+    fn the_same_size_copies_every_pixel_and_chroma_is_sited_on_the_left_column() {
         // A different grey in every pixel: each Y is that pixel's.
         let px = picture(4, 2, 16, |x, y| {
             let v = (x * 40 + y * 100) as u8;
@@ -221,10 +262,27 @@ mod tests {
                 assert_eq!(f64::from(nv12[y * 4 + x]), reference([v, v, v]).0.round(), "pixel {x},{y}");
             }
         }
-        // Left block red, right block blue: each pair of chroma is its own block's.
-        let px = picture(4, 2, 16, |x, _| if x < 2 { [255, 0, 0] } else { [0, 0, 255] });
-        let uv = &run((4, 2), (4, 2), 16, &px)[8..];
-        assert_eq!((uv[1], uv[2]), (240, 240), "red's Cr, then blue's Cb");
+        // Red on the left half, blue on the right: the first pair is red's, the last blue's, and the pair across the edge is a quarter of its
+        // left neighbour (red) and three quarters of its own two columns (blue): [1, 2, 1] on its left column.
+        let px = picture(8, 2, 32, |x, _| if x < 4 { [255, 0, 0] } else { [0, 0, 255] });
+        let uv = &run((8, 2), (8, 2), 32, &px)[16..];
+        assert_eq!((uv[1], uv[6]), (240, 240), "red's Cr, then blue's Cb");
+        let across = 0.25 * reference([255, 0, 0]).1 + 0.75 * reference([0, 0, 255]).1;
+        assert!((f64::from(uv[4]) - across).abs() <= 1.0, "Cb across the edge: {} against {across:.2}", uv[4]);
+    }
+
+    #[test]
+    fn a_large_reduction_averages_a_box_and_keeps_a_thin_line() {
+        // A one-pixel white line in black, reduced four times each way: two taps would miss it, a box keeps a quarter of it.
+        let px = picture(400, 8, 1600, |x, _| if x == 203 { [255, 255, 255] } else { [0, 0, 0] });
+        let nv12 = run((400, 8), (100, 2), 1600, &px);
+        let quarter = reference([64, 64, 64]).0;
+        assert!((f64::from(nv12[50]) - quarter).abs() <= 1.0, "the line's column: {} against {quarter:.1}", nv12[50]);
+        assert!(nv12[..100].iter().enumerate().all(|(x, v)| x == 50 || *v == 16), "only that column");
+        // A one-pixel checkerboard averages to a flat mid grey.
+        let px = picture(16, 16, 64, |x, y| if (x + y) % 2 == 0 { [0, 0, 0] } else { [255, 255, 255] });
+        let mid = reference([128, 128, 128]).0;
+        assert!(run((16, 16), (4, 4), 64, &px)[..16].iter().all(|v| (f64::from(*v) - mid).abs() <= 1.0));
     }
 
     #[test]
@@ -307,12 +365,23 @@ mod tests {
     }
 
     #[test]
-    fn taps_map_centres_and_stay_inside() {
+    fn taps_map_centres_weigh_to_one_and_stay_inside() {
+        let taps = |src: u32, out: u32| {
+            let a = Axis::new(src, out);
+            (0..out as usize).map(|i| a.taps(i).filter(|(_, w)| *w > 0).collect::<Vec<_>>()).collect::<Vec<_>>()
+        };
         // The same size: every pixel is its own, no blend.
-        assert!(taps(10, 10).iter().enumerate().all(|(i, t)| t.at == i && t.frac == 0));
+        assert!(taps(10, 10).iter().enumerate().all(|(i, t)| *t == vec![(i, ONE)]));
         // Halving: each output pixel is halfway between two.
-        assert!(taps(10, 5).iter().enumerate().all(|(i, t)| t.at == 2 * i && t.next == 2 * i + 1 && t.frac == ONE / 2));
-        // Enlarging never reads past the last pixel.
-        assert!(taps(3, 100).iter().all(|t| t.at < 3 && t.next < 3));
+        assert!(taps(10, 5).iter().enumerate().all(|(i, t)| *t == vec![(2 * i, ONE / 2), (2 * i + 1, ONE / 2)]));
+        // Four times smaller: a box of four, a quarter each.
+        assert!(taps(12, 3).iter().enumerate().all(|(i, t)| *t == (4 * i..4 * i + 4).map(|p| (p, ONE / 4)).collect::<Vec<_>>()));
+        // Any reduction or enlargement: weights add up to one, never past the last pixel.
+        for (src, out) in [(3, 100), (1920, 640), (1023, 360), (7, 3), (2560, 960), (5, 1)] {
+            for t in taps(src, out) {
+                assert_eq!(t.iter().map(|(_, w)| w).sum::<u32>(), ONE, "{src} → {out}");
+                assert!(t.iter().all(|(p, _)| *p < src as usize), "{src} → {out}");
+            }
+        }
     }
 }

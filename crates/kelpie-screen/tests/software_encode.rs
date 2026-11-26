@@ -25,8 +25,8 @@ fn pattern(w: u32, h: u32, frame: u32) -> Vec<u8> {
     px
 }
 
-// Media Foundation's inbox encoder and a D3D11 device are on every Windows desktop and on `windows-latest`, whose basic render driver has no
-// video processor: there the conversion is the CPU's, as a stream's would be.
+// Media Foundation's inbox encoder and a D3D11 device are on every Windows desktop and on `windows-latest`. The CPU converter is always run;
+// the video processor too where the device has one.
 #[test]
 fn the_software_encoder_makes_every_frame_and_each_keyframe_says_no_reordering() {
     unsafe {
@@ -37,10 +37,13 @@ fn the_software_encoder_makes_every_frame_and_each_keyframe_says_no_reordering()
     let adapter = unsafe { factory.EnumAdapters1(0) }.expect("an adapter (the basic render driver at least)");
     let d = Device::on(&adapter).expect("a D3D11 device");
     // The same size; and a 1024×768 screen at the software rung a stream starts on there (960×720 at 15 fps), scaled.
-    for (src, (w, h), fps, kbps) in [((640u32, 360u32), (640u32, 360u32), 30u32, 1000u32), ((1024, 768), (960, 720), 15, 1500)] {
+    // The CPU converter always, and the video processor too where the graphics have one.
+    let paths: &[bool] = if d.video { &[true, false] } else { &[true] };
+    println!("device: video {}, warp {}, why not video: {:?}", d.video, d.warp, d.fallback);
+    for (&cpu, (src, (w, h), fps, kbps)) in paths.iter().flat_map(|c| [(c, ((640u32, 360u32), (640u32, 360u32), 30u32, 1000u32)), (c, ((1024, 768), (960, 720), 15, 1500))]) {
+        println!("{} converter, {}x{} to {w}x{h} at {fps} fps", if cpu { "CPU" } else { "GPU" }, src.0, src.1);
         let tex = d.frame_texture(src.0, src.1).expect("a frame texture");
-        // The video processor where the graphics have one, else the CPU: the stream's own choice.
-        let mut conv = Converter::new(&d, src, (w, h), fps, !d.video).expect("a converter");
+        let mut conv = Converter::new(&d, src, (w, h), fps, cpu).expect("a converter");
         let mut readback = Readback::new();
         let mut enc = Encoder::open(&d, w, h, fps, kbps, false).expect("the inbox software encoder");
         assert!(!enc.hardware);
