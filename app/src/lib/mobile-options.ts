@@ -190,6 +190,8 @@ export interface AccessCalls {
 /** Turns phone access on. A new setup: no listener on this network, then the default relay (one verification, no key), and "hosted" for the pairing guide
  *  to open. Otherwise exactly what the switch always did. Throws what stopped it. */
 export async function turnOnAccess(f: OptionFacts, call: AccessCalls): Promise<"hosted" | "plain"> {
+  // Switched on before Settings has read the status: whether the setup is new is the daemon's to say, so it is asked. Unknown stays not new.
+  if (!f.status) f = { ...f, status: await call.status().catch(() => null) };
   if (!newSetup(f)) {
     await call.daemon("mobile.enable", {});
     return "plain";
