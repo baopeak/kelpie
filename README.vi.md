@@ -43,7 +43,7 @@ Việc mở một agent để giao việc thường rất đơn giản. Tuy nhi�
 | **Kế hoạch trong repository** | Tab Plan đọc các checklist Markdown trong `plans/`, `specs/`, `.kiro/specs/` và `docs/plans/`, cho phép bạn tích ô và giao từng nhiệm vụ cho agent. |
 | **Tệp, trình duyệt và tiến trình** | Trình soạn thảo hiển thị Markdown, Mermaid, CSV, PDF và notebook. Khung trình duyệt có chế độ thiết kế, còn panel Processes cho thấy chương trình và cổng của từng phiên. |
 | **Làm việc từ xa** | Kelpie mở project qua SSH, quản lý máy chủ, khoá, chuyển tiếp cổng và truyền tệp, đồng thời chạy agent trên máy chủ trong `tmux` để phiên không mất khi rớt mạng. |
-| **Điện thoại** | Ứng dụng điện thoại tuỳ chọn được mã hoá đầu cuối, liệt kê các phiên, rung khi có phiên cần bạn và cho phép bạn trả lời. |
+| **Điện thoại** | Ứng dụng điện thoại tuỳ chọn được mã hoá đầu cuối, liệt kê các phiên, rung khi có phiên cần bạn và cho phép bạn trả lời. Nếu bạn cho phép, ứng dụng còn hiển thị và điều khiển màn hình của máy Windows hoặc máy Mac. |
 | **Tuỳ chỉnh** | Bạn quản lý MCP server và tệp hướng dẫn cho agent, cài plugin, tạo quick command và automation, đổi phím tắt và theme, đọc chính tả không cần mạng, và chọn giao diện tiếng Anh hoặc tiếng Việt. |
 
 ## Xem Kelpie hoạt động
@@ -134,7 +134,7 @@ Các automation mẫu dưới đây đều đang tắt, nên chúng không thể
 
 ![Ba automation mẫu đang tắt cùng agent và lịch chạy của chúng](docs/screenshots/automations.png)
 
-Ngoài ra, bạn có thể [ghép đôi một điện thoại](docs/user-guide.vi.md#điện-thoại). Sau khi ghép đôi, điện thoại liệt kê các phiên, rung khi có phiên cần bạn, hiển thị màn hình của phiên và gửi câu trả lời nếu bạn cho phép.
+Ngoài ra, bạn có thể [ghép đôi một điện thoại](docs/user-guide.vi.md#điện-thoại). Sau khi ghép đôi, điện thoại liệt kê các phiên, rung khi có phiên cần bạn, hiển thị màn hình của phiên và gửi câu trả lời nếu bạn cho phép. Khi một agent chờ một việc nằm ngoài terminal, điện thoại còn có thể hiển thị chính màn hình máy tính, rồi nhấp chuột và gõ phím trên đó, trên Windows và trên macOS 12.3 trở lên.
 
 </details>
 
@@ -273,7 +273,7 @@ Các liên kết dẫn tới [hướng dẫn tiếng Anh](docs/user-guide.md), n
 **Làm việc từ xa và điện thoại**
 - [Project từ xa](docs/user-guide.md#remote-projects-ssh), [trang SSH hosts](docs/user-guide.md#ssh-hosts) và [khung SSH trong mọi project](docs/user-guide.md#ssh-panes-in-any-project) đưa máy chủ vào cùng không gian làm việc.
 - Phần [giữ phiên chạy trên máy chủ](docs/user-guide.md#keeping-sessions-running-on-a-server) giải thích cách thiết lập `tmux`.
-- [Truy cập từ điện thoại](docs/user-guide.md#phone-access) ghép đôi điện thoại qua relay của Kelpie, Tailscale hoặc mạng nội bộ.
+- [Truy cập từ điện thoại](docs/user-guide.md#phone-access) ghép đôi điện thoại qua relay của Kelpie, Tailscale hoặc mạng nội bộ, đồng thời giải thích cách xem và điều khiển màn hình máy tính từ điện thoại cùng hai quyền mà máy Mac yêu cầu.
 
 **Thiết lập cá nhân**
 - [Agent setup](docs/user-guide.md#agent-setup) quản lý MCP server, tệp hướng dẫn và skill của mọi agent ở cùng một nơi.
@@ -290,7 +290,7 @@ Các liên kết dẫn tới [hướng dẫn tiếng Anh](docs/user-guide.md), n
 2. **Cài và đăng nhập các CLI agent bạn muốn dùng.** Kelpie tìm các CLI này qua `PATH` hoặc qua login shell, và trang Settings → Agents cho biết Kelpie đã tìm thấy những agent nào.
 3. **Thêm một thư mục project và mở một phiên.** Bạn đặt một shell cạnh agent, giao việc cho agent và theo dõi kết quả ngay trên màn hình.
 
-Kelpie hỗ trợ Windows 10 1809 trở lên và Windows 11, macOS 12 trở lên, cùng Linux x86-64 với glibc 2.35 trở lên; trong đó Windows là nền tảng được kiểm thử thực tế nhiều nhất. GitHub CLI (`gh`) là tuỳ chọn và cần thiết cho các tính năng pull request. Để làm việc trên máy chủ, Kelpie dùng OpenSSH của bạn, và `tmux` giúp phiên trên máy chủ tồn tại lâu dài.
+Kelpie hỗ trợ Windows 10 1809 trở lên và Windows 11, macOS 12 trở lên, cùng Linux x86-64 với glibc 2.35 trở lên; trong đó Windows là nền tảng được kiểm thử thực tế nhiều nhất. Tính năng điều khiển màn hình máy tính từ điện thoại chạy trên Windows và trên macOS 12.3 trở lên. GitHub CLI (`gh`) là tuỳ chọn và cần thiết cho các tính năng pull request. Để làm việc trên máy chủ, Kelpie dùng OpenSSH của bạn, và `tmux` giúp phiên trên máy chủ tồn tại lâu dài.
 
 ## Dùng thử bộ demo
 
@@ -389,6 +389,8 @@ pnpm i18n:check
 ```
 
 CI chạy bộ test Rust trên cả Windows và macOS, vì một lần chạy đạt trên một nền tảng không thay thế được kiểm thử trên nền tảng kia. Lệnh `cargo test --workspace` còn kiểm thử thêm trình hỗ trợ nhận dạng giọng nói. Các kịch bản chạy trên ứng dụng thật nằm trong [scripts/e2e](scripts/e2e); bạn nên đọc điều kiện tiên quyết của từng kịch bản trước khi chạy, vì một số kịch bản dùng agent đã đăng nhập, máy chủ thử nghiệm hoặc lượt gọi model có tính phí. Ngoài ra, bạn nên giữ daemon thử nghiệm tách biệt khỏi các phiên làm việc của mình.
+
+Trang điện thoại có các kịch bản riêng. Các script `mobile*.py`, `phone_*.py`, `takeover.py` và `screen*.py` điều khiển trang trong một Chromium cỡ điện thoại với passkey ảo. [phone_safari_sim.py](scripts/e2e/phone_safari_sim.py) điều khiển trang trong Mobile Safari trên iOS Simulator, với passkey được bảo vệ bằng Face ID của simulator. [screen_mac.py](scripts/e2e/screen_mac.py) kiểm tra việc xem và điều khiển màn hình máy Mac từ trang điện thoại.
 
 ### Điều khiển Kelpie bằng script
 
