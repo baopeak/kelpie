@@ -1695,6 +1695,94 @@
       },
       "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-vi-light/08-inbox-status.png",
       "agent": "simulated"
+    },
+    "phone-pull-checks-running.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The project's pull request on the phone: a required check is still running, so it cannot be merged yet.",
+        "vi": "Pull request của project trên điện thoại: một bước kiểm tra bắt buộc vẫn đang chạy, nên chưa merge được."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/27-pull-running.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-pull-line.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "Every check passed: the session's pull request can be merged from the phone.",
+        "vi": "Mọi bước kiểm tra đã đạt, nên pull request của phiên có thể được merge từ điện thoại."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/28-pull-can-merge.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merge-sheet.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The merge sheet names the repository, the pull request, its head commit and how to merge.",
+        "vi": "Bảng merge ghi rõ kho mã, pull request, commit đầu nhánh và cách merge."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/29-merge-sheet.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merge-passkey.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The passkey signs exactly this merge, and the computer merges only that.",
+        "vi": "Passkey ký đúng lệnh merge này, và máy tính chỉ merge đúng lệnh đó."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/30-merge-passkey.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merged.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "Merged from the phone; the worktree and its sessions stay on the computer.",
+        "vi": "Pull request đã được merge từ điện thoại, còn worktree và các phiên của nó vẫn ở trên máy tính."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/31-merged.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-pull-line-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "A pull request ready to merge, on the Vietnamese page, dark theme.",
+        "vi": "Một pull request sẵn sàng để merge, trên trang tiếng Việt với giao diện tối."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-vi-dark/28-pull-can-merge.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merge-sheet-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The merge sheet in Vietnamese.",
+        "vi": "Bảng merge bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-vi-dark/29-merge-sheet.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merged-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "Merged, in Vietnamese.",
+        "vi": "Đã merge, trên trang tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-vi-dark/31-merged.png",
+      "agent": "simulated",
+      "github": "simulated"
     }
   }
 }
