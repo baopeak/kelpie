@@ -5,7 +5,7 @@
 
 use kelpie_screen::sps::{self, nal_type, nal_units, NAL_SPS};
 use kelpie_screen::win::convert::Converter;
-use kelpie_screen::win::d3d::Device;
+use kelpie_screen::win::d3d::{Device, Readback};
 use kelpie_screen::win::encode_mf::{self, Encoder};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -39,7 +39,9 @@ fn the_software_encoder_makes_every_frame_and_each_keyframe_says_no_reordering()
     let d = Device::on(&adapter).expect("a D3D11 device");
     let (w, h) = (640u32, 360u32);
     let tex = d.frame_texture(w, h).expect("a frame texture");
-    let mut conv = Converter::new(&d, (w, h), (w, h), 30).expect("the video processor");
+    // The video processor where the graphics have one, else the CPU (a runner's basic render driver): the stream's own choice.
+    let mut conv = Converter::new(&d, (w, h), (w, h), 30, !d.video).expect("a converter");
+    let mut readback = Readback::new();
     let mut enc = Encoder::open(&d, w, h, 30, 1000, false).expect("the inbox software encoder");
     assert!(!enc.hardware);
     let mut params = sps::Params::default();
@@ -50,7 +52,7 @@ fn the_software_encoder_makes_every_frame_and_each_keyframe_says_no_reordering()
     for i in 0..40u32 {
         let px = pattern(w, h, i);
         unsafe { d.ctx.UpdateSubresource(&tex, 0, None, px.as_ptr() as *const _, w * 4, 0) };
-        let nv12 = conv.convert(&tex).expect("converted");
+        let nv12 = conv.convert(&d, &mut readback, false, &tex).expect("converted");
         assert!(enc.encode(&d, &nv12, i64::from(i) * 333_333, i == 0).expect("encoded"), "the software encoder takes every frame");
         out.extend(enc.poll().expect("polled"));
     }

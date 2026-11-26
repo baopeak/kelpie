@@ -13,7 +13,8 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL};
 use windows::Win32::Media::MediaFoundation::IMFMediaBuffer;
 
-use super::d3d::Device;
+use super::d3d::{Device, Readback};
+use super::encode_mf::memory_buffer;
 use crate::cpu_convert::Scaler;
 
 /// Outputs in the ring: the hardware encoder holds at most two frames (`encode_mf`).
@@ -36,6 +37,21 @@ impl Converter {
 
     pub fn cpu(&self) -> bool {
         matches!(self, Converter::Cpu(_))
+    }
+
+    /// `input` (BGRA, `src`) for the encoder. On the CPU the picture comes through `readback` (the tiles' staging texture), read here unless
+    /// `read_whole` says the tiles' readback of this frame already brought all of it.
+    pub fn convert(&mut self, d: &Device, readback: &mut Readback, read_whole: bool, input: &ID3D11Texture2D) -> Result<Frame> {
+        match self {
+            Converter::Gpu(c) => c.convert(input).map(Frame::Texture),
+            Converter::Cpu(scaler) => {
+                if !read_whole {
+                    readback.read(d, input, scaler.src.0, scaler.src.1)?;
+                }
+                let (px, stride) = (&readback.buf, readback.stride);
+                memory_buffer(scaler.out_len(), |nv12| scaler.convert(px, stride, nv12)).map(Frame::Memory)
+            }
+        }
     }
 }
 

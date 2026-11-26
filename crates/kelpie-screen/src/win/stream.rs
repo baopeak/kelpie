@@ -410,17 +410,7 @@ impl Backend for WinBackend {
 
     fn convert(&mut self, picture: &ID3D11Texture2D) -> Result<Frame, String> {
         let read_whole = std::mem::take(&mut self.read_whole);
-        match &mut self.conv {
-            Converter::Gpu(c) => c.convert(picture).map(Frame::Texture).map_err(|e| e.to_string()),
-            Converter::Cpu(scaler) => {
-                // The picture through the tiles' staging texture, unless their readback of this frame already brought all of it.
-                if !read_whole {
-                    self.readback.read(&self.d, picture, scaler.src.0, scaler.src.1).map_err(|e| e.to_string())?;
-                }
-                let (px, stride) = (&self.readback.buf, self.readback.stride);
-                encode_mf::memory_buffer(scaler.out_len(), |nv12| scaler.convert(px, stride, nv12)).map(Frame::Memory).map_err(|e| e.to_string())
-            }
-        }
+        self.conv.convert(&self.d, &mut self.readback, read_whole, picture).map_err(|e| e.to_string())
     }
 
     fn encode(&mut self, input: &Frame, time: i64, key: bool) -> Result<bool, String> {
