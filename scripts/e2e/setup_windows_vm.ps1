@@ -20,7 +20,8 @@ What it does, each step skipped when already done (so it can be run again to upd
      helper is built from that branch instead (its own checkout and target folder) and copied next to the app.
   6. A standard (non-administrator) local user, -ShareUser, for screen sharing: the app does not share the screen while elevated. Its
      random password is written only to <StateDir>\share-user.secret, readable by Administrators and SYSTEM; it is never printed.
-  7. Sets the display to -Width x -Height when the display offers that mode, and logs the modes it offers.
+  7. Sets the display to -Width x -Height when the display offers that mode, and logs the modes it offers. An IddSampleDriver
+     indirect display (a VM without a GPU) is given the mode in C:\IddSampleDriver\option.txt and restarted first.
   8. Generates the README demo projects (scripts/e2e/readme_demo.py) into -DemoRoot when that folder does not exist yet.
 Each step's time is in <StateDir>\setup.json, next to the tool versions.
 
@@ -287,22 +288,39 @@ public static class KelpieDisplay {
     public static DEVMODE Blank() { var d = new DEVMODE(); d.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE)); return d; }
 }
 "@
-        $modes = @()
-        for ($i = 0; ; $i++) {
-            $dm = [KelpieDisplay]::Blank()
-            if (-not [KelpieDisplay]::EnumDisplaySettings($null, $i, [ref]$dm)) { break }
-            $modes += "$($dm.dmPelsWidth)x$($dm.dmPelsHeight)"
+        Add-Type -AssemblyName System.Windows.Forms
+        # The primary screen by name: an indirect display can be \\.\DISPLAY2 or later, where a null device name finds nothing.
+        function Modes {
+            $name = [System.Windows.Forms.Screen]::PrimaryScreen.DeviceName
+            $modes = @()
+            for ($i = 0; ; $i++) {
+                $dm = [KelpieDisplay]::Blank()
+                if (-not [KelpieDisplay]::EnumDisplaySettings($name, $i, [ref]$dm)) { break }
+                $modes += "$($dm.dmPelsWidth)x$($dm.dmPelsHeight)"
+            }
+            @{ name = $name; modes = @($modes | Select-Object -Unique) }
         }
-        $modes = $modes | Select-Object -Unique
-        Write-Output "display modes: $($modes -join ', ')"
+        $d = Modes
+        Write-Output "display $($d.name) modes: $($d.modes -join ', ')"
+        # The IddSampleDriver indirect display (cloud VMs without a GPU) offers only the modes listed in its option.txt (first line the
+        # monitor count, then "width, height, rate" lines); a mode added there appears once the device restarts.
+        $option = "C:\IddSampleDriver\option.txt"
+        $idd = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like "IddSampleDriver*" } | Select-Object -First 1
+        if ($d.modes -notcontains "${Width}x$Height" -and $idd -and (Test-Path $option)) {
+            Add-Content $option "$Width, $Height, 60"
+            Run pnputil /restart-device $idd.InstanceId
+            Start-Sleep 5
+            $d = Modes
+            Write-Output "after adding ${Width}x$Height to $option, display $($d.name) modes: $($d.modes -join ', ')"
+        }
         $cur = [KelpieDisplay]::Blank()
-        [void][KelpieDisplay]::EnumDisplaySettings($null, -1, [ref]$cur)
+        [void][KelpieDisplay]::EnumDisplaySettings($d.name, -1, [ref]$cur)
         Write-Output "current: $($cur.dmPelsWidth)x$($cur.dmPelsHeight)"
         if ($cur.dmPelsWidth -eq $Width -and $cur.dmPelsHeight -eq $Height) { return }
-        if ($modes -notcontains "${Width}x$Height") { Write-Output "${Width}x$Height is not offered: left as it is"; return }
+        if ($d.modes -notcontains "${Width}x$Height") { Write-Output "${Width}x$Height is not offered: left as it is"; return }
         $cur.dmPelsWidth = $Width; $cur.dmPelsHeight = $Height; $cur.dmFields = 0x80000 -bor 0x100000
         # CDS_UPDATEREGISTRY: kept after a reboot.
-        $r = [KelpieDisplay]::ChangeDisplaySettingsEx($null, [ref]$cur, [IntPtr]::Zero, 1, [IntPtr]::Zero)
+        $r = [KelpieDisplay]::ChangeDisplaySettingsEx($d.name, [ref]$cur, [IntPtr]::Zero, 1, [IntPtr]::Zero)
         Write-Output "set ${Width}x${Height}: $(if ($r -eq 0) { 'done' } else { "failed ($r; not from the desktop session?)" })"
     }
 
