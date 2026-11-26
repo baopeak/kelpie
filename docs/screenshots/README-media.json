@@ -1,5 +1,5 @@
 {
-  "about": "Pictures captured on the macOS test machine for the README: platform, feature, captions and how each was made. \"agent\": \"simulated\" marks a picture whose agent sessions are small local programs speaking Claude Code's stream format (scripts/e2e/demo_agents.py), never a real agent or a model call; their model shows as \"simulated\".",
+  "about": "Pictures and clips for the README, captured on the macOS and Windows test machines: platform, feature, captions and how each was made. \"agent\": \"simulated\" marks a picture whose agent sessions are small local programs (scripts/e2e/demo_agents.py) or synthetic transcripts, never a real agent or a model call; their model shows as \"simulated\". Windows pictures without a prefix replace the earlier ones of the same name; workspace, claude, codex, omp, chat, chatgpt, powershell, light, vietnamese and agents are kept from the owner's own sign-ins and installed agents.",
   "clips": {
     "mac-phone-control.mp4": {
       "platform": "macOS + phone",
@@ -10,6 +10,29 @@
         "vi": "Từ điện thoại, chạm vào TextEdit trên Mac, gõ một dòng rồi bấm ⌘S để lưu."
       },
       "how": "scripts/e2e/screen_mac.py --video: Playwright video of the phone page beside `screencapture -v` of the Mac, joined with ffmpeg",
+      "hosting": "GitHub attachment (not in the repository)"
+    },
+    "clip-phone-answer.mp4": {
+      "platform": "Windows + phone (iPhone-sized Chromium)",
+      "feature": "Answering from the phone",
+      "poster": "clip-phone-answer-poster.png",
+      "caption": {
+        "en": "A shell waits at a menu; on the phone the session shows in the inbox, one tap on 1 answers it, and the desktop pane carries on.",
+        "vi": "Một shell đang chờ ở một menu; trên điện thoại phiên đó hiện trong hộp thư, một chạm vào số 1 là trả lời xong, và khung trên máy tính chạy tiếp."
+      },
+      "how": "scripts/e2e/readme_phone_win.py --what answer: ffmpeg gdigrab of the app's window beside Playwright's video of the phone page, joined with ffmpeg hstack (10 s, 1628x844, H.264, no sound, 90 KB). The menu is a small demo program, not an agent.",
+      "agent": "simulated",
+      "hosting": "GitHub attachment (not in the repository)"
+    },
+    "clip-worktree-finish.mp4": {
+      "platform": "Windows",
+      "feature": "Worktrees, Review and Finish",
+      "poster": "clip-worktree-finish-poster.png",
+      "caption": {
+        "en": "New worktree, a shell commits a check in it, then Finish merges it into main and the worktree is gone.",
+        "vi": "Tạo worktree mới, một shell commit thêm một bước kiểm tra trong đó, rồi Finish gộp nó vào main và worktree biến mất."
+      },
+      "how": "scripts/e2e/readme_shots.py --clip-finish on a throwaway clone of the demo checkout: ffmpeg gdigrab of the app's window, played 1.2 times faster (19.6 s, 1238x720, H.264, no sound, 270 KB)",
       "hosting": "GitHub attachment (not in the repository)"
     }
   },
@@ -613,6 +636,511 @@
         "vi": "Phần cài đặt trên điện thoại bằng tiếng Việt."
       },
       "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "welcome.png": {
+      "platform": "Windows",
+      "feature": "First start",
+      "caption": {
+        "en": "The welcome screen before any project is added.",
+        "vi": "Màn hình chào khi chưa thêm dự án nào."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "search.png": {
+      "platform": "Windows",
+      "feature": "Search everything",
+      "caption": {
+        "en": "Search everything: sessions, projects, files and settings from one box.",
+        "vi": "Một ô tìm kiếm chung tìm được phiên, dự án, tệp và cài đặt."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "changes.png": {
+      "platform": "Windows",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel beside two shells: the branch, the changed file and Commit all.",
+        "vi": "Bảng Changes nằm cạnh hai shell, cho thấy nhánh, tệp đã đổi và nút Commit all."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "editor.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "The editor on the demo checkout code, with the Changes panel open.",
+        "vi": "Trình soạn thảo mở mã checkout của dự án mẫu, bên cạnh là bảng Changes."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "review-notes.png": {
+      "platform": "Windows",
+      "feature": "Review notes",
+      "caption": {
+        "en": "A review note on a line of the diff, ready to send to an agent.",
+        "vi": "Một ghi chú review gắn vào một dòng của diff, sẵn sàng gửi cho agent."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "markdown.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "Markdown with a Mermaid diagram, rendered in the file viewer.",
+        "vi": "Tệp Markdown có sơ đồ Mermaid được hiển thị ngay trong trình xem tệp."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "csv.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "A CSV file as a sortable table.",
+        "vi": "Tệp CSV được hiển thị thành một bảng có thể sắp xếp."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "plan.png": {
+      "platform": "Windows",
+      "feature": "Specs and tasks",
+      "caption": {
+        "en": "The Plan tab lists the plans and specs of the project with their tasks.",
+        "vi": "Tab Plan liệt kê các kế hoạch và đặc tả của dự án cùng các việc cần làm."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "new-session.png": {
+      "platform": "Windows",
+      "feature": "Agents",
+      "caption": {
+        "en": "The new-session launcher: agent, first prompt, worktree and where it opens.",
+        "vi": "Hộp mở phiên mới cho chọn agent, lời nhắn đầu tiên, worktree và nơi mở phiên."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "dashboard.png": {
+      "platform": "Windows",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "The Agent Dashboard with a shell waiting for an answer.",
+        "vi": "Bảng điều khiển agent cho thấy một shell đang chờ câu trả lời."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "board.png": {
+      "platform": "Windows",
+      "feature": "Worktrees and the board",
+      "caption": {
+        "en": "The workspace board: projects and worktrees by stage.",
+        "vi": "Bảng công việc xếp các dự án và worktree theo từng giai đoạn."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "layouts.png": {
+      "platform": "Windows",
+      "feature": "Layouts",
+      "caption": {
+        "en": "The layout menu: grid presets and saved layouts.",
+        "vi": "Menu bố cục có sẵn các lưới và những bố cục đã lưu."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "composer.png": {
+      "platform": "Windows",
+      "feature": "Composer",
+      "caption": {
+        "en": "The floating composer for a longer prompt.",
+        "vi": "Khung soạn nổi dùng để viết một lời nhắn dài hơn."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "terminal-menu.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "A terminal's context menu: split, hand off, theme and more.",
+        "vi": "Menu chuột phải của terminal có các lệnh chia khung, chuyển giao, đổi theme và nhiều lệnh khác."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "floating.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "The floating terminal over the workspace.",
+        "vi": "Terminal nổi hiện ra phía trên không gian làm việc."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "inbox.png": {
+      "platform": "Windows",
+      "feature": "Activity",
+      "caption": {
+        "en": "The Activity inbox with labelled demo entries.",
+        "vi": "Hộp Activity hiện các mục mẫu đã được ghi rõ là dữ liệu demo."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "worktree-dialog.png": {
+      "platform": "Windows",
+      "feature": "Worktrees",
+      "caption": {
+        "en": "The new-worktree dialog, with the project's .kelpie.yaml setup.",
+        "vi": "Hộp tạo worktree mới đi kèm phần thiết lập từ tệp .kelpie.yaml của dự án."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "automations.png": {
+      "platform": "Windows",
+      "feature": "Automations",
+      "caption": {
+        "en": "Scheduled automations (demo, switched off).",
+        "vi": "Danh sách automation chạy theo lịch, đều là mẫu và đang tắt."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "settings.png": {
+      "platform": "Windows",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Appearance.",
+        "vi": "Trang Settings → Appearance."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "terminal-settings.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "Settings → Terminal: font, renderer, cursor and colour theme.",
+        "vi": "Trang Settings → Terminal gồm phông chữ, bộ vẽ, con trỏ và bảng màu."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "shortcuts.png": {
+      "platform": "Windows",
+      "feature": "Keyboard shortcuts",
+      "caption": {
+        "en": "Settings → Shortcuts.",
+        "vi": "Trang Settings → Shortcuts."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "notebook.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "A Jupyter notebook with its outputs.",
+        "vi": "Một notebook Jupyter được hiển thị cùng kết quả của nó."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "processes.png": {
+      "platform": "Windows",
+      "feature": "Processes and ports",
+      "caption": {
+        "en": "The Processes panel: the catalog server and the port it listens on.",
+        "vi": "Bảng Processes cho thấy máy chủ catalog và cổng mà nó đang lắng nghe."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "runs.png": {
+      "platform": "Windows",
+      "feature": "Orchestration runs",
+      "caption": {
+        "en": "A run whose tasks wait for an approval or a dependency.",
+        "vi": "Một lượt chạy có các việc đang chờ duyệt hoặc chờ việc khác xong trước."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "try.png": {
+      "platform": "Windows",
+      "feature": "Try with several agents",
+      "caption": {
+        "en": "Try with several agents: one task, each agent in its own worktree.",
+        "vi": "Hộp Try with several agents giao một việc cho nhiều agent, mỗi agent làm trong worktree riêng."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "finish.png": {
+      "platform": "Windows",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "The Finish dialog: approved checks, then merge into main.",
+        "vi": "Hộp Finish cho thấy các bước kiểm tra đã duyệt, sau đó gộp vào main."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "hosts.png": {
+      "platform": "Windows",
+      "feature": "SSH hosts",
+      "caption": {
+        "en": "The SSH hosts page (documentation addresses, never connected).",
+        "vi": "Trang SSH hosts dùng địa chỉ dành cho tài liệu và không kết nối thật."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "plugins.png": {
+      "platform": "Windows",
+      "feature": "Plugins",
+      "caption": {
+        "en": "Settings → Plugins: the demo plugin waiting for review.",
+        "vi": "Trang Settings → Plugins có plugin mẫu đang chờ được xem xét."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "sidebar.png": {
+      "platform": "Windows",
+      "feature": "Sidebar",
+      "caption": {
+        "en": "The sidebar: a session that needs you, one at work, and each project's branch, comment and worktrees.",
+        "vi": "Thanh bên cho thấy một phiên đang cần bạn, một phiên đang chạy, cùng nhánh, ghi chú và worktree của từng dự án."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "quick-answer.png": {
+      "platform": "Windows",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "Answer from the dashboard: the waiting session's question and its keys, without leaving the board.",
+        "vi": "Bạn trả lời ngay trên bảng điều khiển: câu hỏi của phiên đang chờ hiện ra cùng các phím chọn, không cần rời bảng."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "split-picker.png": {
+      "platform": "Windows",
+      "feature": "Layouts",
+      "caption": {
+        "en": "Ctrl+Shift+D splits a pane, and the empty pane asks what to run.",
+        "vi": "Phím Ctrl+Shift+D chia đôi khung, và khung trống hỏi bạn muốn chạy gì trong đó."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "broadcast.png": {
+      "platform": "Windows",
+      "feature": "Layouts",
+      "caption": {
+        "en": "Four shells tiled 2 × 2 with Broadcast input: one line typed once runs in all four.",
+        "vi": "Bốn shell xếp lưới 2 × 2 và bật Broadcast input, nên một dòng gõ một lần sẽ chạy ở cả bốn."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "file-link.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "A path printed in a terminal is a link: Ctrl+click opens the file at that line.",
+        "vi": "Đường dẫn in ra trong terminal là một liên kết, và Ctrl+click sẽ mở tệp đúng ở dòng đó."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "theme-editor.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "The theme editor: Dracula duplicated into a theme of your own, with a live preview.",
+        "vi": "Trình sửa theme cho phép nhân bản Dracula thành một theme riêng và xem trước ngay."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "git-history.png": {
+      "platform": "Windows",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel with History unfolded: the last commits of the branch.",
+        "vi": "Bảng Changes mở phần History để xem các commit gần nhất của nhánh."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "git-stashes.png": {
+      "platform": "Windows",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel with Stashes unfolded: a demo stash with Apply and Drop.",
+        "vi": "Bảng Changes mở phần Stashes, có một stash mẫu cùng hai nút Apply và Drop."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "review-queue.png": {
+      "platform": "Windows",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "The Review tab: a worktree waiting for review, its diff, Review with… and Approve → Finish.",
+        "vi": "Tab Review cho thấy một worktree đang chờ duyệt cùng diff của nó, nút Review with… và Approve → Finish."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "review-with.png": {
+      "platform": "Windows",
+      "feature": "Review with another agent",
+      "caption": {
+        "en": "Review with another agent: pick the reviewer and the prompt; the diff goes with it.",
+        "vi": "Hộp Review with cho chọn agent duyệt và lời nhắn, còn diff được gửi kèm theo."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "automation-event.png": {
+      "platform": "Windows",
+      "feature": "Automations",
+      "caption": {
+        "en": "A new automation started by an event: a Markdown file under docs/ changes (not saved).",
+        "vi": "Một automation mới được kích hoạt bởi sự kiện khi một tệp Markdown trong docs/ thay đổi (chưa lưu)."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "design-mode.png": {
+      "platform": "Windows",
+      "feature": "Browser panes and design mode",
+      "caption": {
+        "en": "Design mode in a browser pane: pick an element of a local demo page and write what should change.",
+        "vi": "Chế độ thiết kế trong khung trình duyệt cho chọn một phần tử của trang mẫu chạy tại máy và ghi điều cần sửa."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "host-edit.png": {
+      "platform": "Windows",
+      "feature": "SSH hosts",
+      "caption": {
+        "en": "A host's drawer with its appearance: label colour, theme, font, cursor and a live preview.",
+        "vi": "Ngăn chỉnh máy chủ có phần giao diện gồm màu nhãn, theme, phông chữ, con trỏ và bản xem trước."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "notifications.png": {
+      "platform": "Windows",
+      "feature": "Notifications",
+      "caption": {
+        "en": "Settings → Notifications: desktop alerts, phone alerts, ntfy, Telegram and webhook.",
+        "vi": "Trang Settings → Notifications gồm thông báo trên máy, trên điện thoại, ntfy, Telegram và webhook."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "mobile-settings.png": {
+      "platform": "Windows",
+      "feature": "Phone access",
+      "caption": {
+        "en": "Settings → Mobile with phone access on (no pairing code shown).",
+        "vi": "Trang Settings → Mobile khi đã bật truy cập từ điện thoại (không hiện mã ghép đôi)."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "agent-setup.png": {
+      "platform": "Windows",
+      "feature": "Agent setup",
+      "caption": {
+        "en": "Agent setup: each agent's MCP servers, with the demo project's own server.",
+        "vi": "Trang Agent setup liệt kê máy chủ MCP của từng agent, kể cả máy chủ riêng của dự án mẫu."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "voice.png": {
+      "platform": "Windows",
+      "feature": "Voice dictation",
+      "caption": {
+        "en": "Settings → Voice: the on-device speech models (no microphone on the test machine).",
+        "vi": "Trang Settings → Voice liệt kê các mô hình nhận giọng nói chạy ngay trên máy (máy thử không có micro)."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "settings-export.png": {
+      "platform": "Windows",
+      "feature": "Export and import settings",
+      "caption": {
+        "en": "Export and import settings, with the parts to include.",
+        "vi": "Phần xuất và nhập cài đặt cho chọn những mục muốn đưa vào."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "chat-approval.png": {
+      "platform": "Windows",
+      "feature": "Chat approval",
+      "caption": {
+        "en": "A chat waiting for approval of a risky command: Allow, Allow for session or Deny.",
+        "vi": "Một cuộc chat đang chờ duyệt một lệnh có rủi ro với các lựa chọn Allow, Allow for session hoặc Deny."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "sub-sessions-ask.png": {
+      "platform": "Windows",
+      "feature": "Sub-sessions",
+      "caption": {
+        "en": "An agent asks to open a sub-session: Allow once, Allow for this session, Always allow or Deny.",
+        "vi": "Một agent xin mở phiên con, và bạn chọn Allow once, Allow for this session, Always allow hoặc Deny."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "sub-sessions.png": {
+      "platform": "Windows",
+      "feature": "Sub-sessions",
+      "caption": {
+        "en": "An agent with two sub-sessions: the sub-tab strip over its pane and the tree in the sidebar.",
+        "vi": "Một agent có hai phiên con, hiện thành dải tab con phía trên khung và thành cây ở thanh bên."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "owed-checks.png": {
+      "platform": "Windows",
+      "feature": "Checks still owed",
+      "caption": {
+        "en": "Activity: a sub-session's report and the check it could not run itself.",
+        "vi": "Hộp Activity hiện báo cáo của một phiên con và bước kiểm tra mà nó không tự chạy được."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "past-conversations.png": {
+      "platform": "Windows",
+      "feature": "Past conversations",
+      "caption": {
+        "en": "The Sessions tab: past Claude Code and Codex conversations of this project.",
+        "vi": "Tab Sessions liệt kê các cuộc trò chuyện cũ với Claude Code và Codex của dự án này."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080); synthetic demo transcripts in the run's own agent homes, never a real conversation",
+      "agent": "simulated"
+    },
+    "usage.png": {
+      "platform": "Windows",
+      "feature": "Usage and cost",
+      "caption": {
+        "en": "Usage & cost by project, from the agents' transcripts.",
+        "vi": "Trang Usage & cost tính mức dùng và chi phí theo dự án từ bản ghi của các agent."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080); synthetic demo transcripts in the run's own agent homes; the numbers are not real usage",
+      "agent": "simulated"
+    },
+    "phone-screen-windows.png": {
+      "platform": "Windows + phone (iPhone-sized Chromium)",
+      "feature": "Seeing the computer's screen",
+      "caption": {
+        "en": "The phone sees the Windows desktop live, with the trackpad, the Ctrl / Shift / Alt / Win keys and a field to type into.",
+        "vi": "Điện thoại xem màn hình Windows trực tiếp, có bàn di chuột, các phím Ctrl / Shift / Alt / Win và một ô để gõ chữ."
+      },
+      "how": "scripts/e2e/readme_phone_win.py --what screen, run as the standard user kelpieshare (Kelpie does not share the screen while elevated): debug app and kelpie-screen (software H.264 encoder, no GPU), phone page served by this run's own daemon on 127.0.0.1; demo projects, a ticking demo shell and a demo Notepad on screen"
+    },
+    "clip-phone-answer-poster.png": {
+      "platform": "Windows + phone (iPhone-sized Chromium)",
+      "feature": "Answering from the phone",
+      "caption": {
+        "en": "Poster of the clip: the phone answered the waiting session with one tap, and the desktop pane carries on.",
+        "vi": "Ảnh đại diện của đoạn phim: điện thoại trả lời phiên đang chờ chỉ bằng một chạm, và khung trên máy tính chạy tiếp."
+      },
+      "how": "a frame of clip-phone-answer.mp4 (scripts/e2e/readme_phone_win.py --what answer)",
+      "poster_of": "clip-phone-answer.mp4"
+    },
+    "clip-worktree-finish-poster.png": {
+      "platform": "Windows",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "Poster of the clip: Finish merged the worktree into main and removed it.",
+        "vi": "Ảnh đại diện của đoạn phim: Finish đã gộp worktree vào main rồi xoá nó đi."
+      },
+      "how": "a frame of clip-worktree-finish.mp4 (scripts/e2e/readme_shots.py --clip-finish)",
+      "poster_of": "clip-worktree-finish.mp4"
     }
   }
 }
