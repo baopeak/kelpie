@@ -107,6 +107,16 @@ def certificate_for_loopback(folder):
     return cert_file, key_file
 
 
+def own_image():
+    """This process's executable as the daemon reads it from the peer (macOS `proc_pidpath`): a framework Python runs as
+    `Python.app/Contents/MacOS/Python`, not as the `python3` it was started as. Empty elsewhere."""
+    if sys.platform != "darwin":
+        return ""
+    buf = ctypes.create_string_buffer(4096)
+    n = ctypes.CDLL("libproc.dylib").proc_pidpath(os.getpid(), buf, len(buf))
+    return buf.raw[:n].decode() if n > 0 else ""
+
+
 class Daemon:
     """A kelpied of this script's own: `Daemon(exe).start()`, `.call(method, params)`, `.stop()`."""
 
@@ -121,7 +131,7 @@ class Daemon:
         self.lock = threading.Lock()
 
     def start(self):
-        trusted = os.pathsep.join(dict.fromkeys(p for p in (sys.executable, getattr(sys, "_base_executable", "")) if p))
+        trusted = os.pathsep.join(dict.fromkeys(p for p in (sys.executable, getattr(sys, "_base_executable", ""), own_image()) if p))
         env = {**os.environ, "KELPIE_TEST_USER_PRESENCE": "approve", **(self.env or {}), "KELPIE_TRUSTED_APP": trusted}
         self.proc = subprocess.Popen([self.exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         self.conn = None

@@ -10,8 +10,8 @@ stand-in that speaks Claude's stream-json and stops on the usage limit exactly a
 `assistant` line with `error: rate_limit`, a failed `result`), then answers normally once it is sent “continue”.
 
 1. Terminal, setting on (the default): a Claude session stops on the limit with "resets <next minute>". With no click, the daemon
-   sets the timer from the message; the sidebar row shows "continues HH:MM" instead of "error" and the banner has Cancel. When the
-   time comes, `continue` is typed into it (once) and it works again.
+   sets the timer from the message; the sidebar row shows the time it continues instead of "error", short enough that the name is
+   not cut, with the full time in its tooltip; the banner has Cancel. When the time comes, `continue` is typed into it (once) and it works again.
 2. Setting off: the next stop sets no timer; the row says "error" and the banner offers the button instead.
 3. Chat: a Claude chat stops on the limit; the daemon reads the reset from its lines, the row shows the time, the banner says it will
    send “continue”; at the time “continue” goes through the chat's queue, the agent answers, and the chat is no longer limited.
@@ -187,6 +187,26 @@ def row_label(d, sid):
     return d.js("const r = [...document.querySelectorAll('.session-row')].find(e => e.querySelector('.name')?.textContent === arguments[0]); const l = r && r.querySelector('.state-label'); return l ? l.innerText : '';", name)
 
 
+def row_fit(d, sid):
+    """The waiting label next to the session's name: whether the name is cut (scrollWidth > clientWidth), and the label's tooltip."""
+    return d.js("""const r = document.querySelector(`.session-row[data-row-session='${arguments[0]}']`); const n = r && r.querySelector('.name');
+      const l = r && r.querySelector('.limit-wait');
+      return n && l ? { name: n.textContent, scroll: n.scrollWidth, client: n.clientWidth, label: l.innerText.trim(), labelWidth: Math.round(l.getBoundingClientRect().width),
+        title: l.getAttribute('title') || '', aria: l.getAttribute('aria-label') || '' } : null;""", sid)
+
+
+def check_fit(name, d, sid, at):
+    """The name is shown whole beside the waiting label, and the label's tooltip and accessible name give the full time."""
+    fit = until(lambda: row_fit(d, sid), 10) or {}
+    whole = bool(fit) and fit["scroll"] <= fit["client"]
+    times = {time.strftime("%H:%M", time.localtime(at)), time.strftime("%I:%M", time.localtime(at)), time.strftime("%I:%M", time.localtime(at)).lstrip("0")}
+    full = lambda v: "usage limit" in v and any(x in v for x in times)
+    run.check(f"{name}: the name is not cut beside the waiting label", whole, str(fit))
+    run.check(f"{name}: the label's tooltip has the full time", full(fit.get("title", "")), str(fit))
+    run.check(f"{name}: the label's accessible name has the full time", full(fit.get("aria", "")), str(fit))
+    return whole
+
+
 def banner(d, sid):
     return d.js("const b = document.querySelector(`[data-limit-banner='${arguments[0]}']`); return b ? b.innerText : null", sid)
 
@@ -197,6 +217,7 @@ def screen(handle):
 
 run = Run(shots, APP)
 d = run.d
+fits = {}
 try:
     run.boot()
     d.set_window_size(1300, 800)
@@ -222,8 +243,9 @@ try:
     timer = until(lambda: [t for t in timers() if t["session"] == tid], 10)
     run.check("the daemon set the timer by itself, from the message's time", bool(timer) and timer[0]["source"] == "message" and abs(timer[0]["fire_at"] / 1000 - reset) <= 1.5, str(timer))
     hhmm = time.strftime("%H:%M", time.localtime(reset))
-    label = until(lambda: (lambda l: l if "continues" in l else None)(row_label(d, tid)), 10) or row_label(d, tid)
-    run.check("the sidebar row shows when it continues instead of an error", "continues" in label and "error" not in label, label)
+    label = until(lambda: (lambda f: f["label"] if f else None)(row_fit(d, tid)), 10) or row_label(d, tid)
+    run.check("the sidebar row shows when it continues instead of an error", bool(label) and "error" not in label and bool(row_fit(d, tid)), label)
+    fits["terminal"] = check_fit("terminal", d, tid, reset)
     b = until(lambda: banner(d, tid), 10) or ""
     run.check("the banner says “continue” will be typed, and offers Cancel", "Will type" in b and bool(d.js("return !!document.querySelector('[data-cancel-continue]')")), b)
     run.shot("01-terminal-waiting")
@@ -264,8 +286,9 @@ try:
     run.check("the chat is marked stopped by the usage limit", bool(climit) and climit["failed"])
     ctimer = until(lambda: [t for t in timers() if t["session"] == cid], 10)
     run.check("the daemon set the chat's timer from its rate-limit event", bool(ctimer) and ctimer[0]["source"] == "message" and abs(ctimer[0]["fire_at"] / 1000 - chat_reset) <= 1, str(ctimer))
-    cl = until(lambda: (lambda l: l if "continues" in l else None)(row_label(d, cid)), 10) or row_label(d, cid)
-    run.check("the chat's row shows when it continues", "continues" in cl and "error" not in cl, cl)
+    cl = until(lambda: (lambda f: f["label"] if f else None)(row_fit(d, cid)), 10) or row_label(d, cid)
+    run.check("the chat's row shows when it continues", bool(cl) and "error" not in cl and bool(row_fit(d, cid)), cl)
+    fits["chat"] = check_fit("chat", d, cid, chat_reset)
     cb = until(lambda: banner(d, cid), 10) or ""
     run.check("the chat shows the banner: it will send “continue”", "Will send" in cb, cb)
     run.shot("04-chat-waiting")
@@ -279,6 +302,7 @@ except Exception:
     traceback.print_exc()
     run.check("scenario ran to completion", False)
 finally:
+    print("NAME WHOLE " + json.dumps(fits), flush=True)
     try:
         daemon(d, "daemon.shutdown", {"kill_sessions": True})
     except Exception:
