@@ -166,9 +166,10 @@ try {
     }
 
     Step "pnpm" {
-        $have = (Get-Command pnpm -ErrorAction SilentlyContinue) -and ((pnpm --version) -like "11.*")
-        if (-not $have) { Run npm install -g pnpm@11; RefreshPath }
-        Write-Output "pnpm $(pnpm --version)"
+        # The .cmd shims: splatting "-g" into npm's PowerShell shim (npm.ps1) loses it.
+        $have = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue) -and ((pnpm.cmd --version) -like "11.*")
+        if (-not $have) { Run npm.cmd install -g pnpm@11; RefreshPath }
+        Write-Output "pnpm $(pnpm.cmd --version)"
     }
 
     Step "python-packages" {
@@ -216,8 +217,8 @@ try {
         Step "frontend" {
             Push-Location (Join-Path $Dir "app")
             try {
-                Run pnpm install --frozen-lockfile
-                Run pnpm build:phone
+                Run pnpm.cmd install --frozen-lockfile
+                Run pnpm.cmd build:phone
             } finally { Pop-Location }
         }
 
@@ -231,7 +232,7 @@ try {
 
         Step "debug-app" {
             Push-Location (Join-Path $Dir "app")
-            try { Run pnpm tauri build --debug --no-bundle } finally { Pop-Location }
+            try { Run pnpm.cmd tauri build --debug --no-bundle } finally { Pop-Location }
         }
 
         if ($ScreenRef) {
@@ -315,7 +316,7 @@ public static class KelpieDisplay {
         webview2 = WebView2Version
         msvc = Msvc
         rustc = (rustc --version)
-        pnpm = (pnpm --version)
+        pnpm = (pnpm.cmd --version)
         node = (node --version)
         python = (python --version)
         msedgedriver = $env:MSEDGEDRIVER
