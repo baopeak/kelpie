@@ -4601,7 +4601,9 @@ mod tests {
 
     #[test]
     fn the_usage_limit_is_read_from_claude_s_own_lines() {
-        let stopped = json!({"type": "assistant", "error": "rate_limit", "session_id": "conv", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "You've hit your 5-hour limit · resets 3:20am (Asia/Ho_Chi_Minh)"}]}});
+        // Two hours from now on this computer's clock: a fixed time is refused for the hour after it passes (a reset read late).
+        let reset = (chrono::Local::now() + chrono::Duration::hours(2)).format("%-I:%M%P");
+        let stopped = json!({"type": "assistant", "error": "rate_limit", "session_id": "conv", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": format!("You've hit your 5-hour limit · resets {reset} (Asia/Ho_Chi_Minh)")}]}});
         assert!(matches!(limit_line(&stopped.to_string()), Some(LimitLine::Stopped { session: Some(s), reset_at: Some(_) }) if s == "conv"));
         let no_time = json!({"type": "assistant", "error": "rate_limit", "message": {"content": [{"type": "text", "text": "You've hit your limit"}]}});
         assert_eq!(limit_line(&no_time.to_string()), Some(LimitLine::Stopped { session: None, reset_at: None }));
