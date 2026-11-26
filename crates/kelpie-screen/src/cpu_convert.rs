@@ -287,8 +287,11 @@ mod tests {
             assert!(run((6, 4), (4, 2), stride, &px)[..8].iter().all(|v| *v == 235), "stride {stride} scaled");
         }
         // The last row needs no padding after it.
-        let tight = &picture(w, h, 64, |_, _| [0, 0, 0])[..64 * (h - 1) + w * 4];
-        assert!(Scaler::new((6, 4), (6, 4)).convert(tight, 64, &mut vec![0; nv12_len(6, 4)]).is_ok());
+        let whole = picture(w, h, 64, |_, _| [0, 0, 0]);
+        let tight = &whole[..64 * (h - 1) + w * 4];
+        let mut nv12 = vec![0; nv12_len(6, 4)];
+        assert!(Scaler::new((6, 4), (6, 4)).convert(tight, 64, &mut nv12).is_ok());
+        assert_eq!(&nv12[..24], &[16u8; 24][..]);
     }
 
     #[test]
