@@ -83,7 +83,7 @@ def face_id(udid, what):
 
 
 class Page:
-    def __init__(self, udid, out, tour=None):
+    def __init__(self, udid, out, tour=None, suffix=""):
         from selenium import webdriver
         from selenium.webdriver.safari.options import Options
 
@@ -92,12 +92,12 @@ class Page:
         o.set_capability("safari:useSimulator", True)
         o.set_capability("safari:deviceUDID", udid)
         self.d = webdriver.Safari(options=o)
-        self.udid, self.out, self.n, self.tour = udid, out, 0, tour
+        self.udid, self.out, self.n, self.tour, self.suffix = udid, out, 0, tour, suffix
 
     def shot(self, name):
-        """The simulator's picture: numbered into --out, or named phone-safari-<name>.png in --tour."""
+        """The simulator's picture: numbered into --out, or named phone-safari-<name><suffix>.png in --tour."""
         if self.tour:
-            path = os.path.join(self.tour, f"phone-safari-{name}.png")
+            path = os.path.join(self.tour, f"phone-safari-{name}{self.suffix}.png")
         elif self.out:
             self.n += 1
             path = os.path.join(self.out, f"{self.n:02d}-{name}.png")
@@ -172,7 +172,7 @@ class Page:
                 "window.addEventListener('unhandledrejection', e => window.__kelpieErrors.push(String(e.reason)));")
 
 
-def pair(d, ph, port):
+def pair(d, ph, port, name="Safari phone"):
     ph.d.get(f"https://localhost:{port}/")
     ph.wait("[data-stay-in-browser], [data-scan]", 40)
     ph.watch_errors()
@@ -190,7 +190,6 @@ def pair(d, ph, port):
     ph.fill("[data-paste]", link)
     ph.click("[data-paste-go]")
     ph.wait("[data-pair-name], .card input.field")
-    name = "Safari phone"
     ph.fill("[data-pair-name], .card input.field", name)
     ph.click("[data-pair-go], .card .btn.primary")
     ph.wait("[data-pair-code]")
@@ -306,7 +305,7 @@ def scenario(d, ph, port, folder):
         tour(d, ph, missed)
         check("the page raised no script error during the tour", not ph.errors(), ph.errors())
         ph.d.quit()
-        tour_vietnamese(lambda: Page(ph.udid, ph.out, ph.tour), ph.udid, f"https://localhost:{port}/", missed)
+        tour_vietnamese(d, lambda: Page(ph.udid, None, ph.tour, "-vi"), ph.udid, port, missed)
         check("the tour captured every screen", not missed, missed)
 
 
@@ -472,9 +471,10 @@ def tour(d, ph, missed):
     inbox()
 
 
-def tour_vietnamese(ph_factory, udid, url, missed):
-    """The simulator in Vietnamese (its language, which Safari reports to the page), the page opened again and unlocked: the inbox and
-    settings in Vietnamese. The simulator's own language is restored after."""
+def tour_vietnamese(d, ph_factory, udid, port, missed):
+    """The simulator in Vietnamese (its language, which Safari reports to the page) and a new Safari session, which keeps nothing of the
+    first one: a second phone pairs in Vietnamese, and its pairing, lock, inbox and settings are pictured (…-vi.png). The simulator's own
+    language is restored after."""
     before = simctl("spawn", udid, "defaults", "read", "-g", "AppleLanguages", check_rc=False)
     langs = [x.strip().strip('",') for x in before.strip().strip("()").split("\n") if x.strip().strip('",')] or ["en"]
     locale = simctl("spawn", udid, "defaults", "read", "-g", "AppleLocale", check_rc=False).strip() or "en_US"
@@ -490,18 +490,14 @@ def tour_vietnamese(ph_factory, udid, url, missed):
     try:
         restart(["vi", "en"], "vi_VN")
         ph = ph_factory()
-        ph.d.get(url)
-        ph.wait("[data-lock-screen], [data-inbox-view], .view-switch", 60)
-        time.sleep(3)
-        if ph.has("[data-lock-screen]"):
-            unlock(ph)
+        pair(d, ph, port, "Safari iPhone")
         ph.wait("[data-inbox-view], .view-switch", 30)
         time.sleep(1.5)
-        ph.shot("inbox-vi")
+        ph.shot("inbox")
         ph.click("[data-open-settings]")
         ph.wait("[data-settings]")
         time.sleep(1.0)
-        ph.shot("settings-vi")
+        ph.shot("settings")
     except Exception as e:  # noqa: BLE001
         missed.append(f"vietnamese: {str(e).splitlines()[0][:200]}")
         print(f"  MISSED vietnamese: {e}", flush=True)
