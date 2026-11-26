@@ -1160,7 +1160,7 @@ TURN egress (`TURN_MONTHLY_STOP_GB`, read hourly by the router's cron into the R
 reading in 24 hours); port-53 URLs left out. TURN requests are sent one at a time (the room takes only a later
 `ts`). Renewed credentials go to a new peer, never `setConfiguration` (a live TURN allocation is not known to take new ones).
 
-A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29, Windows; macOS later). The same rules as a
+A phone with `control` sees a monitor or one window of this computer as H.264 video and drives it (API 29 on Windows; API 50 on macOS 12.3 and later). The same rules as a
 pane's takeover over a direct link (Tailscale or this computer's HTTPS address), the grant on the desktop with the person's verification
 as the only confirmation, the lock and a revoke ending it at once. The video goes **over the phone's end-to-end encrypted link**, or peer to peer (above,
 from API 42; the 2026-11-06 decision against WebRTC was replaced on 2026-11-12, after the WebTransport and str0m spikes).
@@ -1223,6 +1223,25 @@ phone ◀══ peer to peer (DTLS/SCTP over UDP): "m" media chunks (0x02…) ·
   `kelpie-stt`; `KELPIE_SCREEN_PATH` in debug builds only, for the e2e), and none while it runs as administrator (the helper would inherit that and drive
   elevated windows). Its start budget (hello 4 s, start 9 s) stays under the daemon's 15 s; a start the daemon gave up on is stopped when it finishes, and a
   stop that cannot be queued drops the helper.
+- **The helper on a Mac** (`crates/kelpie-screen/src/mac/`, the same `stream_core` loop as Windows): ScreenCaptureKit for a display or a window
+  (BGRA at the pixel size, the cursor left out, the helper's own windows filtered out of a display, `dirtyRects` as the changed region), a one-slot
+  mailbox; VideoToolbox H.264 (real time, no reordering, a data-rate limit of about two frames, keyframes on request, low-latency rate control where
+  the Mac has it, each setting read back and the refused ones reported) fed NV12 by a pixel transfer session; input as Core Graphics events at the
+  HID tap in global points, with the Windows side's target rules (`covered`, `not_front`, the focus looked at through Accessibility before every
+  character); the border an `NSWindow` at the screen saver's level on every Space; the stop hotkey Carbon's `RegisterEventHotKey` (default
+  Control+Option+Shift+K); App Nap held off while streaming. A Mac has no elevated windows, so no `elevated` state; a password field holding the
+  keyboard (`IsSecureEventInputEnabled`) is `secure_input`, said to the phone while input still goes. **Permissions (TCC):** the helper runs from
+  inside Kelpie.app and is started by it, so macOS counts its Screen Recording and Accessibility as Kelpie's; the app reads both
+  (`screen_permissions`: `CGPreflightScreenCaptureAccess`, `AXIsProcessTrusted`) for Settings → Mobile, where `screen_open_permission` asks macOS once
+  (which lists Kelpie) and opens that Privacy pane. Without Screen Recording the helper refuses the start (`no_screen_permission: …`), and a capture it stops because the grant was taken back ends with the reason `no_screen_permission`; without
+  Accessibility it refuses input (`input_blocked`, the phone's `blocked`) and text (`no_accessibility: …`); the daemon answers those with the codes
+  `no_screen_permission` and `no_accessibility` and its own plain text. The screens list and the start's answer carry `os` (`mac` | `windows`, API 50),
+  from which the phone shows ⌘ ⌥ ⌃ ⇧, Spotlight (⌘Space) for the Windows key and the Mac's texts. The grants follow the app's code signature: the
+  release's bundler signs the helper in `Contents/MacOS` with the app's identity (`scripts/build-release.sh` fails if the two differ, and warns when the app has no Developer ID team), and an ad-hoc signed build is a new app to TCC after every update.
+  The app must run in the signed-in GUI session; the daemon alone cannot capture. Peer to peer and TURN are Windows only for now (`kelpie-rtc`), so
+  a Mac's picture goes over the link: the daemon's screen policy counts neither as a way on a Mac whatever its switches (`screen_policy::usable`),
+  so Automatic goes by the relay WebSocket or says `no_p2p_here`, and Settings → Mobile labels both Windows only. Run as root, the app does not
+  start the helper. The app offers the screen only on macOS 12.3 or later (`screen_available`), and only to a daemon at API 50 or later.
 - **Media messages** (`kelpie-screen/src/wire.rs`, read by `app/phone/src/screen.ts`): binary, little-endian, first byte `0x01` (no JSON message starts with it,
   which is how the page tells them apart on the link): video (key and unpaint-all flags, unpaint rectangles, `seq`, capture time, source and coded size, an
   Annex B access unit), a tile (PNG or JPEG q90, the `seq` it matches, its rectangle in source pixels), the cursor (shape, visible, position). On the local pipe

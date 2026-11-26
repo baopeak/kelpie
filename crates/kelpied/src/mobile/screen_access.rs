@@ -228,12 +228,17 @@ impl Mobile {
     /// Whether `device` may use the screen on such a connection now (`screen_policy::allowed`).
     pub(crate) fn screen_allowed(&self, device: &str, browser: bool, relay: bool) -> Result<(), Reason> {
         let facts = self.screen_facts(device, browser, relay).ok_or(Reason::NotGranted)?;
-        screen_policy::allowed(&facts, &self.screen_options())
+        screen_policy::allowed(&facts, &self.screen_ways())
+    }
+
+    /// The ways as this computer has them (`screen_policy::usable`): the switches, less peer to peer and TURN where it cannot send them.
+    fn screen_ways(&self) -> ScreenOptions {
+        screen_policy::usable(&self.screen_options(), screen_policy::PEER_HERE)
     }
 
     /// What a hold going `way` rests on as it goes, read again by its task (`screen::watch`).
     pub(crate) fn screen_held(&self, device: &str, browser: bool, relay: bool, way: Via) -> bool {
-        self.screen_facts(device, browser, relay).is_some_and(|f| screen_policy::held(&f, &self.screen_options(), way).is_ok())
+        self.screen_facts(device, browser, relay).is_some_and(|f| screen_policy::held(&f, &self.screen_ways(), way).is_ok())
     }
 
     /// Whether a screen of this connection may go `way` now (a switch mid-session, or the link to fall back on): its rule, that way turned on,
@@ -241,7 +246,10 @@ impl Mobile {
     pub(crate) fn screen_way(&self, device: &str, browser: bool, relay: bool, way: Via) -> Result<(), (&'static str, String)> {
         let refusal = |r: Reason| (r.code(), r.message().to_string());
         let facts = self.screen_facts(device, browser, relay).ok_or(refusal(Reason::NotGranted))?;
-        screen_policy::held(&facts, &self.screen_options(), way).map_err(refusal)?;
+        if !screen_policy::PEER_HERE && matches!(way, Via::P2p | Via::Turn) {
+            return Err(("no_p2p_here", screen_policy::NO_PEER_HERE.to_string()));
+        }
+        screen_policy::held(&facts, &self.screen_ways(), way).map_err(refusal)?;
         if way == Via::Relay && !facts.native && self.relay_screen_spent() {
             return Err(("relay_budget_spent", "This month's screen allowance through the relay is used up. It starts again next month, or use Tailscale.".to_string()));
         }
@@ -260,9 +268,17 @@ impl Mobile {
     pub(crate) fn screen_may_start(&self, device: &str, browser: bool, relay: bool, via: Via, can_p2p: bool, target: &str, proof: &Value) -> Result<(Via, Option<u32>), (&'static str, String)> {
         let refusal = |r: Reason| (r.code(), r.message().to_string());
         let facts = self.screen_facts(device, browser, relay).ok_or(refusal(Reason::NotGranted))?;
-        let opts = self.screen_options();
-        // Everything but the passkey first: no Face ID is asked for what would be refused anyway, nor once the month's allowance is spent.
-        let way = screen_policy::may_start(&facts, &opts, via, Uv::Fresh).map_err(refusal)?;
+        let switches = self.screen_options();
+        let opts = screen_policy::usable(&switches, screen_policy::PEER_HERE);
+        // Everything but the passkey first: no Face ID is asked for what would be refused anyway, nor once the month's allowance is spent. A
+        // refusal that comes only from this computer having no peer to peer says that.
+        let way = screen_policy::may_start(&facts, &opts, via, Uv::Fresh).map_err(|r| {
+            if screen_policy::no_peer_here(&facts, &switches, via, screen_policy::PEER_HERE) {
+                ("no_p2p_here", screen_policy::NO_PEER_HERE.to_string())
+            } else {
+                refusal(r)
+            }
+        })?;
         // Automatic through the relay with its WebSocket off goes peer to peer (or TURN) only: a phone that cannot (an older page, a browser without
         // WebRTC) would wait for a picture that never comes.
         if via == Via::Auto && matches!(way, Via::P2p | Via::Turn) && !can_p2p {
@@ -286,7 +302,8 @@ impl Mobile {
 
     /// The ways a phone on this connection may choose, each with whether it is available now and why not (`screens`' `paths`).
     pub(crate) fn screen_paths(&self, device: &str, browser: bool, relay: bool) -> Value {
-        let opts = self.screen_options();
+        let switches = self.screen_options();
+        let opts = screen_policy::usable(&switches, screen_policy::PEER_HERE);
         let facts = self.screen_facts(device, browser, relay);
         let row = |id: &str, why: Option<&str>| match why {
             None => json!({"id": id, "ok": true}),
@@ -297,6 +314,7 @@ impl Mobile {
             match screen_policy::may_start(f, &opts, via, Uv::Fresh) {
                 Ok(Via::Relay) if !f.native && self.relay_screen_spent() => Some("relay_budget_spent"),
                 Ok(_) => None,
+                Err(_) if screen_policy::no_peer_here(f, &switches, via, screen_policy::PEER_HERE) => Some("no_p2p_here"),
                 Err(r) => Some(r.code()),
             }
         };

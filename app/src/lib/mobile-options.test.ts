@@ -4,7 +4,7 @@ import type { RelayStatus } from "../components/settings/mobile-relay-settings";
 import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_P2P_API, SCREEN_REMOTE_API, SCREEN_TURN_API, TAILSCALE_API, TELEGRAM_API } from "./attention";
 import { translated } from "./i18n";
 import {
-  alreadyRemoved, approvalChoices, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
+  alreadyRemoved, approvalChoices, macPermissionRows, approveWithReplace, asksForKey, connectionLine, deviceMethodLabel, groupDevices, hostedLine, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, movingRelayWarning, offerNewRoom,
   OPTION_IDS, optionState, pageKindLabel, pairMethodOf, pairMethods, permissionChoices, permissionLabel, plainPairing, prunePhoneGroups, relayLabel, relayServesApp, routeLabel, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, turnUsageLine, screenPolicyLine, screenRemoteShown, screenUsageLine,
   telegramChoice, turnOnAccess, withConnection, withNewerConnections, type AccessCalls, type ConnectionNews, type MobileRoute, type ApprovalCalls, type OptionFacts, type OptionId, type PairMethod, type PairMethodId,
 } from "./mobile-options";
@@ -472,15 +472,24 @@ describe("the screen without Tailscale", () => {
     expect(rows.map((r) => [r.id, r.label, r.on])).toEqual([["tailscale", "Tailscale", true], ["p2p", "Direct link (P2P)", false], ["relay_turn", "Relay (TURN)", true], ["relay_ws", "Relay WebSocket", false]]);
     expect(rows.find((r) => r.id === "p2p")!.note, "a computer before peer to peer").toContain("later update");
     expect(rows.find((r) => r.id === "relay_turn")!.note).toContain("later update");
-    const p2p = screenMethodRows({ ...facts(screen({})), api: SCREEN_P2P_API }).find((r) => r.id === "p2p")!;
+    const p2p = screenMethodRows({ ...facts(screen({})), api: SCREEN_P2P_API }, true).find((r) => r.id === "p2p")!;
     expect(p2p.note).toContain("network addresses");
-    const turn = (patch: Partial<NonNullable<MobileStatus["screen"]>>) => screenMethodRows({ ...facts(screen(patch)), api: SCREEN_TURN_API }).find((r) => r.id === "relay_turn")!.note;
+    const turn = (patch: Partial<NonNullable<MobileStatus["screen"]>>) => screenMethodRows({ ...facts(screen(patch)), api: SCREEN_TURN_API }, true).find((r) => r.id === "relay_turn")!.note;
     expect(turn({})).toContain("operator pays");
     expect(turn({ turn: "turn_not_configured" })).toContain("offers no TURN");
     expect(turnUsageLine(status({ screen: { ...status().screen!, turn_session_mb: 1024, turn_day_mb: 3072, turn_month_mb: 30720, turn_used_day_mb: 12.4, turn_used_month_mb: 900 } }).screen)).toBe("TURN: 12 MB of 3072 MB today, 900 MB of 30720 MB this month, at most 1024 MB a screen");
     expect(turnUsageLine(status().screen), "a daemon before TURN").toBeNull();
     expect(rows.find((r) => r.id === "tailscale")!.note).toBeNull();
     expect(rows.every((r) => r.disabled === null)).toBe(true);
+  });
+
+  it("says peer to peer and TURN are Windows only on any other computer, and leaves the other ways alone", () => {
+    const mac = screenMethodRows({ ...facts(screen({ remote: true })), api: SCREEN_TURN_API }, false);
+    for (const id of ["p2p", "relay_turn"]) expect(mac.find((r) => r.id === id)!.note).toContain("Windows only");
+    expect(mac.find((r) => r.id === "tailscale")!.note).toBeNull();
+    expect(mac.find((r) => r.id === "relay_ws")!.note).toBeNull();
+    expect(screenMethodRows({ ...facts(screen({})), api: SCREEN_P2P_API - 1 }, false).find((r) => r.id === "p2p")!.note, "an older daemon: the update comes first").toContain("later update");
+    for (const r of screenMethodRows({ ...facts(screen({})), api: SCREEN_TURN_API }, true)) expect(r.note ?? "").not.toContain("Windows only");
   });
 
   it("says the relay WebSocket counts only while the switch is on, and blocks the ways like the switch", () => {
@@ -817,5 +826,13 @@ describe("one phone paired several ways", () => {
     expect(withNewerConnections(reply, news, 5), "nothing heard since the read started").toBe(reply);
     const same = new Map<string, ConnectionNews>([["a", { route: "tailscale", since: 200, seq: 9 }]]);
     expect(withNewerConnections(reply, same, 0)[0].connection, "the same way keeps the daemon's since").toEqual({ route: "tailscale", since: 5 });
+  });
+});
+describe("a Mac's permissions for the screen", () => {
+  it("lists Screen Recording, then Accessibility, each with what it lets a phone do and whether Kelpie has it", () => {
+    const rows = macPermissionRows({ screen: true, accessibility: false });
+    expect(rows.map((r) => [r.id, r.allowed])).toEqual([["screen", true], ["accessibility", false]]);
+    expect(rows[0].label).toBe("Screen Recording");
+    expect(rows[1].what, "without it, the screen is still seen").toContain("only sees the screen");
   });
 });

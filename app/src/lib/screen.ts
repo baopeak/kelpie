@@ -28,6 +28,8 @@ export function endedText(reason: string, device: string): string | null {
       return t("{device} lost control, or locked: it no longer sees this screen.", { device });
     case "idle":
       return t("{device} stopped seeing this screen after 10 minutes with nothing done.", { device });
+    case "no_screen_permission":
+      return t("This Mac no longer allows Kelpie to record the screen, so {device} no longer sees it. Allow Screen Recording in System Settings → Privacy & Security.", { device });
     default:
       return t("{device} no longer sees this screen.", { device });
   }

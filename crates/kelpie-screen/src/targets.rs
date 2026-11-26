@@ -15,8 +15,10 @@ pub struct WindowInfo {
     pub pid: u32,
     pub title: String,
     pub class: String,
-    /// The process's executable, file name only (`Code.exe`).
+    /// The process's executable, file name only (`Code.exe`); on a Mac, the app's name (`TextEdit`).
     pub exe: String,
+    /// The app's bundle identifier (a Mac), what IDEs and Kelpie are known by there.
+    pub bundle: String,
     /// `DWMWA_EXTENDED_FRAME_BOUNDS`, physical pixels.
     pub rect: Rect,
     pub visible: bool,
@@ -54,14 +56,46 @@ const IDES: &[(&str, &str)] = &[
     ("fleet.exe", "Fleet"),
 ];
 
+/// IDEs on a Mac, by bundle identifier (a JetBrains IDE's Community edition adds `.ce`).
+const MAC_IDES: &[(&str, &str)] = &[
+    ("com.microsoft.vscode", "VS Code"),
+    ("com.microsoft.vscodeinsiders", "VS Code Insiders"),
+    ("com.todesktop.230313mzl4w4u92", "Cursor"),
+    ("com.exafunction.windsurf", "Windsurf"),
+    ("dev.zed.zed", "Zed"),
+    ("com.apple.dt.xcode", "Xcode"),
+    ("com.jetbrains.intellij", "IntelliJ IDEA"),
+    ("com.jetbrains.pycharm", "PyCharm"),
+    ("com.jetbrains.webstorm", "WebStorm"),
+    ("com.jetbrains.rider", "Rider"),
+    ("com.jetbrains.goland", "GoLand"),
+    ("com.jetbrains.clion", "CLion"),
+    ("com.jetbrains.rustrover", "RustRover"),
+    ("com.jetbrains.phpstorm", "PhpStorm"),
+    ("com.jetbrains.rubymine", "RubyMine"),
+    ("com.jetbrains.datagrip", "DataGrip"),
+    ("com.google.android.studio", "Android Studio"),
+    ("com.jetbrains.fleet", "Fleet"),
+];
+
+/// The Kelpie app's bundle identifier (`app/src-tauri/tauri.conf.json`).
+const KELPIE_BUNDLE: &str = "dev.kelpie.desktop";
+
 /// The IDE an executable is, if it is one.
 pub fn ide_name(exe: &str) -> Option<&'static str> {
     let exe = exe.to_ascii_lowercase();
     IDES.iter().find(|(e, _)| *e == exe).map(|(_, n)| *n)
 }
 
-fn is_kelpie(exe: &str) -> bool {
-    exe.eq_ignore_ascii_case("kelpie.exe")
+/// The IDE a Mac app is, by its bundle identifier, if it is one.
+pub fn mac_ide_name(bundle: &str) -> Option<&'static str> {
+    let bundle = bundle.to_ascii_lowercase();
+    let bundle = bundle.strip_suffix(".ce").unwrap_or(&bundle);
+    MAC_IDES.iter().find(|(b, _)| *b == bundle).map(|(_, n)| *n)
+}
+
+fn is_kelpie(w: &WindowInfo) -> bool {
+    w.exe.eq_ignore_ascii_case("kelpie.exe") || w.bundle == KELPIE_BUNDLE
 }
 
 /// The smallest window offered (a sliver is not something to control).
@@ -114,9 +148,9 @@ pub fn targets(monitors: &[Monitor], windows: &[WindowInfo], own_pid: u32) -> Ve
         .iter()
         .filter(|w| listed(w, own_pid))
         .map(|w| {
-            let (rank, shortcut, app) = if is_kelpie(&w.exe) {
+            let (rank, shortcut, app) = if is_kelpie(w) {
                 (0, Some("kelpie"), "Kelpie".to_string())
-            } else if let Some(ide) = ide_name(&w.exe) {
+            } else if let Some(ide) = ide_name(&w.exe).or_else(|| mac_ide_name(&w.bundle)) {
                 (1, Some("ide"), ide.to_string())
             } else {
                 (2, None, w.exe.trim_end_matches(".exe").trim_end_matches(".EXE").to_string())
@@ -132,6 +166,9 @@ pub fn targets(monitors: &[Monitor], windows: &[WindowInfo], own_pid: u32) -> Ve
 }
 
 pub const MAX_TARGETS: usize = 64;
+
+/// What a Mac's display is named by (`Monitor::name`), before its `CGDirectDisplayID`.
+pub const MAC_DISPLAY: &str = "display:";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TargetId {
@@ -154,9 +191,14 @@ impl TargetId {
             return None;
         }
         if let Some(name) = s.strip_prefix("m:") {
-            // `\\.\DISPLAY<n>` is all DXGI names a desktop output.
-            let n = name.strip_prefix(r"\\.\DISPLAY")?;
-            return (!n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit())).then(|| TargetId::Monitor(name.to_string()));
+            // `\\.\DISPLAY<n>` is all DXGI names a desktop output; a Mac's display is `display:<CGDirectDisplayID>`.
+            let digits = |n: &str, most: usize| !n.is_empty() && n.len() <= most && n.bytes().all(|b| b.is_ascii_digit());
+            let ok = match (name.strip_prefix(r"\\.\DISPLAY"), name.strip_prefix(MAC_DISPLAY)) {
+                (Some(n), _) => digits(n, 3),
+                (_, Some(n)) => digits(n, 10) && n.parse::<u32>().is_ok(),
+                _ => false,
+            };
+            return ok.then(|| TargetId::Monitor(name.to_string()));
         }
         let rest = s.strip_prefix("w:")?;
         let (hwnd, pid) = rest.split_once(':')?;
@@ -214,6 +256,35 @@ mod tests {
         assert_eq!((t[2].shortcut, t[2].app.as_deref()), (Some("kelpie"), Some("Kelpie")));
         assert_eq!((t[3].shortcut, t[3].app.as_deref()), (Some("ide"), Some("RustRover")));
         assert_eq!((t[5].shortcut, t[5].app.as_deref()), (None, Some("olk")));
+    }
+
+    #[test]
+    fn on_a_mac_kelpie_and_ides_are_known_by_bundle_and_come_first() {
+        let mac = |id: u64, pid: u32, title: &str, app: &str, bundle: &str| WindowInfo { bundle: bundle.into(), ..win(id, pid, title, app) };
+        let monitors = vec![
+            Monitor { name: format!("{MAC_DISPLAY}2"), rect: Rect::new(1600, 0, 1920, 1080), dpi: 96, primary: false },
+            Monitor { name: format!("{MAC_DISPLAY}1"), rect: Rect::new(0, 0, 1600, 1200), dpi: 192, primary: true },
+        ];
+        let windows = vec![
+            mac(41, 4, "Untitled", "TextEdit", "com.apple.TextEdit"),
+            mac(42, 5, "lib.rs — kelpie", "Code", "com.microsoft.VSCode"),
+            mac(43, 6, "Kelpie", "Kelpie", "dev.kelpie.desktop"),
+            mac(44, 7, "main.py", "PyCharm CE", "com.jetbrains.pycharm.ce"),
+            mac(45, 8, "Terminal — zsh", "Terminal", "com.apple.Terminal"),
+        ];
+        let t = targets(&monitors, &windows, 1);
+        let ids: Vec<&str> = t.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["m:display:1", "m:display:2", "w:43:6", "w:42:5", "w:44:7", "w:41:4", "w:45:8"]);
+        assert_eq!((t[3].shortcut, t[3].app.as_deref()), (Some("ide"), Some("VS Code")));
+        assert_eq!((t[4].app.as_deref(), t[5].app.as_deref()), (Some("PyCharm"), Some("TextEdit")), "another app by its own name");
+        assert_eq!(mac_ide_name("com.jetbrains.IntelliJ.ce"), Some("IntelliJ IDEA"));
+        assert_eq!(mac_ide_name("com.apple.TextEdit"), None);
+        for id in ["m:display:1", "m:display:4294967295"] {
+            assert_eq!(TargetId::parse(id).map(|t| t.to_string()), Some(id.to_string()));
+        }
+        for bad in ["m:display:", "m:display:4294967296", "m:display:-1", "m:display:1x", "m:display:12345678901"] {
+            assert_eq!(TargetId::parse(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

@@ -33,11 +33,13 @@ pub struct Observed {
     /// The target window itself does (window targets only).
     pub target_elevated: bool,
     pub target: TargetSeen,
+    /// A password field holds the keyboard (macOS secure event input): keys a program posts may not arrive.
+    pub secure_input: bool,
 }
 
 impl Observed {
     pub fn normal() -> Observed {
-        Observed { desktop: Desktop::Default, session_locked: false, foreground_elevated: false, target_elevated: false, target: TargetSeen::Shown }
+        Observed { desktop: Desktop::Default, session_locked: false, foreground_elevated: false, target_elevated: false, target: TargetSeen::Shown, secure_input: false }
     }
 }
 
@@ -58,6 +60,9 @@ pub enum State {
     /// A dialog another program made and gave the shared window as its owner (a credential prompt, another program's file picker) is in
     /// front: the phone does not see it, so nothing is typed or clicked into it; the person can share the whole monitor to use it.
     CoveredByDialog,
+    /// A password field on the Mac is protecting the keyboard (secure event input): typing may not arrive. Input still goes; the phone says
+    /// why it may not land.
+    SecureInput,
 }
 
 impl State {
@@ -71,12 +76,13 @@ impl State {
             State::Elevated => "elevated",
             State::Covered => "covered",
             State::CoveredByDialog => "covered_dialog",
+            State::SecureInput => "secure_input",
         }
     }
 
     /// Whether the picture can still change: frames are expected (and the phone should not count their absence as a freeze).
     pub fn picture_moves(self) -> bool {
-        matches!(self, State::Live | State::Elevated | State::Covered | State::CoveredByDialog)
+        matches!(self, State::Live | State::Elevated | State::Covered | State::CoveredByDialog | State::SecureInput)
     }
 
     /// Whether the stream ends rather than waits.
@@ -102,6 +108,9 @@ pub fn decide(o: &Observed, window_target: bool) -> State {
     if (window_target && o.target_elevated) || (!window_target && o.foreground_elevated) {
         return State::Elevated;
     }
+    if o.secure_input {
+        return State::SecureInput;
+    }
     if window_target && o.target == TargetSeen::Covered {
         return State::Covered;
     }
@@ -119,7 +128,7 @@ pub struct InputPolicy {
 /// that window and be dropped. An elevated window target takes nothing. A minimized window is restored by a click (the native side does it).
 pub fn input_policy(state: State, window_target: bool) -> InputPolicy {
     match state {
-        State::Live | State::Covered | State::CoveredByDialog => InputPolicy { mouse: true, keys: true },
+        State::Live | State::Covered | State::CoveredByDialog | State::SecureInput => InputPolicy { mouse: true, keys: true },
         State::Elevated if !window_target => InputPolicy { mouse: true, keys: false },
         State::Minimized => InputPolicy { mouse: true, keys: false },
         _ => InputPolicy { mouse: false, keys: false },
@@ -203,6 +212,20 @@ mod tests {
         assert_eq!(decide(&with(|o| o.foreground_elevated = true), true), State::Live, "a window target cares about itself, not what is in front");
         assert_eq!(decide(&with(|o| o.target_elevated = true), true), State::Elevated);
         assert_eq!(decide(&with(|o| { o.target_elevated = true; o.desktop = Desktop::Secure }), true), State::SecureDesktop);
+    }
+
+    #[test]
+    fn a_password_field_holding_the_keyboard_is_said_but_input_still_goes() {
+        let secure = with(|o| o.secure_input = true);
+        assert_eq!(decide(&secure, false), State::SecureInput);
+        assert_eq!(decide(&with(|o| { o.secure_input = true; o.session_locked = true }), false), State::Locked, "a lock says more");
+        assert_eq!(decide(&with(|o| { o.secure_input = true; o.target = TargetSeen::Minimized }), true), State::Minimized);
+        assert_eq!(input_policy(State::SecureInput, true), InputPolicy { mouse: true, keys: true }, "whether keys arrive is up to macOS");
+        assert!(State::SecureInput.picture_moves());
+        let mut t = Tracker::default();
+        assert_eq!(t.look(&secure, true), None, "not urgent: two looks");
+        assert_eq!(t.look(&secure, true), Some(State::SecureInput));
+        assert_eq!(serde_json::to_value(State::SecureInput).unwrap(), "secure_input");
     }
 
     #[test]

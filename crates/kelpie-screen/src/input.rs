@@ -3,7 +3,8 @@
 //! pixels. None of it is logged anywhere.
 //!
 //! Keys are a fixed table (what an IDE, a dialog or a sign-in needs, with Ctrl, Shift, Alt and the Windows key, alone for Start or held as
-//! `meta` for Win+E, Win+L and the like: owner decision 2026-11-06). Ctrl+Alt+Del cannot be sent by any program.
+//! `meta` for Win+E, Win+L and the like: owner decision 2026-11-06). Ctrl+Alt+Del cannot be sent by any program. On a Mac the same names
+//! are the Mac's keys (`mac_key_events`, `mac_text`): `meta` is Command and `alt` is Option.
 
 use serde_json::{json, Value};
 
@@ -253,6 +254,128 @@ pub fn text_events(text: &str) -> Vec<KeyEvent> {
     out
 }
 
+/// A key of the table on a Mac, by its Windows virtual key: the Mac's virtual key code (`kVK_*`, the ANSI layout, as `CGEventCreateKeyboardEvent`
+/// takes it). Insert is the Help key; the context-menu key has none. The Windows key alone is Command.
+pub fn mac_key_code(vk: u16) -> Option<u16> {
+    Some(match vk {
+        0x0D => 0x24,
+        0x09 => 0x30,
+        0x08 => 0x33,
+        0x2E => 0x75,
+        0x2D => 0x72,
+        0x1B => 0x35,
+        0x20 => 0x31,
+        0x26 => 0x7E,
+        0x28 => 0x7D,
+        0x25 => 0x7B,
+        0x27 => 0x7C,
+        0x24 => 0x73,
+        0x23 => 0x77,
+        0x21 => 0x74,
+        0x22 => 0x79,
+        0x5B => 0x37,
+        // Letters, in the ANSI layout's own order.
+        0x41..=0x5A => [0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2E, 0x2D, 0x1F, 0x23, 0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D, 0x07, 0x10, 0x06][usize::from(vk - 0x41)],
+        0x30..=0x39 => [0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19][usize::from(vk - 0x30)],
+        0x70..=0x7B => [0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F][usize::from(vk - 0x70)],
+        _ => return None,
+    })
+}
+
+/// `CGEventFlags` of the modifiers.
+pub const MAC_FLAG_SHIFT: u64 = 0x0002_0000;
+pub const MAC_FLAG_CONTROL: u64 = 0x0004_0000;
+pub const MAC_FLAG_OPTION: u64 = 0x0008_0000;
+pub const MAC_FLAG_COMMAND: u64 = 0x0010_0000;
+
+/// A modifier on a Mac: its key code and its `CGEventFlags` bit. `meta` is Command and `alt` is Option, as on a Mac keyboard, where they sit.
+pub fn mac_mod(m: &str) -> Option<(u16, u64)> {
+    Some(match m {
+        "ctrl" => (0x3B, MAC_FLAG_CONTROL),
+        "shift" => (0x38, MAC_FLAG_SHIFT),
+        "alt" => (0x3A, MAC_FLAG_OPTION),
+        "meta" => (0x37, MAC_FLAG_COMMAND),
+        _ => return None,
+    })
+}
+
+/// One key going down or up on a Mac, with the modifier flags it carries (a posted event says its own modifiers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MacKey {
+    pub code: u16,
+    pub down: bool,
+    pub flags: u64,
+}
+
+/// A key with modifiers on a Mac: the modifiers down (each with the flags so far), the key down and up with all of them, the modifiers up in
+/// reverse. Nothing for a key the Mac has not.
+pub fn mac_key_events(key: &str, mods: &[&str]) -> Vec<MacKey> {
+    let Some(code) = key_code(key).and_then(|(vk, _)| mac_key_code(vk)) else { return vec![] };
+    let mods: Vec<(u16, u64)> = mods.iter().filter_map(|m| mac_mod(m)).collect();
+    let mut out = Vec::with_capacity(mods.len() * 2 + 2);
+    let mut flags = 0;
+    for &(m, bit) in &mods {
+        flags |= bit;
+        out.push(MacKey { code: m, down: true, flags });
+    }
+    out.push(MacKey { code, down: true, flags });
+    out.push(MacKey { code, down: false, flags });
+    for &(m, bit) in mods.iter().rev() {
+        flags &= !bit;
+        out.push(MacKey { code: m, down: false, flags });
+    }
+    out
+}
+
+/// What typing a text is on a Mac: a key (a line end is Return, a tab is Tab), or one character as the UTF-16 units it is (one posted event
+/// each, so that a character outside the BMP is never split).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MacTyped {
+    Key(u16),
+    Char([u16; 2], usize),
+}
+
+pub fn mac_text(text: &str) -> Vec<MacTyped> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                MacTyped::Key(0x24)
+            }
+            '\n' => MacTyped::Key(0x24),
+            '\t' => MacTyped::Key(0x30),
+            _ => {
+                let mut buf = [0u16; 2];
+                let n = c.encode_utf16(&mut buf).len();
+                MacTyped::Char(buf, n)
+            }
+        });
+    }
+    out
+}
+
+/// Carbon's modifier bits (`RegisterEventHotKey`).
+pub const CARBON_CMD: u32 = 0x0100;
+pub const CARBON_SHIFT: u32 = 0x0200;
+pub const CARBON_OPTION: u32 = 0x0800;
+pub const CARBON_CONTROL: u32 = 0x1000;
+
+/// The stop hotkey on a Mac: its key code and Carbon's modifiers (Alt is Option, Win is Command).
+pub fn mac_hotkey(h: Hotkey) -> Option<(u32, u32)> {
+    let code = mac_key_code(h.vk)?;
+    let mut mods = 0;
+    for (bit, carbon) in [(MOD_CONTROL, CARBON_CONTROL), (MOD_ALT, CARBON_OPTION), (MOD_SHIFT, CARBON_SHIFT), (MOD_WIN, CARBON_CMD)] {
+        if h.mods & bit != 0 {
+            mods |= carbon;
+        }
+    }
+    Some((u32::from(code), mods))
+}
+
 /// Whether input the daemon stamped at `t` (its clock, which is this machine's) is still worth doing at `now`.
 pub fn fresh(t: Option<u64>, now: u64) -> bool {
     t.is_some_and(|t| t <= now + TTL_MS && now.saturating_sub(t) <= TTL_MS)
@@ -420,6 +543,40 @@ mod tests {
             assert_eq!(checked_text(bad), None, "{bad:?}");
         }
         assert_eq!(checked_text(&"x".repeat(MAX_TEXT + 1)), None);
+    }
+
+    #[test]
+    fn on_a_mac_meta_is_command_and_alt_is_option_and_keys_carry_their_modifiers() {
+        let k = |code: u16, down: bool, flags: u64| MacKey { code, down, flags };
+        // Cmd+S: Command down, S with Command, Command up.
+        assert_eq!(mac_key_events("S", &["meta"]), [k(0x37, true, MAC_FLAG_COMMAND), k(0x01, true, MAC_FLAG_COMMAND), k(0x01, false, MAC_FLAG_COMMAND), k(0x37, false, 0)]);
+        let both = MAC_FLAG_CONTROL | MAC_FLAG_OPTION;
+        assert_eq!(mac_key_events("ArrowLeft", &["ctrl", "alt"]), [k(0x3B, true, MAC_FLAG_CONTROL), k(0x3A, true, both), k(0x7B, true, both), k(0x7B, false, both), k(0x3A, false, MAC_FLAG_CONTROL), k(0x3B, false, 0)]);
+        assert_eq!(mac_key_events("Meta", &[]), [k(0x37, true, 0), k(0x37, false, 0)], "the Windows key alone is Command");
+        assert!(mac_key_events("ContextMenu", &[]).is_empty(), "a Mac has no context-menu key");
+        // Every key of the table but that one has a Mac key, and no two share one.
+        let mut codes: Vec<u16> = KEYS.iter().filter(|(n, ..)| *n != "ContextMenu").map(|(_, vk, _)| mac_key_code(*vk).unwrap()).collect();
+        codes.extend((b'A'..=b'Z').chain(b'0'..=b'9').map(|c| mac_key_code(u16::from(c)).unwrap()));
+        codes.extend((1..=12).map(|n| mac_key_code(0x6F + n).unwrap()));
+        let n = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), n);
+        assert_eq!((mac_key_code(u16::from(b'A')), mac_key_code(u16::from(b'K')), mac_key_code(u16::from(b'0')), mac_key_code(0x70)), (Some(0x00), Some(0x28), Some(0x1D), Some(0x7A)));
+        // The default stop hotkey: Ctrl+Option+Shift+K.
+        assert_eq!(mac_hotkey(parse_hotkey(DEFAULT_HOTKEY).unwrap()), Some((0x28, CARBON_CONTROL | CARBON_OPTION | CARBON_SHIFT)));
+        assert_eq!(mac_hotkey(parse_hotkey("Win+Alt+3").unwrap()), Some((0x14, CARBON_CMD | CARBON_OPTION)));
+    }
+
+    #[test]
+    fn text_on_a_mac_is_one_event_a_character_and_line_ends_as_return() {
+        let units = |s: &str| {
+            let mut b = [0u16; 2];
+            let n = s.chars().next().unwrap().encode_utf16(&mut b).len();
+            MacTyped::Char(b, n)
+        };
+        assert_eq!(mac_text("é\r\n😀\tx\n"), [units("é"), MacTyped::Key(0x24), units("😀"), MacTyped::Key(0x30), units("x"), MacTyped::Key(0x24)]);
+        assert_eq!(units("😀"), MacTyped::Char([0xD83D, 0xDE00], 2), "both surrogates in one event");
     }
 
     #[test]

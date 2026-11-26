@@ -808,3 +808,7 @@ export interface XferStart {
 
 /** One flagged file of a pull request's change that a person accepted, for one head commit of one project. */
 export interface FlagAcceptance { project: string; head: string; path: string; what: string }
+
+/** What a Mac allows Kelpie for the screen (`screen_permissions`): Screen Recording and Accessibility. */
+export type MacPermissions = { screen: boolean; accessibility: boolean };
+export type MacPermissionId = keyof MacPermissions;

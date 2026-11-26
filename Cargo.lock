@@ -3045,7 +3045,9 @@ dependencies = [
 name = "kelpie-screen"
 version = "0.1.28"
 dependencies = [
+ "block2",
  "jpeg-encoder",
+ "objc2",
  "png 0.17.16",
  "serde",
  "serde_json",

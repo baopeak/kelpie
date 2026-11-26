@@ -400,6 +400,38 @@ export const KEYS = ["Escape", "Tab", "Enter", "Backspace", "Delete", "ArrowLeft
 /** Ctrl, Shift, Alt and the Windows key (`meta`): tapped, a modifier is held for the next key. The Windows key alone is `Meta` (Start). */
 export const MODS: Mod[] = ["ctrl", "shift", "alt", "meta"];
 
+/** Which computer the screen is on, as the computer says (`os` in its answers); one that does not say is Windows. */
+export type HostOs = "mac" | "windows";
+export const hostOs = (v: unknown): HostOs => (v === "mac" ? "mac" : "windows");
+
+/** A key of the bar: one of `KEYS`, or on a Mac Spotlight (⌘Space), where the Windows key would be. */
+export type BarKey = (typeof KEYS)[number] | "Spotlight";
+
+const KEY_LABELS: Record<BarKey, string> = { Escape: "Esc", Tab: "⇥", Enter: "⏎", Backspace: "⌫", Delete: "Del", ArrowLeft: "←", ArrowUp: "↑", ArrowDown: "↓", ArrowRight: "→", Home: "Home", End: "End", PageUp: "PgUp", PageDown: "PgDn", ContextMenu: "☰", Meta: "⊞", Spotlight: "⌘Space", F1: "F1", F2: "F2", F3: "F3", F4: "F4", F5: "F5", F6: "F6", F7: "F7", F8: "F8", F9: "F9", F10: "F10", F11: "F11", F12: "F12" };
+
+/** The modifiers in the order of the computer's keyboard: ⌘ ⌥ ⌃ ⇧ on a Mac, where `meta` is Command and `alt` Option. */
+export function modsFor(os: HostOs): Mod[] {
+  return os === "mac" ? ["meta", "alt", "ctrl", "shift"] : MODS;
+}
+
+export function modLabel(m: Mod, os: HostOs): string {
+  return (os === "mac" ? { ctrl: "⌃", shift: "⇧", alt: "⌥", meta: "⌘" } : { ctrl: "Ctrl", shift: "Shift", alt: "Alt", meta: "Win" })[m];
+}
+
+/** The bar's keys. A Mac has no context-menu key, and Command alone does nothing: Spotlight takes the Windows key's place. */
+export function keysFor(os: HostOs): BarKey[] {
+  return os === "mac" ? KEYS.filter((k) => k !== "ContextMenu").map((k) => (k === "Meta" ? "Spotlight" : k)) : [...KEYS];
+}
+
+export function keyLabel(k: BarKey): string {
+  return KEY_LABELS[k];
+}
+
+/** What a key of the bar (or a letter typed with a modifier held) sends, with the modifiers held: Spotlight is Command+Space. */
+export function keyOp(k: string, mods: Mod[]): ScOp {
+  return k === "Spotlight" ? { k: "key", key: "Space", mods: [...new Set<Mod>([...mods, "meta"])] } : { k: "key", key: k, mods };
+}
+
 /** Merges what waits to be sent: of moves in a row only the last, wheels in a row added up. Presses, releases, clicks and keys stay in order. */
 export function coalesce(ops: ScOp[]): ScOp[] {
   const out: ScOp[] = [];
@@ -995,7 +1027,7 @@ export interface TargetRow {
 }
 
 export type Reply =
-  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ice_servers?: RTCIceServer[]; turn?: string | null }
+  | { t: "ack"; result?: string; sc?: string; title?: string; kind?: string; w?: number; h?: number; encoder?: string; t0?: number; targets?: TargetRow[]; paths?: PathInfo[]; relay?: RelayInfo | null; via?: string; ice_servers?: RTCIceServer[]; turn?: string | null; os?: string }
   | { t: "error"; code: string; message: string; reason?: string | null; busy?: BusyInfo | null }
   | { t: "offline" }
   | { t: "unknown" };
@@ -1075,8 +1107,10 @@ export interface ScreenState {
   sc: string | null;
   title: string;
   kind: string;
-  /** What the computer says about the picture: live, locked, secure_desktop, minimized, elevated, covered, blocked, paused_load. */
+  /** What the computer says about the picture: live, locked, secure_desktop, minimized, elevated, covered, blocked, paused_load, secure_input. */
   remote: string;
+  /** Which computer it is (its list and its start say): the key bar's modifiers and the texts follow it. */
+  os: HostOs;
   stats: Stats | null;
   encoder: string;
   message: string | null;
@@ -1105,7 +1139,7 @@ export interface ScreenState {
   retry: { target: string; at: number; attempt: number } | null;
 }
 
-const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null, paths: null, relay: null, via: "auto", usedVia: null, path: null, pathStats: null, p2pFailed: false, retry: null });
+const fresh = (): ScreenState => ({ phase: "pick", targets: null, sc: null, title: "", kind: "", remote: "live", os: "windows", stats: null, encoder: "hw", message: null, text: null, stuck: false, t0: null, age: null, graceLeft: null, paths: null, relay: null, via: "auto", usedVia: null, path: null, pathStats: null, p2pFailed: false, retry: null });
 
 /** Why a screen ended, in the phone's words; the reason codes are the daemon's and the helper's. */
 export function endedText(reason: string, t: (s: string) => string): string {
@@ -1136,6 +1170,8 @@ export function endedText(reason: string, t: (s: string) => string): string {
       return t("The computer's graphics driver restarted, which ended the screen. See it again.");
     case "encoder_failed":
       return t("The computer could not encode its screen.");
+    case "no_screen_permission":
+      return t("The Mac no longer allows Kelpie to record the screen. Allow it again in System Settings → Privacy & Security → Screen Recording, on the Mac.");
     case "app_closed":
     case "app":
       return t("The Kelpie app on the computer closed.");
@@ -1148,9 +1184,29 @@ export function endedText(reason: string, t: (s: string) => string): string {
   }
 }
 
+/** The picker's line: the computer shows what is seen and can stop it, and what can never be reached from a phone on that computer. */
+export function pickerHint(os: HostOs, t: (s: string) => string): string {
+  return os === "mac"
+    ? t("Pick a screen or one window. The Mac shows a border around what you see and can stop it at any time; its lock screen and login window cannot be seen or answered from here.")
+    : t("Pick a screen or one window. The computer shows a border around what you see and can stop it at any time; Windows security prompts and the lock screen cannot be seen or answered from here.");
+}
+
+/** The help sheet's line on shortcuts: a modifier of the key bar, then one letter in the field. */
+export function shortcutHint(os: HostOs, t: (s: string) => string): string {
+  return os === "mac"
+    ? t("For a shortcut, tap ⌘ (or another modifier) in the key bar, then type one letter and tap Type it: ⌘ then S saves.")
+    : t("For a shortcut, tap Ctrl (or another modifier) in the key bar, then type one letter and tap Type it: Ctrl then S saves.");
+}
+
 /** What the computer said about the picture, as a line over it (null: nothing to say). */
-export function remoteText(remote: string, t: (s: string) => string): string | null {
+export function remoteText(remote: string, t: (s: string) => string, os: HostOs = "windows"): string | null {
   switch (remote) {
+    case "secure_input":
+      return t("A password field on the Mac is protecting the keyboard: what you type may not arrive.");
+    case "blocked":
+      // On a Mac the only input macOS refuses is all of it, from a program it has not allowed to control the computer.
+      if (os === "mac") return t("The Mac has not allowed Kelpie to control it, so taps and keys are not sent. Allow it in System Settings → Privacy & Security → Accessibility, on the Mac.");
+      return t("Windows did not take that input: an app running as administrator, or a secure screen.");
     case "locked":
       return t("The computer is locked. Nothing can be seen or done until someone signs in at it.");
     case "secure_desktop":
@@ -1165,8 +1221,6 @@ export function remoteText(remote: string, t: (s: string) => string): string | n
       return t("A dialog of another program is in front of the shared window, and this phone cannot see it. Share the whole monitor to type into this dialog.");
     case "not_front":
       return t("The shared window is not in front on the computer, so keys and text were not sent. Tap it to bring it to the front.");
-    case "blocked":
-      return t("Windows did not take that input: an app running as administrator, or a secure screen.");
     case "paused_load":
       return t("Paused to protect your computer. Tap to resume.");
     default:
@@ -1270,7 +1324,7 @@ export class ScreenSession {
       const relay = r.relay ?? null;
       const p2pFailed = this.p2pFailedNow();
       const via = chooseVia(pathRows(paths, relay, this.side(p2pFailed), this.t), this.port.remembered());
-      this.patch({ targets: r.targets ?? [], paths, relay, via, p2pFailed });
+      this.patch({ targets: r.targets ?? [], paths, relay, via, p2pFailed, os: hostOs(r.os) });
     } else this.patch({ targets: [], message: r.t === "error" ? r.message : this.t("Not connected.") });
   }
 
@@ -1369,7 +1423,7 @@ export class ScreenSession {
     this.heardAt = this.mediaAt = this.decodedAt = now;
     this.ages = [];
     this.chosen = via ?? "auto";
-    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null, usedVia: r.via ?? null, path: null, pathStats: null });
+    this.patch({ phase: "live", sc: r.sc, title: r.title ?? "", kind: r.kind ?? "", os: hostOs(r.os), encoder: r.encoder ?? "hw", t0: typeof r.t0 === "number" ? r.t0 : null, usedVia: r.via ?? null, path: null, pathStats: null });
     // Peer to peer from the start (the computer waits for it), or Automatic moving onto it from the relay once it opens.
     const kind = peerFor(this.chosen, r.via, pathRows(this.state?.paths, this.state?.relay, this.side(), this.t));
     if (kind) void this.openPeer(kind === "turn");
@@ -1613,7 +1667,8 @@ export class ScreenSession {
     this.patch({ text: "sending" });
     const r = await this.port.text(this.state.sc, text, this.port.serverNow());
     const ok = r.t === "ack" && r.result === "sent";
-    this.patch({ text: ok ? "sent" : "not_sent" });
+    // A Mac that has not allowed Kelpie to control it: the line over the picture says so, as for a tap it refused.
+    this.patch(r.t === "error" && r.code === "no_accessibility" ? { text: "not_sent", remote: "blocked" } : { text: ok ? "sent" : "not_sent" });
     return ok;
   }
 

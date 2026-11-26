@@ -795,6 +795,8 @@ pub fn run() {
             screen::screen_prefs,
             screen::screen_viewers,
             screen::screen_available,
+            screen::screen_permissions,
+            screen::screen_open_permission,
             test_window_size,
             ssh_hosts::ssh_vault_load,
             ssh_hosts::ssh_vault_save,

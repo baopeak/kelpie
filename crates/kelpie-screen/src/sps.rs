@@ -542,9 +542,55 @@ impl Params {
     }
 }
 
+/// An access unit as VideoToolbox writes it (AVCC: each NAL unit after its length, `len_size` bytes big-endian) in Annex B, with `params`
+/// (the SPS and the PPS of the format, for a keyframe) in front. None when a length is not one VideoToolbox writes or runs past the end.
+pub fn avcc_to_annex_b(avcc: &[u8], len_size: usize, params: &[&[u8]]) -> Option<Vec<u8>> {
+    if !matches!(len_size, 1 | 2 | 4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(avcc.len() + params.iter().map(|p| p.len() + 4).sum::<usize>() + 16);
+    for p in params.iter().filter(|p| !p.is_empty()) {
+        out.extend_from_slice(&START);
+        out.extend_from_slice(p);
+    }
+    let mut at = 0;
+    while at < avcc.len() {
+        let head = avcc.get(at..at + len_size)?;
+        let n = head.iter().fold(0usize, |n, b| (n << 8) | usize::from(*b));
+        at += len_size;
+        let nal = avcc.get(at..at.checked_add(n)?)?;
+        at += n;
+        if !nal.is_empty() {
+            out.extend_from_slice(&START);
+            out.extend_from_slice(nal);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_videotoolbox_frame_becomes_annex_b_with_its_parameter_sets_on_a_keyframe() {
+        let (sps, pps) = ([0x67, 0x64, 0x00, 0x1f], [0x68, 0xee, 0x3c, 0x80]);
+        let idr = [0x65, 0x88, 0x84, 0x00, 0x21, 0x7f];
+        let mut avcc = vec![0, 0, 0, 6];
+        avcc.extend_from_slice(&idr);
+        avcc.extend_from_slice(&[0, 0, 0, 2, 0x06, 0x05]);
+        let au = avcc_to_annex_b(&avcc, 4, &[&sps, &pps]).unwrap();
+        let types: Vec<u8> = nal_units(&au).iter().map(|n| nal_type(n)).collect();
+        assert_eq!(types, [NAL_SPS, NAL_PPS, NAL_IDR, NAL_SEI]);
+        assert!(is_keyframe(&au));
+        assert_eq!(nal_units(&au)[2], idr, "a NAL unit's bytes go as they are");
+        // A delta frame, with two-byte lengths.
+        assert_eq!(avcc_to_annex_b(&[0, 3, 0x41, 0x9a, 0x02], 2, &[]).unwrap(), [0, 0, 0, 1, 0x41, 0x9a, 0x02]);
+        for (bad, len) in [(&[0u8, 0, 0, 9, 0x65][..], 4), (&[0, 0, 0][..], 4), (&[0, 1, 0x41][..], 3)] {
+            assert_eq!(avcc_to_annex_b(bad, len, &[]), None, "{bad:?}");
+        }
+        assert_eq!(avcc_to_annex_b(&[], 4, &[]), Some(vec![]));
+    }
 
     /// An SPS as an encoder would write one.
     struct Make {

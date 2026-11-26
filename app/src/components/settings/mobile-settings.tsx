@@ -10,13 +10,14 @@
 // on this network scans a code in the row. Records of one phone paired several ways are listed together (`phoneGroups`, kept by this app only).
 import { For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { store } from "../../lib/store";
-import { daemon, mobileSecure, onEvent } from "../../lib/ipc";
+import { daemon, mobileSecure, onEvent, screenOpenPermission, screenPermissions } from "../../lib/ipc";
 import { invoke } from "@tauri-apps/api/core";
 import { HOSTED_API, LOCK_API, RELAY_API, SCREEN_API, SCREEN_REMOTE_API, TAILSCALE_API, TAKEOVER_API } from "../../lib/attention";
 import { formatRelative, t, errorText } from "../../lib/i18n";
+import { isMac } from "../../lib/platform";
 import {
   approvalChoices, approveWithReplace, connectionLine, deviceMethodLabel, groupDevices, hostedPairing, hostedReason, hostedTrust, joinGroup, mobileSummary, newSetup, offerNewRoom, optionState, pageKindLabel,
-  pairMethods, permissionChoices, permissionLabel, prunePhoneGroups, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, screenRemoteShown, screenUsageLine, TURN_CAP_MAX, TURN_CAP_MIN, TURN_CAPS, turnUsageLine, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
+  macPermissionRows, pairMethods, permissionChoices, permissionLabel, prunePhoneGroups, samePhoneSuggestion, screenDoubtedNote, screenMethodRows, screenRemoteShown, screenUsageLine, TURN_CAP_MAX, TURN_CAP_MIN, TURN_CAPS, turnUsageLine, telegramChoice, turnOnAccess, withConnection, withNewerConnections, type ConnectionNews, type MobileRoute, type OptionFacts, type OptionId,
   type PairMethodId, type PhoneGroup,
 } from "../../lib/mobile-options";
 import { pushChanged, pushRevision, telegramProblems, type PushState, type TelegramMode } from "../../lib/push-config";
@@ -183,6 +184,14 @@ export function MobileSettings() {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [hotkeyError, setHotkeyError] = createSignal<string | null>(null);
+  // On a Mac, whether Kelpie may record the screen and control the computer; looked at again when the window comes back from System Settings.
+  const [macPermissions, { refetch: checkMacPermissions }] = createResource(() => (isMac ? screenPermissions().catch(() => null) : Promise.resolve(null)));
+  const [permissionError, setPermissionError] = createSignal<string | null>(null);
+  if (isMac) {
+    const onWindowFocus = () => void checkMacPermissions();
+    window.addEventListener("focus", onWindowFocus);
+    onCleanup(() => window.removeEventListener("focus", onWindowFocus));
+  }
   const [qr, setQr] = createSignal<{ url: string; qr: string; until: number; tls: boolean; tailscale?: boolean; hosted?: boolean; passkey?: boolean } | null>(null);
   const [now, setNow] = createSignal(Date.now());
   // The two steps of pairing on the hosted app or over Tailscale: 1 shows the page's address to install from, 2 the code to pair with.
@@ -815,6 +824,25 @@ export function MobileSettings() {
                 <Toggle on={store.state.settings.screenCrispText} label={t("Crisp text")} onChange={(on) => store.setSettings({ screenCrispText: on })} />
               </div>
               <Show when={hotkeyError()}><div class="form-note error">{hotkeyError()}</div></Show>
+              <Show when={macPermissions()}>
+                {(p) => (
+                  <div data-mac-permissions>
+                    <For each={macPermissionRows(p())}>
+                      {(row) => (
+                        <div class="inline-fields" style={{ "align-items": "center" }} data-mac-permission={row.id} data-allowed={row.allowed ? "yes" : "no"}>
+                          <span><strong>{row.label}</strong>: {row.allowed ? t("Allowed") : t("Not allowed")}</span>
+                          <Show when={!row.allowed}>
+                            <button class="btn" onClick={() => { setPermissionError(null); void screenOpenPermission(row.id).catch((err) => setPermissionError(errorText(err))); }}>{t("Open System Settings")}</button>
+                          </Show>
+                          <span class="muted-inline">{row.what}</span>
+                        </div>
+                      )}
+                    </For>
+                    <Show when={!p().screen}><div class="form-note">{t("After allowing Screen Recording, quit Kelpie and open it again: macOS applies it from the next start.")}</div></Show>
+                    <Show when={permissionError()}><div class="form-note error">{permissionError()}</div></Show>
+                  </div>
+                )}
+              </Show>
             </SettingRow>
           </Show>
           <Show when={screenRemoteShown(store.daemonApi()) && s()!.screen}>

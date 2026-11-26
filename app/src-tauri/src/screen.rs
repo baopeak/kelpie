@@ -14,7 +14,9 @@
 //!   that then goes on here; a `screen.stop` for a start still under way is remembered, and that start is stopped as soon as it is done.
 //! - **A stop always lands:** one that cannot be queued drops the helper (stdin closed: it stops everything).
 //! - **Which helper:** the one next to this executable, in the app's own install folder, as `kelpie-stt`; `KELPIE_SCREEN_PATH` is for debug builds
-//!   only (the e2e). An app run as administrator does not start it: the helper would inherit that, and drive elevated windows.
+//!   only (the e2e). An app run as administrator (as root on a Mac) does not start it: the helper would inherit that, and drive elevated windows.
+//! - **A Mac** asks a person to allow Kelpie to record the screen (Screen Recording) and to control it (Accessibility): `screen_permissions` says
+//!   which it has, and `screen_open_permission` opens the pane to allow one. The helper itself refuses what it was not allowed, with a code first.
 //!
 //! Nothing the phone types is logged here or anywhere: it is in the helper's stdin and nowhere else.
 
@@ -132,7 +134,12 @@ fn reply(app: &AppHandle, preq: u64, result: Result<Value, String>) {
 
 fn spawn(app: &AppHandle) -> Result<Arc<Helper>, String> {
     if elevated() {
-        return Err("Kelpie is running as administrator, so it does not share the screen: the helper would be able to drive elevated windows. Start Kelpie normally".into());
+        return Err(if cfg!(windows) {
+            "Kelpie is running as administrator, so it does not share the screen: the helper would be able to drive elevated windows. Start Kelpie normally"
+        } else {
+            "Kelpie is running as root, so it does not share the screen: the helper would run as root too. Start Kelpie normally"
+        }
+        .into());
     }
     let exe = helper_path().filter(|p| p.is_file()).ok_or("the screen helper (kelpie-screen) is not installed with this build")?;
     let mut cmd = tokio::process::Command::new(exe);
@@ -282,7 +289,14 @@ fn elevated() -> bool {
     }
 }
 
-#[cfg(not(windows))]
+/// Run as root (`sudo`): the helper would inherit it.
+#[cfg(unix)]
+fn elevated() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(any(windows, unix)))]
 fn elevated() -> bool {
     false
 }
@@ -495,12 +509,140 @@ pub fn screen_viewers(app: AppHandle) -> Vec<Value> {
 
 #[tauri::command]
 pub fn screen_available() -> bool {
-    cfg!(windows) && helper_path().is_some_and(|p| p.is_file())
+    os_can_share() && helper_path().is_some_and(|p| p.is_file())
+}
+
+/// Windows, or a Mac with ScreenCaptureKit's content filters (macOS 12.3 and later).
+fn os_can_share() -> bool {
+    cfg!(windows) || (cfg!(target_os = "macos") && sysinfo::System::os_version().is_some_and(|v| at_least(&v, (12, 3))))
+}
+
+/// Whether a version such as `14.2.1` is at least `min` (major, minor).
+fn at_least(version: &str, min: (u32, u32)) -> bool {
+    let mut parts = version.trim().split('.').map(|p| p.parse::<u32>().ok());
+    match (parts.next().flatten(), parts.next().unwrap_or(Some(0))) {
+        (Some(major), Some(minor)) => (major, minor) >= min,
+        _ => false,
+    }
+}
+
+/// System Settings' pane where a person allows Kelpie `what`: `screen` (Screen Recording) or `accessibility` (to control the computer).
+fn privacy_pane(what: &str) -> Option<&'static str> {
+    match what {
+        "screen" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+        "accessibility" => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+        _ => None,
+    }
+}
+
+/// What a Mac allows Kelpie for the screen (Settings → Mobile): `{screen, accessibility}`; null on any other computer, and on a Mac that
+/// cannot share its screen (before macOS 12.3), where no permission would help. The helper runs from inside Kelpie.app and is started by it,
+/// so macOS counts its permissions as Kelpie's: what this process is allowed, the helper is.
+#[tauri::command]
+pub fn screen_permissions() -> Option<Value> {
+    #[cfg(target_os = "macos")]
+    return screen_available().then(|| json!({"screen": mac::screen_recording(), "accessibility": mac::accessibility()}));
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Opens System Settings where a person allows Kelpie `what` (`screen` or `accessibility`), asking macOS first so that Kelpie is in that
+/// list to turn on. macOS applies a new Screen Recording permission to Kelpie once it is opened again.
+#[tauri::command]
+pub fn screen_open_permission(what: String) -> CmdResult<()> {
+    let pane = privacy_pane(&what).ok_or("unknown permission")?;
+    #[cfg(target_os = "macos")]
+    {
+        mac::ask(&what);
+        std::process::Command::new("/usr/bin/open").arg(pane).spawn().map_err(|e| format!("open System Settings: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pane;
+        Err("only a Mac asks for these permissions".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::ffi::c_void;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: *const c_void;
+        fn AXIsProcessTrusted() -> u8;
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: *const c_void;
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+        fn CFDictionaryCreate(allocator: *const c_void, keys: *const *const c_void, values: *const *const c_void, count: isize, key_callbacks: *const c_void, value_callbacks: *const c_void) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    pub fn screen_recording() -> bool {
+        // SAFETY: no arguments; it only reads this process's permission.
+        unsafe { CGPreflightScreenCaptureAccess() }
+    }
+
+    pub fn accessibility() -> bool {
+        // SAFETY: as above.
+        unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    /// Asks macOS for `what` once: it puts Kelpie in the permission's list (and may show its own prompt), where a person turns it on.
+    pub fn ask(what: &str) {
+        // SAFETY: the dictionary is made of the framework's own constants, with CF's own callbacks, and released after the one call that reads it.
+        unsafe {
+            match what {
+                "screen" => {
+                    CGRequestScreenCaptureAccess();
+                }
+                "accessibility" => {
+                    let (key, value) = (kAXTrustedCheckOptionPrompt, kCFBooleanTrue);
+                    let options = CFDictionaryCreate(std::ptr::null(), &key, &value, 1, &kCFTypeDictionaryKeyCallBacks as *const c_void, &kCFTypeDictionaryValueCallBacks as *const c_void);
+                    if !options.is_null() {
+                        AXIsProcessTrustedWithOptions(options);
+                        CFRelease(options);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::newer;
+    use super::{at_least, newer, privacy_pane};
+
+    #[test]
+    fn a_mac_shares_its_screen_from_macos_12_3() {
+        assert!(at_least("12.3", (12, 3)));
+        assert!(at_least("12.3.1", (12, 3)));
+        assert!(at_least("26.6.2", (12, 3)));
+        assert!(at_least("13", (12, 3)), "a version with no minor number is .0");
+        assert!(!at_least("12.2.1", (12, 3)), "ScreenCaptureKit's content filters came in 12.3");
+        assert!(!at_least("11.7", (12, 3)));
+        assert!(!at_least("", (12, 3)) && !at_least("x.y", (12, 3)), "a version that cannot be read is not enough");
+    }
+
+    #[test]
+    fn each_permission_opens_its_own_privacy_pane() {
+        assert!(privacy_pane("screen").unwrap().ends_with("?Privacy_ScreenCapture"));
+        assert!(privacy_pane("accessibility").unwrap().ends_with("?Privacy_Accessibility"));
+        assert!(privacy_pane("x-apple.systempreferences:anything").is_none(), "only the two panes, never an address from the page");
+    }
 
     #[test]
     fn a_pause_older_than_the_last_one_taken_is_ignored() {
