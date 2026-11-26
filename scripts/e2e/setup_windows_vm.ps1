@@ -286,12 +286,30 @@ public static class KelpieDisplay {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int ChangeDisplaySettingsEx(string dev, ref DEVMODE dm, IntPtr hwnd, int flags, IntPtr param);
     public static DEVMODE Blank() { var d = new DEVMODE(); d.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE)); return d; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct DISPLAY_DEVICE {
+        public int cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+        public int StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplayDevices(string dev, int i, ref DISPLAY_DEVICE dd, int flags);
+    // The primary display's name as it is now (a restarted indirect display comes back as \\.\DISPLAY<n+1>).
+    public static string Primary() {
+        for (int i = 0; i < 32; i++) {
+            var dd = new DISPLAY_DEVICE(); dd.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+            if (!EnumDisplayDevices(null, i, ref dd, 0)) continue;
+            if ((dd.StateFlags & 4) != 0) return dd.DeviceName;
+        }
+        return null;
+    }
 }
 "@
-        Add-Type -AssemblyName System.Windows.Forms
-        # The primary screen by name: an indirect display can be \\.\DISPLAY2 or later, where a null device name finds nothing.
+        # The primary display by name: an indirect display can be \\.\DISPLAY2 or later, where a null device name finds nothing.
         function Modes {
-            $name = [System.Windows.Forms.Screen]::PrimaryScreen.DeviceName
+            $name = [KelpieDisplay]::Primary()
             $modes = @()
             for ($i = 0; ; $i++) {
                 $dm = [KelpieDisplay]::Blank()
@@ -307,10 +325,14 @@ public static class KelpieDisplay {
         $option = "C:\IddSampleDriver\option.txt"
         $idd = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like "IddSampleDriver*" } | Select-Object -First 1
         if ($d.modes -notcontains "${Width}x$Height" -and $idd -and (Test-Path $option)) {
-            Add-Content $option "$Width, $Height, 60"
+            $text = (Get-Content -Raw $option).TrimEnd()
+            Set-Content $option "$text`r`n$Width, $Height, 60"
             Run pnputil /restart-device $idd.InstanceId
-            Start-Sleep 5
-            $d = Modes
+            for ($i = 0; $i -lt 15; $i++) {
+                Start-Sleep 2
+                $d = Modes
+                if ($d.modes -contains "${Width}x$Height") { break }
+            }
             Write-Output "after adding ${Width}x$Height to $option, display $($d.name) modes: $($d.modes -join ', ')"
         }
         $cur = [KelpieDisplay]::Blank()
