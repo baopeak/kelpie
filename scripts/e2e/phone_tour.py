@@ -31,6 +31,8 @@ ap.add_argument("exe")
 ap.add_argument("out")
 ap.add_argument("--devices", default="iphone,pixel")
 ap.add_argument("--locales", default="en,vi")
+ap.add_argument("--readme", action="store_true", help="the README's sessions instead: the demo projects and simulated agents of the Safari tour "
+                "(phone_safari_sim.demo_sessions), a `gh` that finds no pull request and stand-ins for the claude and codex CLIs (Unix)")
 ARGS = ap.parse_args()
 
 WORK = ps.isolate("phone-tour")
@@ -228,6 +230,10 @@ def pair(d, phone):
 
 def sessions(d):
     """The computer's sessions, in every state the inbox shows."""
+    if ARGS.readme:
+        import phone_safari_sim
+        phone_safari_sim.demo_sessions(d, WORK)
+        return
     projects = {"p-kelpie": "kelpie", "p-site": "website", "p-docs": "Tài liệu hướng dẫn"}
     d.call("mobile.set_projects", {"projects": projects})
     folders = {}
@@ -264,6 +270,27 @@ def sessions(d):
     return made
 
 
+# The sessions each screen opens, by role: this tour's own, or the README's (phone_safari_sim.demo_sessions).
+NAMES = {"ticker": "test-watch", "menu": "build-release", "approval": "release-notes", "done": "rename-helpers",
+         "typed": "pnpm test --run", "reply": "Wait, push it after CI is green."}
+if ARGS.readme:
+    NAMES = {"ticker": "Checks (watch)", "menu": "Migration", "approval": "Release 0.4.0", "done": "How retries work",
+             "typed": "python smoke.py", "reply": "Tag it after the release notes are reviewed."}
+
+
+def readme_tools():
+    """README mode, Unix: first on PATH for the daemon, a `gh` that finds no pull request (GitHub is never asked) and do-nothing
+    `claude` and `codex`, so the new-session sheet lists the agents a person would have. None of them is ever started by the tour."""
+    import phone_safari_sim
+    phone_safari_sim.fake_gh(WORK)
+    bin_dir = os.path.join(WORK, "fake-gh")
+    for name in ("claude", "codex"):
+        path = os.path.join(bin_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, 0o755)
+
+
 def tour(d, phone, device_id):
     page = phone.page
     page.set_default_timeout(15000)
@@ -278,12 +305,12 @@ def tour(d, phone, device_id):
 
     def terminal():
         inbox()
-        phone.open_row("test-watch")
+        phone.open_row(NAMES["ticker"])
         phone.wait(".screen, [data-terminal]")
         time.sleep(1.0)
         phone.shot("11-terminal")
         phone.keyboard_up(".composer textarea")
-        page.keyboard.type("pnpm test --run")
+        page.keyboard.type(NAMES["typed"])
         phone.shot("12-terminal-keyboard", themes=("dark",))
         page.fill(".composer textarea", "")
         phone.keyboard_down()
@@ -291,7 +318,7 @@ def tour(d, phone, device_id):
 
     def prompt():
         inbox()
-        phone.open_row("build-release")
+        phone.open_row(NAMES["menu"])
         phone.wait("[data-prompt]", 20000)
         time.sleep(0.5)
         phone.shot("13-terminal-prompt")
@@ -299,7 +326,7 @@ def tour(d, phone, device_id):
 
     def chat():
         inbox()
-        phone.open_row("release-notes")
+        phone.open_row(NAMES["approval"])
         phone.wait("[data-perm]", 20000)
         time.sleep(0.8)
         phone.shot("14-chat-approval")
@@ -310,7 +337,7 @@ def tour(d, phone, device_id):
         time.sleep(0.4)
         phone.shot("16-chat-middle")
         phone.keyboard_up(".chat-composer textarea")
-        page.keyboard.type("Wait, push it after CI is green.")
+        page.keyboard.type(NAMES["reply"])
         phone.shot("17-chat-keyboard", themes=("dark",))
         page.fill(".chat-composer textarea", "")
         phone.keyboard_down()
@@ -318,7 +345,7 @@ def tour(d, phone, device_id):
 
     def done_chat():
         inbox()
-        phone.open_row("rename-helpers")
+        phone.open_row(NAMES["done"])
         time.sleep(1.5)
         phone.shot("18-chat-done")
     step(phone, "chat-done", done_chat)
@@ -393,7 +420,7 @@ def offline(phone):
         phone.wait("[data-banner]", 30000)
         time.sleep(1.0)
         phone.shot("25-offline-inbox")
-        phone.open_row("test-watch")
+        phone.open_row(NAMES["ticker"])
         time.sleep(0.8)
         phone.shot("26-offline-terminal")
     step(phone, "offline", go)
@@ -402,6 +429,8 @@ def offline(phone):
 def main():
     from playwright.sync_api import sync_playwright
 
+    if ARGS.readme and os.name != "nt":
+        readme_tools()
     d = ps.Daemon(ARGS.exe).start()
     cert, key = ps.certificate_for_loopback(WORK)
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": cert, "key": key})

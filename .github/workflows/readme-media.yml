@@ -3,7 +3,7 @@ name: readme-media
 # README pictures made on a hosted runner, started by hand (Actions → readme-media → Run workflow, or
 # `gh workflow run readme-media.yml --ref <branch>`):
 # - the Linux app under Xvfb at 1920x1080 (scripts/e2e/linux_shots.py: the readme_shots tour plus simulated-agent chat pictures);
-# - the phone page in an iPhone- and a Pixel-sized Chromium, English and Vietnamese, dark and light (scripts/e2e/phone_tour.py).
+# - the phone page in an iPhone- and a Pixel-sized Chromium, English and Vietnamese, dark and light (scripts/e2e/phone_tour.py --readme).
 # Every picture is optimised with pngquant and uploaded as the artifact `readme-media`; choosing and committing them is done by hand
 # (docs/screenshots/README-media.json lists each one with what made it). Demo projects and simulated agents only: no sign-in, no model.
 on:
@@ -83,7 +83,7 @@ jobs:
           mkdir -p out/phone-tour
           dbus-run-session -- bash -c '
             printf "readme\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-            python scripts/e2e/phone_tour.py target/debug/kelpied out/phone-tour --devices iphone,pixel --locales en,vi'
+            python scripts/e2e/phone_tour.py target/debug/kelpied out/phone-tour --devices iphone,pixel --locales en,vi --readme'
       - name: Optimise
         if: always()
         run: |

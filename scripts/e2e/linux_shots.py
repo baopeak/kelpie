@@ -74,6 +74,12 @@ class LinuxRun(Run):
         self.results = []
         self.d = LinuxDriver(app)
 
+    def boot(self, tips=False):
+        super().boot(tips)
+        # Xvfb has no GPU: there a WebGL terminal can keep the previous theme until its next output (the light and Vietnamese
+        # pictures showed one pane in the old colours). The DOM renderer repaints with the page.
+        self.d.js("window.__kelpie.store.setSettings({ webgl: false })")
+
 
 def free_port():
     with socket.socket() as s:
