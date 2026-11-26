@@ -1,26 +1,52 @@
-<p align="center"><img src="app/src/assets/brand/kip-peek.svg" alt="Kip, the Kelpie mascot, peeking out of a terminal" width="120"></p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="app/src/assets/brand/kelpie-lockup-light.svg">
+    <img src="app/src/assets/brand/kelpie-lockup.svg" alt="Kelpie" width="260">
+  </picture>
+</p>
 
-<h1 align="center">Kelpie</h1>
-
-<p align="center"><strong>Kelpie keeps every coding agent you use side by side on one screen, so no task gets lost.</strong></p>
+<p align="center"><strong>Every coding agent you use, side by side on one screen.<br>Kelpie updates itself without interrupting a single one of them.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/baopeak/kelpie/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/baopeak/kelpie?label=download"></a>
-  <img alt="Windows, macOS and Linux" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-4c7a8a">
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-4c7a8a"></a>
+  <a href="https://github.com/baopeak/kelpie/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/baopeak/kelpie?label=download" height="20"></a>
+  <img alt="Windows, macOS and Linux" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-4c7a8a" height="20">
+  <img alt="Phone app" src="https://img.shields.io/badge/phone-iPhone%20%C2%B7%20Android-4c7a8a" height="20">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-4c7a8a" height="20"></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/baopeak/kelpie/releases"><strong>Download Kelpie</strong></a> ·
-  <a href="#see-it-in-action">See it in action</a> ·
-  <a href="#try-the-demo-kit">Try the demo kit</a> ·
+  <a href="#whats-inside">What's inside</a> ·
+  <a href="#your-sessions-on-your-phone">Phone</a> ·
+  <a href="#more-pictures-on-every-platform">Gallery</a> ·
+  <a href="#try-the-demo-kit">Demo kit</a> ·
   <a href="docs/user-guide.md">User guide</a> ·
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
-![Four agents at work in one Kelpie tab: Claude Code, Codex and OMP in their own terminals and Claude Code in chat view, all reviewing the same checkout, beside eight demo projects](docs/screenshots/workspace.png)
+<p align="center">
+  <a href="docs/screenshots/workspace.png"><img src="docs/screenshots/workspace.png" alt="Four agents at work in one Kelpie tab: Claude Code, Codex and OMP in their own terminals and Claude Code in chat view, all reviewing the same checkout, beside eight demo projects" width="900"></a>
+  <br><sub>Four real agents in one tab: Claude Code, Codex and OMP in their own terminals, and Claude Code in chat view, all reviewing the same checkout.</sub>
+</p>
 
 Starting one coding agent is easy. Once four agents work across three Git branches and two terminal windows, though, it gets hard to remember which agent is waiting for your answer, which checkout belongs to which task, and what is actually ready to review. Kelpie brings all of it onto one screen. Claude Code, Codex, OMP and twenty more agent CLIs run next to your shells, a session that needs you stands out, and finished work moves into a review queue. Because the sessions live in a separate background process, **updating Kelpie never interrupts an agent in the middle of its work**.
+
+## One workbench on every computer you use
+
+<table>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/chat.png"><img src="docs/screenshots/chat.png" alt="Kelpie on Windows: a real Claude Code answer in chat view beside the project sidebar" width="230"></a><br><strong>Windows</strong><br><sub>Windows 10 1809+ and 11. A real Claude Code answer in chat view.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/mac-hero.png"><img src="docs/screenshots/mac-hero.png" alt="Kelpie on macOS: two shells and a chat side by side, with the demo projects in the sidebar (simulated agent)" width="230"></a><br><strong>macOS</strong><br><sub>macOS 12+. Two shells and a chat side by side (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/linux-hero.png"><img src="docs/screenshots/linux-hero.png" alt="Kelpie on Linux: two shells and a chat side by side, with the demo projects in the sidebar (simulated agent)" width="230"></a><br><strong>Linux</strong><br><sub>x86-64, glibc 2.35+, AppImage or .deb. The same workspace (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-inbox-control.png"><img src="docs/screenshots/phone-inbox-control.png" alt="The phone inbox: sessions that need you, working and idle, with See the computer's screen at the top (simulated agent)" width="92"></a><br><strong>Phone</strong><br><sub>iPhone and Android. Every session by status (simulated agent).</sub></td>
+</tr>
+</table>
+
+## Updates never interrupt your agents
+
+The `kelpied` daemon owns every terminal and agent process, and the window only presents them. When Kelpie finds a new release and you choose **Install now** or **Install when idle**, only the window restarts: the daemon keeps every terminal and agent running, and the window reconnects to the same screens. You never have to wait for an agent to finish before you update. The one exception is the first update from an early 0.1 release whose daemon still ran from the install folder: that update stops sessions once, says so first, and agents resume.
+
+Kelpie is a personal tool. Your sessions run in `kelpied` on your own computer, there is no Kelpie account, and no Kelpie service holds your work. When you quit Kelpie, it asks first if something is still running and then stops its sessions; the next time you open it, agents resume the same conversation. If you want automations, phone access or file copies to continue with the window closed, you can [keep the daemon running in the background](docs/user-guide.md#install).
 
 ## Why people use it
 
@@ -28,202 +54,382 @@ Starting one coding agent is easy. Once four agents work across three Git branch
 - A dashboard sorts every session into *Needs you*, *Working*, *Done* and *Failed*, and you can answer a waiting agent without opening its tab.
 - Each parallel task can get its own Git worktree, sessions and comment, while a board shows whether it sits in *Todo*, *In progress*, *Review* or *Done*.
 - When an agent finishes, you review the diff and leave notes inside Kelpie, and **Finish** then commits, merges, runs the checks you approved and cleans up the worktree.
-- The `kelpied` daemon owns every process, so when Kelpie installs an update, only the window restarts while the agents keep working.
+- An optional phone app tells you when a session needs you and lets you answer it from anywhere, end-to-end encrypted.
 
-## What is inside
+## Real agents, real answers
 
-| | |
-|---|---|
-| **Multi-agent workspace** | Tabs, splits, grid presets up to 3×3 or any custom grid, saved layouts, broadcast input, a floating terminal and one search box for sessions, files, commands and settings. |
-| **Terminal or chat, your choice** | Supported agents can switch between their own terminal interface and Kelpie's chat view in the same conversation, with tool cards, approvals, model controls and pictures. |
-| **Attention you can trust** | The dashboard, quick answers, desktop and phone notifications, and ntfy, Telegram or webhook messages tell you when a session waits, finishes or fails. |
-| **Worktrees and a board** | New worktrees come with optional setup commands, copied `.env` files and shared folders from `.kelpie.yaml`, and every one of them appears on the board. |
-| **Review and Finish** | Diff notes, review by a second agent from another vendor, turn-by-turn undo, pull requests through `gh`, GitLab merge requests and a guarded merge with checks. |
-| **Orchestration** | Runs split a job into agent tasks with dependencies and approvals. *Try with several agents* gives one prompt to up to five agents and compares their results. Agents can open **sub-sessions** that you can see, steer and close. |
-| **Plans in your repository** | The Plan tab reads Markdown checklists from `plans/`, `specs/`, `.kiro/specs/` and `docs/plans/`, lets you tick them, and starts an agent on any task. |
-| **Files, browser and processes** | An editor with Markdown, Mermaid, CSV, PDF and notebook viewers, a browser pane with a design mode, and a Processes panel that shows each session's programs and ports. |
-| **Remote work** | SSH projects, a Termius-style hosts page with keys, port forwarding and file transfer, and agent panes on any server, kept alive with `tmux`. |
-| **Your phone** | An optional, end-to-end encrypted phone app lists your sessions, buzzes when one needs you and lets you answer it. If you allow it, it also shows and controls the screen of your Windows PC or Mac. |
-| **Make it yours** | Agent setup for MCP servers and instruction files, plugins, quick commands, automations, shortcuts, themes, offline voice dictation, settings export, and English or Vietnamese. |
+Kelpie launches each CLI exactly as it is, so every agent keeps its own interface. The three answers below, like the chat answer above, are real model answers made with real sign-ins on the demo checkout; [capture.json](docs/screenshots/capture.json) records which parts are sample data.
 
-## See it in action
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/claude.png"><img src="docs/screenshots/claude.png" alt="Claude Code's real answer in its own terminal interface inside Kelpie" width="280"></a><br><strong>Claude Code</strong><br><sub>Keeps its native terminal interface and names the riskiest checkout boundaries.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/codex.png"><img src="docs/screenshots/codex.png" alt="Codex CLI's real answer inside Kelpie" width="280"></a><br><strong>Codex</strong><br><sub>Reads the smoke checks and suggests a missing assertion for the free-shipping boundary.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/omp.png"><img src="docs/screenshots/omp.png" alt="OMP's real terminal answer and file-reading activity inside Kelpie" width="280"></a><br><strong>OMP</strong><br><sub>Reads the checkout code and explains its shipping and rounding rules.</sub></td>
+</tr>
+</table>
 
-The tour below follows one small checkout change through a working day. The projects and planning data are samples. The shell output and every agent answer are real executions with real sign-ins, and [capture.json](docs/screenshots/capture.json) records which parts are sample data.
+## What's inside
 
-### Give every task a home
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/dashboard.png"><img src="docs/screenshots/dashboard.png" alt="The Agent Dashboard with a shell waiting for an answer" width="280"></a><br><strong><a href="docs/user-guide.md#everyday-use">Know who needs you</a></strong><br><sub>The dashboard sorts sessions by status, and you answer a waiting prompt without opening its tab.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/board.png"><img src="docs/screenshots/board.png" alt="The workspace board: projects and worktrees by stage" width="280"></a><br><strong><a href="docs/user-guide.md#worktrees-and-the-workspace-board">Worktrees and the board</a></strong><br><sub>Each task gets its own Git worktree, and the board shows it in Todo, In progress, Review or Done.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/review-notes.png"><img src="docs/screenshots/review-notes.png" alt="A review note on a line of the diff, ready to send to an agent" width="280"></a><br><strong><a href="docs/user-guide.md#source-control-and-review">Review notes</a></strong><br><sub>Leave notes on the diff, and Kelpie sends them to an agent as one focused request.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/finish.png"><img src="docs/screenshots/finish.png" alt="The Finish dialog: approved checks, then merge into main" width="280"></a><br><strong><a href="docs/user-guide.md#review-and-finish">Finish</a></strong><br><sub>Commits, merges, runs the checks you approved, and removes the worktree only after everything else succeeded.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/review-with.png"><img src="docs/screenshots/review-with.png" alt="Review with another agent: pick the reviewer and the prompt; the diff goes with it" width="280"></a><br><strong><a href="docs/user-guide.md#review-with-another-agent-and-best-of-several">A second opinion</a></strong><br><sub>An agent from another vendor reviews the same worktree and leaves its own notes.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/sub-sessions.png"><img src="docs/screenshots/sub-sessions.png" alt="An agent with two sub-sessions: the sub-tab strip over its pane and the tree in the sidebar (simulated agent)" width="280"></a><br><strong><a href="docs/user-guide.md#sub-sessions">Sub-sessions</a></strong><br><sub>An agent opens other agent sessions that you can see, steer and close (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/runs.png"><img src="docs/screenshots/runs.png" alt="A run whose tasks wait for an approval or a dependency" width="280"></a><br><strong><a href="docs/user-guide.md#orchestration-runs">Orchestration runs</a></strong><br><sub>A run splits a job into agent tasks with dependencies and approvals.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/plan.png"><img src="docs/screenshots/plan.png" alt="The Plan tab lists the plans and specs of the project with their tasks" width="280"></a><br><strong><a href="docs/user-guide.md#specs-and-tasks-the-plan-tab">Plans in your repository</a></strong><br><sub>The Plan tab reads Markdown checklists, ticks them and starts an agent on any task.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/broadcast.png"><img src="docs/screenshots/broadcast.png" alt="Four shells tiled 2 × 2 with Broadcast input: one line typed once runs in all four" width="280"></a><br><strong><a href="docs/user-guide.md#layouts">Grids and broadcast</a></strong><br><sub>Tile sessions into any grid, and type one line into every terminal of a tab.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/chatgpt.png"><img src="docs/screenshots/chatgpt.png" alt="ChatGPT web and a real OMP checkout review side by side in native browser and terminal panes" width="280"></a><br><strong><a href="docs/user-guide.md#browser-panes-and-design-mode">A browser beside the agent</a></strong><br><sub>ChatGPT's real, signed-out website next to a real OMP review, in browser and terminal panes.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/design-mode.png"><img src="docs/screenshots/design-mode.png" alt="Design mode in a browser pane: pick an element of a local demo page and write what should change" width="280"></a><br><strong><a href="docs/user-guide.md#browser-panes-and-design-mode">Design mode</a></strong><br><sub>Pick an element of a local page and tell an agent what should change.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/processes.png"><img src="docs/screenshots/processes.png" alt="The Processes panel: the catalog server and the port it listens on" width="280"></a><br><strong><a href="docs/user-guide.md#processes-ports-and-preview">Processes and ports</a></strong><br><sub>Each session's programs, memory, CPU and ports, stopped only after Kelpie says what will end.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/hosts.png"><img src="docs/screenshots/hosts.png" alt="The SSH hosts page with demo hosts at documentation addresses, never connected" width="280"></a><br><strong><a href="docs/user-guide.md#ssh-hosts">SSH hosts</a></strong><br><sub>Machines, keys, port forwards and file transfers in one place; agents on a server run in <code>tmux</code>.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/powershell.png"><img src="docs/screenshots/powershell.png" alt="PowerShell 7 showing its version, passing checks and a checkout quote" width="280"></a><br><strong><a href="docs/user-guide.md#terminals">Shells beside agents</a></strong><br><sub>PowerShell, Bash or zsh fit in as naturally as an agent; here PowerShell 7 runs the sample's checks.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/file-link.png"><img src="docs/screenshots/file-link.png" alt="A path printed in a terminal is a link: Ctrl+click opens the file at that line" width="280"></a><br><strong><a href="docs/user-guide.md#terminals">File links</a></strong><br><sub>Ctrl+click a path an agent prints to open the file at that line.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/usage.png"><img src="docs/screenshots/usage.png" alt="Usage and cost by project, from the agents' transcripts (simulated agent)" width="280"></a><br><strong><a href="docs/user-guide.md#context-tokens-and-cost">Usage and cost</a></strong><br><sub>Cost and tokens by day, project, agent or model, from the agents' transcripts (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/agent-setup.png"><img src="docs/screenshots/agent-setup.png" alt="Agent setup: each agent's MCP servers, with the demo project's own server" width="280"></a><br><strong><a href="docs/user-guide.md#agent-setup">Agent setup</a></strong><br><sub>MCP servers, instruction files and skills for every agent in one place.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/theme-editor.png"><img src="docs/screenshots/theme-editor.png" alt="The theme editor: Dracula duplicated into a theme of your own, with a live preview" width="280"></a><br><strong><a href="docs/user-guide.md#terminals">Make it yours</a></strong><br><sub>Your own terminal themes with a live preview, shortcuts you record, and English or Vietnamese.</sub></td>
+</tr>
+</table>
 
-You open the project, start an agent and put a shell beside it. The explanation, the test output and the branch are now visible together. When a task grows, you split the pane again or arrange the tab into a grid. When one detail needs your full attention, you maximize that pane without stopping its neighbours.
+The [full feature list](#everything-in-the-box) below links every feature to the user guide.
 
-The picture at the top shows four agents reviewing the same checkout through three different CLIs. Claude Code, Codex and OMP run in their own terminal interfaces, while a second Claude Code session runs in Kelpie's chat view. Because Kelpie launches each CLI exactly as it is, a plain PowerShell or Bash session fits into the workspace just as naturally as an agent.
+## Your sessions on your phone
+
+Phone access is optional and off by default. Once you pair a phone, it lists your sessions by status, buzzes when one needs you, and lets you read, type, approve and start agents, with everything end-to-end encrypted. You approve each phone on the computer by typing the code it shows, and the phone's app lock asks for Face ID, a fingerprint or its passcode. If you allow it, the phone also sees and controls the computer's own screen on Windows and on macOS 12.3 or later, while an orange border and a stop hotkey stay on the computer. The [phone access guide](docs/user-guide.md#phone-access) explains the three ways to connect and what each one trusts.
+
+<table>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-inbox.png"><img src="docs/screenshots/phone-safari-inbox.png" alt="The inbox by status in Safari on an iPhone: sessions that need you first (simulated agent)" width="170"></a><br><sub>The inbox in Safari on an iPhone, sessions that need you first (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-chat-approval.png"><img src="docs/screenshots/phone-chat-approval.png" alt="An agent asks to tag a release and push the tag: allow or deny it from the phone (simulated agent)" width="170"></a><br><sub>Allow or deny an agent's command from the phone (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-terminal-keys.png"><img src="docs/screenshots/phone-terminal-keys.png" alt="Typing into a terminal session, with the key bar above the keyboard" width="170"></a><br><sub>Type into a terminal session, with a key bar above the keyboard.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-screen-windows.png"><img src="docs/screenshots/phone-screen-windows.png" alt="The phone sees the Windows desktop live, with the trackpad, the Ctrl, Shift, Alt and Win keys and a field to type into" width="170"></a><br><sub>See and control the Windows desktop, with a trackpad and modifier keys.</sub></td>
+</tr>
+</table>
+
+## Watch it work
+
+<table>
+<tr>
+<td align="center" valign="top" width="50%"><!-- clip: mac-phone-control.mp4 --><a href="#watch-it-work"><img src="docs/screenshots/mac-phone-control-poster.png" alt="Clip poster: on the left the phone sees the Mac's screen, on the right the Mac with the line typed from the phone in TextEdit" width="420"></a><br><strong>The phone drives a Mac</strong><br><sub>From the phone: tap into TextEdit on the Mac, type a line, then ⌘S saves it.</sub></td>
+<td align="center" valign="top" width="50%"><!-- clip: clip-worktree-finish.mp4 --><a href="#watch-it-work"><img src="docs/screenshots/clip-worktree-finish-poster.png" alt="Clip poster: Finish merged the worktree into main and removed it" width="420"></a><br><strong>From a worktree to main</strong><br><sub>New worktree, a shell commits a check in it, then Finish merges it into main and the worktree is gone.</sub></td>
+</tr>
+</table>
+
+## More pictures on every platform
+
+Every picture below comes from the real app with demo projects. A picture marked *simulated agent* shows small local demo programs speaking an agent's format; it makes no model call and shows no real model answer. [README-media.json](docs/screenshots/README-media.json) records each picture's platform, captions and how it was made.
 
 <details>
-<summary><strong>Meet the sessions: Claude Code, Codex, OMP, Claude Code chat and PowerShell</strong></summary>
+<summary><strong>Windows</strong></summary>
 
-**Claude Code** keeps its native terminal interface and names the riskiest checkout boundaries.
-
-![Claude Code's real answer in its own terminal interface inside Kelpie](docs/screenshots/claude.png)
-
-**Codex** reads the smoke checks and suggests a missing assertion for the free-shipping boundary.
-
-![Codex CLI's real answer inside Kelpie](docs/screenshots/codex.png)
-
-**OMP** reads the checkout code and explains its shipping and rounding rules.
-
-![OMP's real terminal answer and file-reading activity inside Kelpie](docs/screenshots/omp.png)
-
-**Claude Code in chat view** answers the same kind of question as a conversation, with its tool rows and model controls; the [chat section](#read-the-result-in-the-form-that-makes-sense) shows it.
-
-**PowerShell 7** runs the sample's checks and prints a real checkout quote.
-
-![PowerShell 7 showing its version, passing checks and a checkout quote](docs/screenshots/powershell.png)
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/welcome.png"><img src="docs/screenshots/welcome.png" alt="The welcome screen before any project is added." width="260"></a><br><sub>The welcome screen before any project is added.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/search.png"><img src="docs/screenshots/search.png" alt="Search everything: sessions, projects, files and settings from one box." width="260"></a><br><sub>Search everything: sessions, projects, files and settings from one box.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/changes.png"><img src="docs/screenshots/changes.png" alt="The Changes panel beside two shells: the branch, the changed file and Commit all." width="260"></a><br><sub>The Changes panel beside two shells: the branch, the changed file and Commit all.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/editor.png"><img src="docs/screenshots/editor.png" alt="The editor on the demo checkout code, with the Changes panel open." width="260"></a><br><sub>The editor on the demo checkout code, with the Changes panel open.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/markdown.png"><img src="docs/screenshots/markdown.png" alt="Markdown with a Mermaid diagram, rendered in the file viewer." width="260"></a><br><sub>Markdown with a Mermaid diagram, rendered in the file viewer.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/csv.png"><img src="docs/screenshots/csv.png" alt="A CSV file as a sortable table." width="260"></a><br><sub>A CSV file as a sortable table.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/new-session.png"><img src="docs/screenshots/new-session.png" alt="The new-session launcher: agent, first prompt, worktree and where it opens." width="260"></a><br><sub>The new-session launcher: agent, first prompt, worktree and where it opens.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/layouts.png"><img src="docs/screenshots/layouts.png" alt="The layout menu: grid presets and saved layouts." width="260"></a><br><sub>The layout menu: grid presets and saved layouts.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/composer.png"><img src="docs/screenshots/composer.png" alt="The floating composer for a longer prompt." width="260"></a><br><sub>The floating composer for a longer prompt.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/terminal-menu.png"><img src="docs/screenshots/terminal-menu.png" alt="A terminal&#x27;s context menu: split, hand off, theme and more." width="260"></a><br><sub>A terminal's context menu: split, hand off, theme and more.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/floating.png"><img src="docs/screenshots/floating.png" alt="The floating terminal over the workspace." width="260"></a><br><sub>The floating terminal over the workspace.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/inbox.png"><img src="docs/screenshots/inbox.png" alt="The Activity inbox with labelled demo entries." width="260"></a><br><sub>The Activity inbox with labelled demo entries.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/worktree-dialog.png"><img src="docs/screenshots/worktree-dialog.png" alt="The new-worktree dialog, with the project&#x27;s .kelpie.yaml setup." width="260"></a><br><sub>The new-worktree dialog, with the project's .kelpie.yaml setup.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/automations.png"><img src="docs/screenshots/automations.png" alt="Scheduled automations (demo, switched off)." width="260"></a><br><sub>Scheduled automations (demo, switched off).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" alt="Settings → Appearance." width="260"></a><br><sub>Settings → Appearance.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/terminal-settings.png"><img src="docs/screenshots/terminal-settings.png" alt="Settings → Terminal: font, renderer, cursor and colour theme." width="260"></a><br><sub>Settings → Terminal: font, renderer, cursor and colour theme.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/shortcuts.png"><img src="docs/screenshots/shortcuts.png" alt="Settings → Shortcuts." width="260"></a><br><sub>Settings → Shortcuts.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/notebook.png"><img src="docs/screenshots/notebook.png" alt="A Jupyter notebook with its outputs." width="260"></a><br><sub>A Jupyter notebook with its outputs.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/try.png"><img src="docs/screenshots/try.png" alt="Try with several agents: one task, each agent in its own worktree." width="260"></a><br><sub>Try with several agents: one task, each agent in its own worktree.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/plugins.png"><img src="docs/screenshots/plugins.png" alt="Settings → Plugins: the demo plugin waiting for review." width="260"></a><br><sub>Settings → Plugins: the demo plugin waiting for review.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/sidebar.png"><img src="docs/screenshots/sidebar.png" alt="The sidebar: a session that needs you, one at work, and each project&#x27;s branch, comment and worktrees (simulated agent)." width="260"></a><br><sub>The sidebar: a session that needs you, one at work, and each project's branch, comment and worktrees (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/quick-answer.png"><img src="docs/screenshots/quick-answer.png" alt="Answer from the dashboard: the waiting session&#x27;s question and its keys, without leaving the board (simulated agent)." width="260"></a><br><sub>Answer from the dashboard: the waiting session's question and its keys, without leaving the board (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/split-picker.png"><img src="docs/screenshots/split-picker.png" alt="Ctrl+Shift+D splits a pane, and the empty pane asks what to run." width="260"></a><br><sub>Ctrl+Shift+D splits a pane, and the empty pane asks what to run.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/git-history.png"><img src="docs/screenshots/git-history.png" alt="The Changes panel with History unfolded: the last commits of the branch." width="260"></a><br><sub>The Changes panel with History unfolded: the last commits of the branch.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/git-stashes.png"><img src="docs/screenshots/git-stashes.png" alt="The Changes panel with Stashes unfolded: a demo stash with Apply and Drop." width="260"></a><br><sub>The Changes panel with Stashes unfolded: a demo stash with Apply and Drop.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/review-queue.png"><img src="docs/screenshots/review-queue.png" alt="The Review tab: a worktree waiting for review, its diff, Review with… and Approve → Finish." width="260"></a><br><sub>The Review tab: a worktree waiting for review, its diff, Review with… and Approve → Finish.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/automation-event.png"><img src="docs/screenshots/automation-event.png" alt="A new automation started by an event: a Markdown file under docs/ changes (not saved)." width="260"></a><br><sub>A new automation started by an event: a Markdown file under docs/ changes (not saved).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/host-edit.png"><img src="docs/screenshots/host-edit.png" alt="A host&#x27;s drawer with its appearance: label colour, theme, font, cursor and a live preview." width="260"></a><br><sub>A host's drawer with its appearance: label colour, theme, font, cursor and a live preview.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/notifications.png"><img src="docs/screenshots/notifications.png" alt="Settings → Notifications: desktop alerts, phone alerts, ntfy, Telegram and webhook." width="260"></a><br><sub>Settings → Notifications: desktop alerts, phone alerts, ntfy, Telegram and webhook.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mobile-settings.png"><img src="docs/screenshots/mobile-settings.png" alt="Settings → Mobile with phone access on (no pairing code shown)." width="260"></a><br><sub>Settings → Mobile with phone access on (no pairing code shown).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/voice.png"><img src="docs/screenshots/voice.png" alt="Settings → Voice: the on-device speech models (no microphone on the test machine)." width="260"></a><br><sub>Settings → Voice: the on-device speech models (no microphone on the test machine).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/settings-export.png"><img src="docs/screenshots/settings-export.png" alt="Export and import settings, with the parts to include." width="260"></a><br><sub>Export and import settings, with the parts to include.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/chat-approval.png"><img src="docs/screenshots/chat-approval.png" alt="A chat waiting for approval of a risky command: Allow, Allow for session or Deny (simulated agent)." width="260"></a><br><sub>A chat waiting for approval of a risky command: Allow, Allow for session or Deny (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/sub-sessions-ask.png"><img src="docs/screenshots/sub-sessions-ask.png" alt="An agent asks to open a sub-session: Allow once, Allow for this session, Always allow or Deny (simulated agent)." width="260"></a><br><sub>An agent asks to open a sub-session: Allow once, Allow for this session, Always allow or Deny (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/owed-checks.png"><img src="docs/screenshots/owed-checks.png" alt="Activity: a sub-session&#x27;s report and the check it could not run itself (simulated agent)." width="260"></a><br><sub>Activity: a sub-session's report and the check it could not run itself (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/past-conversations.png"><img src="docs/screenshots/past-conversations.png" alt="The Sessions tab: past Claude Code and Codex conversations of this project (simulated agent)." width="260"></a><br><sub>The Sessions tab: past Claude Code and Codex conversations of this project (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><!-- clip: clip-phone-answer.mp4 --><a href="#watch-it-work"><img src="docs/screenshots/clip-phone-answer-poster.png" alt="Clip poster: a demo menu (not an agent) waits, the phone answers it with one tap, and the desktop pane carries on." width="260"></a><br><sub>Clip poster: a demo menu (not an agent) waits, the phone answers it with one tap, and the desktop pane carries on.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/light.png"><img src="docs/screenshots/light.png" alt="The multi-pane workspace in the light theme." width="260"></a><br><sub>The multi-pane workspace in the light theme.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/vietnamese.png"><img src="docs/screenshots/vietnamese.png" alt="The multi-pane workspace with the Vietnamese interface." width="260"></a><br><sub>The multi-pane workspace with the Vietnamese interface.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/agents.png"><img src="docs/screenshots/agents.png" alt="Settings → Agents: the installed and available agent presets." width="260"></a><br><sub>Settings → Agents: the installed and available agent presets.</sub></td>
+</tr>
+</table>
 
 </details>
 
 <details>
-<summary><strong>Start from a clean welcome, choose the agent, choose the layout</strong></summary>
+<summary><strong>macOS</strong></summary>
 
-![Kelpie's welcome screen with Kip, the project and SSH buttons and the command palette](docs/screenshots/welcome.png)
-
-![The new-session launcher with installed agents and placement options](docs/screenshots/new-session.png)
-
-![Pane layout choices over a split workspace](docs/screenshots/layouts.png)
-
-![The terminal context menu with transcript copying, splits and quick commands](docs/screenshots/terminal-menu.png)
-
-![A floating terminal inspecting Git worktrees and running the sample checks](docs/screenshots/floating.png)
-
-</details>
-
-### Let the tasks take different paths
-
-The checkout change turns into two questions: how should coupon input be normalized, and where should free shipping begin? Both questions belong to the same project, but they do not need to share a working copy.
-
-You create a Git worktree for each task. Kelpie keeps the worktrees under their parent project, each with its own sessions and a comment that explains the work. The board turns those folders into one readable picture: **Todo → In progress → Review → Done**.
-
-![The workspace board with eight sample projects and two worktrees across Todo, In progress, Review and Done](docs/screenshots/board.png)
-
-<details>
-<summary><strong>From a new worktree to a plan and a run</strong></summary>
-
-The new-worktree dialog shows the repository's `.kelpie.yaml` setup and runs it only after you approve that exact file.
-
-![The new-worktree dialog with branch, base reference, folder and setup options](docs/screenshots/worktree-dialog.png)
-
-The Plan tab reads checklists from Markdown in your repository. When you tick a task, the file on disk changes by that one character.
-
-![Completed and pending tasks in Kelpie's Plan tab](docs/screenshots/plan.png)
-
-A run splits a larger job into agent tasks. In this run, two tasks wait for your approval and will each get a worktree of their own when they start, and a cross-review task waits for both.
-
-![The Runs page with a three-task checkout run waiting for approval](docs/screenshots/runs.png)
-
-</details>
-
-### Know which session needs you
-
-While the agents work, you look at something else. When a session asks a question, it moves to *Needs you* on the dashboard, its row turns amber in the sidebar, and the bell in the status bar gets a dot. You answer the prompt from the dashboard without opening its tab, and `Ctrl+Shift+.` takes you to the next session that is waiting.
-
-![The session dashboard with a real shell confirmation prompt waiting for an answer](docs/screenshots/dashboard.png)
-
-<details>
-<summary><strong>Activity, automations and your phone</strong></summary>
-
-![The activity inbox with clearly labelled sample notifications](docs/screenshots/inbox.png)
-
-The automation examples below are disabled, so they cannot start paid model calls by surprise.
-
-![Three disabled sample automations with their agents and schedules](docs/screenshots/automations.png)
-
-You can also [pair a phone](docs/user-guide.md#phone-access). The phone lists your sessions, buzzes when one needs you, shows each session's screen and, if you allow it, sends replies. When an agent waits on something outside its terminal, the phone can also show the computer's own screen and click and type there, on Windows and on macOS 12.3 or later.
-
-</details>
-
-### Review the result, not just a "done" message
-
-When an agent reports that it is done, your review begins; the report is not a reason to skip it.
-
-You open the diff, look at the changed line, and leave a note where the question belongs. Kelpie sends all notes to an agent as one focused request. You can also ask a second agent from another vendor to review the same worktree and leave its own notes on the diff.
-
-![A checkout diff with a review note on coupon normalization and the Changes panel beside it](docs/screenshots/review-notes.png)
-
-When the work is ready, **Finish** commits what is left, merges with the method you choose, runs the checks from `.kelpie.yaml` that you approved, and removes the worktree only after everything else succeeded. It never forces anything.
-
-![The Finish dialog for the coupon-validation worktree with its merge method and approved check](docs/screenshots/finish.png)
-
-<details>
-<summary><strong>Inspect the change, draft the next request, try several agents</strong></summary>
-
-![The Changes panel with the sample repository's uncommitted checkout change](docs/screenshots/changes.png)
-
-![The floating composer with a drafted checkout review request](docs/screenshots/composer.png)
-
-*Try with several agents* gives one prompt to two to five agents, each in its own worktree. The Compare view then shows time, cost, changed lines and checks side by side.
-
-![The Try with several agents dialog with a shipping-boundary prompt](docs/screenshots/try.png)
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-workspace.png"><img src="docs/screenshots/mac-workspace.png" alt="One tab with two shell sessions and the Files panel." width="260"></a><br><sub>One tab with two shell sessions and the Files panel.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-welcome.png"><img src="docs/screenshots/mac-welcome.png" alt="The welcome screen before any project is added." width="260"></a><br><sub>The welcome screen before any project is added.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-chat.png"><img src="docs/screenshots/mac-chat.png" alt="Chat view with the agent&#x27;s tool calls, its edits and the files it changed (simulated agent)." width="260"></a><br><sub>Chat view with the agent's tool calls, its edits and the files it changed (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-chat-approval.png"><img src="docs/screenshots/mac-chat-approval.png" alt="A chat waiting for approval of a risky command: Allow, Allow for session or Deny (simulated agent)." width="260"></a><br><sub>A chat waiting for approval of a risky command: Allow, Allow for session or Deny (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-dashboard-agents.png"><img src="docs/screenshots/mac-dashboard-agents.png" alt="The Agent Dashboard: sessions that need you, those working, and the idle ones (simulated agent)." width="260"></a><br><sub>The Agent Dashboard: sessions that need you, those working, and the idle ones (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-search.png"><img src="docs/screenshots/mac-search.png" alt="Search everything: sessions, projects, files and settings from one box." width="260"></a><br><sub>Search everything: sessions, projects, files and settings from one box.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-new-session.png"><img src="docs/screenshots/mac-new-session.png" alt="The new-session dialog with agents, quick commands and where to open it." width="260"></a><br><sub>The new-session dialog with agents, quick commands and where to open it.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-changes.png"><img src="docs/screenshots/mac-changes.png" alt="The Changes panel: branch, commit message and changed files." width="260"></a><br><sub>The Changes panel: branch, commit message and changed files.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-editor.png"><img src="docs/screenshots/mac-editor.png" alt="The built-in editor on a demo source file." width="260"></a><br><sub>The built-in editor on a demo source file.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-review-notes.png"><img src="docs/screenshots/mac-review-notes.png" alt="A review note on a line of the diff, ready to send to an agent." width="260"></a><br><sub>A review note on a line of the diff, ready to send to an agent.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-markdown.png"><img src="docs/screenshots/mac-markdown.png" alt="Markdown with a Mermaid diagram, rendered." width="260"></a><br><sub>Markdown with a Mermaid diagram, rendered.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-csv.png"><img src="docs/screenshots/mac-csv.png" alt="A CSV file as a sortable table." width="260"></a><br><sub>A CSV file as a sortable table.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-notebook.png"><img src="docs/screenshots/mac-notebook.png" alt="A Jupyter notebook with its outputs." width="260"></a><br><sub>A Jupyter notebook with its outputs.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-plan.png"><img src="docs/screenshots/mac-plan.png" alt="The Plan tab with the project&#x27;s specs and their tasks." width="260"></a><br><sub>The Plan tab with the project's specs and their tasks.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-board.png"><img src="docs/screenshots/mac-board.png" alt="The workspace board: projects and worktrees by stage." width="260"></a><br><sub>The workspace board: projects and worktrees by stage.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-layouts.png"><img src="docs/screenshots/mac-layouts.png" alt="The layout menu: grid presets, Tile all and Broadcast input." width="260"></a><br><sub>The layout menu: grid presets, Tile all and Broadcast input.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-composer.png"><img src="docs/screenshots/mac-composer.png" alt="The floating composer for a longer prompt." width="260"></a><br><sub>The floating composer for a longer prompt.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-terminal-menu.png"><img src="docs/screenshots/mac-terminal-menu.png" alt="A terminal&#x27;s context menu." width="260"></a><br><sub>A terminal's context menu.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-floating.png"><img src="docs/screenshots/mac-floating.png" alt="The floating terminal over the workspace." width="260"></a><br><sub>The floating terminal over the workspace.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-inbox.png"><img src="docs/screenshots/mac-inbox.png" alt="The activity inbox (labelled demo samples)." width="260"></a><br><sub>The activity inbox (labelled demo samples).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-worktree-dialog.png"><img src="docs/screenshots/mac-worktree-dialog.png" alt="The new-worktree dialog with the project&#x27;s .kelpie.yaml." width="260"></a><br><sub>The new-worktree dialog with the project's .kelpie.yaml.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-finish.png"><img src="docs/screenshots/mac-finish.png" alt="The Finish dialog: how to merge and the checks it runs." width="260"></a><br><sub>The Finish dialog: how to merge and the checks it runs.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-try.png"><img src="docs/screenshots/mac-try.png" alt="Try with several agents: one task, one worktree per agent." width="260"></a><br><sub>Try with several agents: one task, one worktree per agent.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-runs.png"><img src="docs/screenshots/mac-runs.png" alt="A run waiting for approval of its first tasks." width="260"></a><br><sub>A run waiting for approval of its first tasks.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-processes.png"><img src="docs/screenshots/mac-processes.png" alt="The Processes panel showing the demo server&#x27;s port." width="260"></a><br><sub>The Processes panel showing the demo server's port.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-hosts.png"><img src="docs/screenshots/mac-hosts.png" alt="SSH hosts (documentation addresses, never connected)." width="260"></a><br><sub>SSH hosts (documentation addresses, never connected).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-automations.png"><img src="docs/screenshots/mac-automations.png" alt="Scheduled automations (disabled samples)." width="260"></a><br><sub>Scheduled automations (disabled samples).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-plugins.png"><img src="docs/screenshots/mac-plugins.png" alt="Plugins: the demo plugin waiting for review." width="260"></a><br><sub>Plugins: the demo plugin waiting for review.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-settings.png"><img src="docs/screenshots/mac-settings.png" alt="Settings → Appearance." width="260"></a><br><sub>Settings → Appearance.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-terminal-settings.png"><img src="docs/screenshots/mac-terminal-settings.png" alt="Settings → Terminal." width="260"></a><br><sub>Settings → Terminal.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-shortcuts.png"><img src="docs/screenshots/mac-shortcuts.png" alt="Settings → Shortcuts with the Mac&#x27;s keys." width="260"></a><br><sub>Settings → Shortcuts with the Mac's keys.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-settings-mobile.png"><img src="docs/screenshots/mac-settings-mobile.png" alt="Settings → Mobile with phone access on (no pairing code shown)." width="260"></a><br><sub>Settings → Mobile with phone access on (no pairing code shown).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-mobile-permissions.png"><img src="docs/screenshots/mac-mobile-permissions.png" alt="The Mac&#x27;s Screen Recording and Accessibility rows in Settings → Mobile." width="260"></a><br><sub>The Mac's Screen Recording and Accessibility rows in Settings → Mobile.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-settings-notifications.png"><img src="docs/screenshots/mac-settings-notifications.png" alt="Settings → Notifications: desktop alerts and channels to the phone." width="260"></a><br><sub>Settings → Notifications: desktop alerts and channels to the phone.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-settings-commands.png"><img src="docs/screenshots/mac-settings-commands.png" alt="Settings → Quick Commands." width="260"></a><br><sub>Settings → Quick Commands.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-settings-daemon.png"><img src="docs/screenshots/mac-settings-daemon.png" alt="Settings → Session Daemon: what happens when Kelpie closes, export and import." width="260"></a><br><sub>Settings → Session Daemon: what happens when Kelpie closes, export and import.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-settings-about.png"><img src="docs/screenshots/mac-settings-about.png" alt="Settings → About on macOS." width="260"></a><br><sub>Settings → About on macOS.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-light.png"><img src="docs/screenshots/mac-light.png" alt="The light theme." width="260"></a><br><sub>The light theme.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-vietnamese.png"><img src="docs/screenshots/mac-vietnamese.png" alt="The app in Vietnamese." width="260"></a><br><sub>The app in Vietnamese.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/mac-screen-from-phone.png"><img src="docs/screenshots/mac-screen-from-phone.png" alt="The phone sees a TextEdit window on the Mac, with the ⌘ ⌥ ⌃ ⇧ key bar." width="130"></a><br><sub>The phone sees a TextEdit window on the Mac, with the ⌘ ⌥ ⌃ ⇧ key bar.</sub></td>
+</tr>
+</table>
 
 </details>
 
-### Read the result in the form that makes sense
-
-Sometimes you want the agent's own terminal interface. Sometimes you want a conversation with rendered Markdown, tool activity and model controls. Supported agents can switch to Kelpie's chat view and back in the same conversation, and Kelpie makes sure that only one front end writes to it.
-
-![A real Claude Code answer in Kelpie's chat view, with tool activity, the context ring and model controls](docs/screenshots/chat.png)
-
 <details>
-<summary><strong>Source, diagrams, data, notebooks and search</strong></summary>
+<summary><strong>Linux (Ubuntu 22.04)</strong></summary>
 
-![The checkout implementation in Kelpie's source editor](docs/screenshots/editor.png)
-
-![Markdown architecture documentation with a rendered Mermaid diagram](docs/screenshots/markdown.png)
-
-![The CSV viewer displaying synthetic demo measurements](docs/screenshots/csv.png)
-
-![A notebook with a daily revenue summary rendered in Kelpie](docs/screenshots/notebook.png)
-
-![Global search finding sample projects and sessions](docs/screenshots/search.png)
+<table>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-workspace.png"><img src="docs/screenshots/linux-workspace.png" alt="One tab with two shell sessions and the Files panel." width="260"></a><br><sub>One tab with two shell sessions and the Files panel.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-welcome.png"><img src="docs/screenshots/linux-welcome.png" alt="The welcome screen before any project is added." width="260"></a><br><sub>The welcome screen before any project is added.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-chat.png"><img src="docs/screenshots/linux-chat.png" alt="Chat view with the agent&#x27;s tool calls, its edits and the files it changed (simulated agent)." width="260"></a><br><sub>Chat view with the agent's tool calls, its edits and the files it changed (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-chat-approval.png"><img src="docs/screenshots/linux-chat-approval.png" alt="A chat waiting for approval of a risky command: Allow, Allow for session or Deny (simulated agent)." width="260"></a><br><sub>A chat waiting for approval of a risky command: Allow, Allow for session or Deny (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-dashboard-agents.png"><img src="docs/screenshots/linux-dashboard-agents.png" alt="The Agent Dashboard: sessions that need you, those working, and the idle ones (simulated agent)." width="260"></a><br><sub>The Agent Dashboard: sessions that need you, those working, and the idle ones (simulated agent).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-search.png"><img src="docs/screenshots/linux-search.png" alt="Search everything: sessions, projects, files and settings from one box." width="260"></a><br><sub>Search everything: sessions, projects, files and settings from one box.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-new-session.png"><img src="docs/screenshots/linux-new-session.png" alt="The new-session dialog with agents, quick commands and where to open it." width="260"></a><br><sub>The new-session dialog with agents, quick commands and where to open it.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-changes.png"><img src="docs/screenshots/linux-changes.png" alt="The Changes panel: branch, commit message and changed files." width="260"></a><br><sub>The Changes panel: branch, commit message and changed files.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-editor.png"><img src="docs/screenshots/linux-editor.png" alt="The built-in editor on a demo source file." width="260"></a><br><sub>The built-in editor on a demo source file.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-review-notes.png"><img src="docs/screenshots/linux-review-notes.png" alt="A review note on a line of the diff, ready to send to an agent." width="260"></a><br><sub>A review note on a line of the diff, ready to send to an agent.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-markdown.png"><img src="docs/screenshots/linux-markdown.png" alt="Markdown with a Mermaid diagram, rendered." width="260"></a><br><sub>Markdown with a Mermaid diagram, rendered.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-notebook.png"><img src="docs/screenshots/linux-notebook.png" alt="A Jupyter notebook with its outputs." width="260"></a><br><sub>A Jupyter notebook with its outputs.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-plan.png"><img src="docs/screenshots/linux-plan.png" alt="The Plan tab with the project&#x27;s specs and their tasks." width="260"></a><br><sub>The Plan tab with the project's specs and their tasks.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-board.png"><img src="docs/screenshots/linux-board.png" alt="The workspace board: projects and worktrees by stage." width="260"></a><br><sub>The workspace board: projects and worktrees by stage.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-layouts.png"><img src="docs/screenshots/linux-layouts.png" alt="The layout menu: grid presets, Tile all and Broadcast input." width="260"></a><br><sub>The layout menu: grid presets, Tile all and Broadcast input.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-floating.png"><img src="docs/screenshots/linux-floating.png" alt="The floating terminal over the workspace." width="260"></a><br><sub>The floating terminal over the workspace.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-inbox.png"><img src="docs/screenshots/linux-inbox.png" alt="The activity inbox (labelled demo samples)." width="260"></a><br><sub>The activity inbox (labelled demo samples).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-worktree-dialog.png"><img src="docs/screenshots/linux-worktree-dialog.png" alt="The new-worktree dialog with the project&#x27;s .kelpie.yaml." width="260"></a><br><sub>The new-worktree dialog with the project's .kelpie.yaml.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-finish.png"><img src="docs/screenshots/linux-finish.png" alt="The Finish dialog: how to merge and the checks it runs." width="260"></a><br><sub>The Finish dialog: how to merge and the checks it runs.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-try.png"><img src="docs/screenshots/linux-try.png" alt="Try with several agents: one task, one worktree per agent." width="260"></a><br><sub>Try with several agents: one task, one worktree per agent.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-runs.png"><img src="docs/screenshots/linux-runs.png" alt="A run waiting for approval of its first tasks." width="260"></a><br><sub>A run waiting for approval of its first tasks.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-processes.png"><img src="docs/screenshots/linux-processes.png" alt="The Processes panel showing the demo server&#x27;s port." width="260"></a><br><sub>The Processes panel showing the demo server's port.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-hosts.png"><img src="docs/screenshots/linux-hosts.png" alt="SSH hosts (documentation addresses, never connected)." width="260"></a><br><sub>SSH hosts (documentation addresses, never connected).</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-automations.png"><img src="docs/screenshots/linux-automations.png" alt="Scheduled automations (disabled samples)." width="260"></a><br><sub>Scheduled automations (disabled samples).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-plugins.png"><img src="docs/screenshots/linux-plugins.png" alt="Plugins: the demo plugin waiting for review." width="260"></a><br><sub>Plugins: the demo plugin waiting for review.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-settings.png"><img src="docs/screenshots/linux-settings.png" alt="Settings → Appearance." width="260"></a><br><sub>Settings → Appearance.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-settings-mobile.png"><img src="docs/screenshots/linux-settings-mobile.png" alt="Settings → Mobile with phone access on (no pairing code shown)." width="260"></a><br><sub>Settings → Mobile with phone access on (no pairing code shown).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-settings-notifications.png"><img src="docs/screenshots/linux-settings-notifications.png" alt="Settings → Notifications: desktop alerts and channels to the phone." width="260"></a><br><sub>Settings → Notifications: desktop alerts and channels to the phone.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-settings-daemon.png"><img src="docs/screenshots/linux-settings-daemon.png" alt="Settings → Session Daemon: what happens when Kelpie closes, export and import." width="260"></a><br><sub>Settings → Session Daemon: what happens when Kelpie closes, export and import.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-light.png"><img src="docs/screenshots/linux-light.png" alt="The light theme." width="260"></a><br><sub>The light theme.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-vietnamese.png"><img src="docs/screenshots/linux-vietnamese.png" alt="The app in Vietnamese." width="260"></a><br><sub>The app in Vietnamese.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-agents.png"><img src="docs/screenshots/linux-agents.png" alt="Settings → Agents: the agent CLIs Kelpie knows and how each one starts." width="260"></a><br><sub>Settings → Agents: the agent CLIs Kelpie knows and how each one starts.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-settings-about.png"><img src="docs/screenshots/linux-settings-about.png" alt="Settings → About on Linux." width="260"></a><br><sub>Settings → About on Linux.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-terminal-settings.png"><img src="docs/screenshots/linux-terminal-settings.png" alt="Settings → Terminal." width="260"></a><br><sub>Settings → Terminal.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-settings-commands.png"><img src="docs/screenshots/linux-settings-commands.png" alt="Settings → Quick Commands." width="260"></a><br><sub>Settings → Quick Commands.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-composer.png"><img src="docs/screenshots/linux-composer.png" alt="The floating composer for a longer prompt." width="260"></a><br><sub>The floating composer for a longer prompt.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-csv.png"><img src="docs/screenshots/linux-csv.png" alt="A CSV file as a sortable table." width="260"></a><br><sub>A CSV file as a sortable table.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-terminal-menu.png"><img src="docs/screenshots/linux-terminal-menu.png" alt="A terminal&#x27;s context menu." width="260"></a><br><sub>A terminal's context menu.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-shortcuts.png"><img src="docs/screenshots/linux-shortcuts.png" alt="Settings → Shortcuts with the Linux keys." width="260"></a><br><sub>Settings → Shortcuts with the Linux keys.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="33%"><a href="docs/screenshots/linux-dashboard.png"><img src="docs/screenshots/linux-dashboard.png" alt="The Agent Dashboard with a shell waiting for an answer and Answer at hand." width="260"></a><br><sub>The Agent Dashboard with a shell waiting for an answer and Answer at hand.</sub></td>
+</tr>
+</table>
 
 </details>
 
-### Bring the browser and the servers along
+<details>
+<summary><strong>Phone: Safari on an iPhone</strong></summary>
 
-The next question is on a web page. You open it beside the agent instead of burying the workspace behind another application. Here, ChatGPT's website and OMP's CLI are two separate panes in Kelpie. The website is the real, signed-out page; it is not a bundled model client.
+<table>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-first.png"><img src="docs/screenshots/phone-safari-first.png" alt="The phone page in Safari before pairing." width="170"></a><br><sub>The phone page in Safari before pairing.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-pair-code.png"><img src="docs/screenshots/phone-safari-pair-code.png" alt="The pairing code to type on the computer." width="170"></a><br><sub>The pairing code to type on the computer.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-lock-setup.png"><img src="docs/screenshots/phone-safari-lock-setup.png" alt="Setting up the app lock." width="170"></a><br><sub>Setting up the app lock.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-passkey-sheet.png"><img src="docs/screenshots/phone-safari-passkey-sheet.png" alt="Safari saves a passkey for the app lock (Face ID)." width="170"></a><br><sub>Safari saves a passkey for the app lock (Face ID).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-inbox-workspace.png"><img src="docs/screenshots/phone-safari-inbox-workspace.png" alt="The inbox by project (simulated agent)." width="170"></a><br><sub>The inbox by project (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-terminal.png"><img src="docs/screenshots/phone-safari-terminal.png" alt="A terminal session on the phone with its key bar (simulated agent)." width="170"></a><br><sub>A terminal session on the phone with its key bar (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-approval.png"><img src="docs/screenshots/phone-safari-approval.png" alt="Answering a menu prompt from the phone (simulated agent)." width="170"></a><br><sub>Answering a menu prompt from the phone (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-chat-approval.png"><img src="docs/screenshots/phone-safari-chat-approval.png" alt="Approving an agent&#x27;s command from the phone, with its risk (simulated agent)." width="170"></a><br><sub>Approving an agent's command from the phone, with its risk (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-chat.png"><img src="docs/screenshots/phone-safari-chat.png" alt="A finished chat on the phone (simulated agent)." width="170"></a><br><sub>A finished chat on the phone (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-new-session.png"><img src="docs/screenshots/phone-safari-new-session.png" alt="Starting a session from the phone (simulated agent)." width="170"></a><br><sub>Starting a session from the phone (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-settings.png"><img src="docs/screenshots/phone-safari-settings.png" alt="The phone&#x27;s settings: app lock and alerts." width="170"></a><br><sub>The phone's settings: app lock and alerts.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-locked.png"><img src="docs/screenshots/phone-safari-locked.png" alt="The page locked until Face ID." width="170"></a><br><sub>The page locked until Face ID.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-unlock-sheet.png"><img src="docs/screenshots/phone-safari-unlock-sheet.png" alt="Unlocking with the passkey." width="170"></a><br><sub>Unlocking with the passkey.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-inbox-dark.png"><img src="docs/screenshots/phone-safari-inbox-dark.png" alt="The inbox in dark mode (simulated agent)." width="170"></a><br><sub>The inbox in dark mode (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-chat-approval-dark.png"><img src="docs/screenshots/phone-safari-chat-approval-dark.png" alt="An approval in dark mode (simulated agent)." width="170"></a><br><sub>An approval in dark mode (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-terminal-dark.png"><img src="docs/screenshots/phone-safari-terminal-dark.png" alt="A terminal session in dark mode (simulated agent)." width="170"></a><br><sub>A terminal session in dark mode (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-first-vi.png"><img src="docs/screenshots/phone-safari-first-vi.png" alt="The phone page in Vietnamese before pairing." width="170"></a><br><sub>The phone page in Vietnamese before pairing.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-pair-code-vi.png"><img src="docs/screenshots/phone-safari-pair-code-vi.png" alt="The pairing code, in Vietnamese." width="170"></a><br><sub>The pairing code, in Vietnamese.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-lock-setup-vi.png"><img src="docs/screenshots/phone-safari-lock-setup-vi.png" alt="Setting up the app lock, in Vietnamese." width="170"></a><br><sub>Setting up the app lock, in Vietnamese.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-passkey-sheet-vi.png"><img src="docs/screenshots/phone-safari-passkey-sheet-vi.png" alt="Saving the passkey, in Vietnamese." width="170"></a><br><sub>Saving the passkey, in Vietnamese.</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-inbox-vi.png"><img src="docs/screenshots/phone-safari-inbox-vi.png" alt="The inbox in Vietnamese (simulated agent)." width="170"></a><br><sub>The inbox in Vietnamese (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-safari-settings-vi.png"><img src="docs/screenshots/phone-safari-settings-vi.png" alt="The phone&#x27;s settings in Vietnamese." width="170"></a><br><sub>The phone's settings in Vietnamese.</sub></td>
+</tr>
+</table>
 
-![ChatGPT web and a real OMP checkout review side by side in native browser and terminal panes](docs/screenshots/chatgpt.png)
-
-When an agent starts a dev server, the page gets a tab of its own in the background. The **Processes** panel shows what each session runs, with PIDs, memory, CPU and ports, and stops a program only after it tells you what will end.
-
-![The Processes panel showing the sample catalog server and its port 8765](docs/screenshots/processes.png)
-
-When the work moves to a server, the **SSH hosts** page keeps your machines, keys, port forwards and file transfers in one place. Agent panes on a server run inside `tmux`, so they survive a dropped connection.
-
-![The SSH hosts page with three demo hosts grouped by environment](docs/screenshots/hosts.png)
-
-### Update without stopping the work
-
-Kelpie checks for a new release in the background. When you choose **Install now**, or **Install when idle**, only the window restarts. The daemon keeps every terminal and agent running, and the window reconnects to the same screens. You never have to wait for an agent to finish before you update. The one exception is the first update from an early 0.1 release whose daemon still ran from the install folder: that update stops sessions once, says so first, and agents resume.
-
-When you quit Kelpie, it asks first if something is still running, and then stops its sessions. The next time you open it, agents resume the same conversation. If you want automations, phone access or file copies to continue with the window closed, you can [keep the daemon running in the background](docs/user-guide.md#install).
-
-### Fit Kelpie to the way you work
-
-Because you will spend hours in Kelpie, you can choose a dark or light interface, tune terminal fonts and colours, change density and text size, and record shortcuts that fit your keyboard. The interface is available in English and Vietnamese.
-
-![Appearance settings with language, theme, density, text-size and mascot controls](docs/screenshots/settings.png)
+</details>
 
 <details>
-<summary><strong>Fonts, agents, plugins, shortcuts, light theme and Vietnamese</strong></summary>
+<summary><strong>Phone: Chromium at iPhone and Android sizes</strong></summary>
 
-![Terminal settings with font, shell and colour-palette controls](docs/screenshots/terminal-settings.png)
-
-![Installed and available agent presets in Settings](docs/screenshots/agents.png)
-
-![The demo plugin listed in Settings and waiting for review](docs/screenshots/plugins.png)
-
-![Configurable keyboard shortcuts](docs/screenshots/shortcuts.png)
-
-![The multi-pane workspace in light theme](docs/screenshots/light.png)
-
-![The multi-pane workspace with Vietnamese interface labels](docs/screenshots/vietnamese.png)
+<table>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-pair-scan.png"><img src="docs/screenshots/phone-pair-scan.png" alt="Pairing starts by scanning the code the computer shows, or pasting its link." width="170"></a><br><sub>Pairing starts by scanning the code the computer shows, or pasting its link.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-pair-name.png"><img src="docs/screenshots/phone-pair-name.png" alt="The phone names itself before the computer approves it." width="170"></a><br><sub>The phone names itself before the computer approves it.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-chat-tools.png"><img src="docs/screenshots/phone-chat-tools.png" alt="A chat on the phone lists each tool the agent ran and what it changed (simulated agent)." width="170"></a><br><sub>A chat on the phone lists each tool the agent ran and what it changed (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-chat-keyboard.png"><img src="docs/screenshots/phone-chat-keyboard.png" alt="Writing back to an agent while it waits for approval (simulated agent)." width="170"></a><br><sub>Writing back to an agent while it waits for approval (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-connection.png"><img src="docs/screenshots/phone-connection.png" alt="The connection sheet: how the phone reaches the computer and how fresh the link is." width="170"></a><br><sub>The connection sheet: how the phone reaches the computer and how fresh the link is.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-settings-2.png"><img src="docs/screenshots/phone-settings-2.png" alt="Phone settings: theme, language, text size and how the inbox sorts." width="170"></a><br><sub>Phone settings: theme, language, text size and how the inbox sorts.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-settings-3.png"><img src="docs/screenshots/phone-settings-3.png" alt="Choosing and ordering the keys of the key bar." width="170"></a><br><sub>Choosing and ordering the keys of the key bar.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-offline.png"><img src="docs/screenshots/phone-offline.png" alt="With the computer gone, the phone says so and keeps what it last saw (simulated agent)." width="170"></a><br><sub>With the computer gone, the phone says so and keeps what it last saw (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-chat-approval-vi.png"><img src="docs/screenshots/phone-chat-approval-vi.png" alt="An approval on the Vietnamese page (simulated agent)." width="170"></a><br><sub>An approval on the Vietnamese page (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-chat-tools-vi-light.png"><img src="docs/screenshots/phone-chat-tools-vi-light.png" alt="A chat on the Vietnamese page, light theme (simulated agent)." width="170"></a><br><sub>A chat on the Vietnamese page, light theme (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-connection-vi.png"><img src="docs/screenshots/phone-connection-vi.png" alt="The connection sheet in Vietnamese." width="170"></a><br><sub>The connection sheet in Vietnamese.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-offline-vi.png"><img src="docs/screenshots/phone-offline-vi.png" alt="The offline inbox in Vietnamese (simulated agent)." width="170"></a><br><sub>The offline inbox in Vietnamese (simulated agent).</sub></td>
+</tr>
+<tr>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-android-inbox.png"><img src="docs/screenshots/phone-android-inbox.png" alt="The inbox in Chrome on an Android-sized phone (Pixel 7) (simulated agent)." width="170"></a><br><sub>The inbox in Chrome on an Android-sized phone (Pixel 7) (simulated agent).</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-android-terminal.png"><img src="docs/screenshots/phone-android-terminal.png" alt="A terminal session on an Android-sized phone." width="170"></a><br><sub>A terminal session on an Android-sized phone.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-android-approval.png"><img src="docs/screenshots/phone-android-approval.png" alt="Answering a menu prompt on an Android-sized phone." width="170"></a><br><sub>Answering a menu prompt on an Android-sized phone.</sub></td>
+<td align="center" valign="top" width="25%"><a href="docs/screenshots/phone-android-inbox-vi-light.png"><img src="docs/screenshots/phone-android-inbox-vi-light.png" alt="The inbox in Vietnamese, light theme, on an Android-sized phone (simulated agent)." width="170"></a><br><sub>The inbox in Vietnamese, light theme, on an Android-sized phone (simulated agent).</sub></td>
+</tr>
+</table>
 
 </details>
 
@@ -242,7 +448,7 @@ Because you will spend hours in Kelpie, you can choose a dark or light interface
 - Kelpie knows [23 agent CLIs](docs/user-guide.md#agents), including Claude Code, Codex, OMP, Gemini, Cursor, OpenCode and GitHub Copilot, and it can add agents from the Agent Client Protocol registry.
 - [Chat view](docs/user-guide.md#everyday-use) continues the same conversation with tool cards, approvals, an agent map, saved replies and pictures.
 - [Several accounts](docs/user-guide.md#several-claude-code--codex-accounts) of Claude Code or Codex can be used side by side, and a session can move to another account when it reaches its usage limit.
-- [Sub-sessions](docs/user-guide.md#sub-sessions) let an agent open other agent sessions, with your approval and within limits you set.
+- [Sub-sessions](docs/user-guide.md#sub-sessions) let an agent open other agent sessions, with your approval and within limits you set, and its report can list the checks it still owes you.
 - [Hand-off, hibernation, compact and restart](docs/user-guide.md#agents) keep long conversations healthy.
 
 **Attention and cost**
@@ -317,7 +523,14 @@ Then add the folders in Kelpie and follow the **[demo scripts](docs/demo-scripts
 <details>
 <summary><strong>Recapture the screenshots</strong></summary>
 
-The [screenshot tour](scripts/e2e/readme_shots.py) drives the real app with WebDriver. It needs a built app and daemon, `tauri-driver`, and an `msedgedriver` that matches the installed WebView2 runtime:
+Every picture comes from a script that drives the real app over the demo kit, in its own data folder and daemon endpoint, so it never touches your sessions, keys or settings. [README-media.json](docs/screenshots/README-media.json) names the script and machine behind each picture:
+
+- Windows: [readme_shots.py](scripts/e2e/readme_shots.py) (with `--extra` for the newer scenes and `--clip-finish` for the worktree clip) and [readme_phone_win.py](scripts/e2e/readme_phone_win.py) for the phone's view of the screen.
+- macOS: [mac_shots.py](scripts/e2e/mac_shots.py), and [screen_mac.py](scripts/e2e/screen_mac.py) for the Mac's screen seen from a phone.
+- Linux and the phone in Chromium: [linux_shots.py](scripts/e2e/linux_shots.py) and [phone_tour.py](scripts/e2e/phone_tour.py), run on a hosted Ubuntu runner by the [readme-media workflow](.github/workflows/readme-media.yml).
+- The phone in Safari: [phone_safari_sim.py](scripts/e2e/phone_safari_sim.py) `--tour` in the iOS Simulator.
+
+The Windows tour drives the app with WebDriver. It needs a built app and daemon, `tauri-driver`, and an `msedgedriver` that matches the installed WebView2 runtime:
 
 ```bash
 cd app && pnpm tauri build --debug --no-bundle && cd .. && cargo build -p kelpied
@@ -326,7 +539,7 @@ python -X utf8 scripts/e2e/readme_shots.py docs/screenshots ../kelpie-demo-proje
   --agents --browser
 ```
 
-The tour uses its own data folder, daemon endpoint and empty SSH folder, so it never touches your sessions, keys or settings. The images are Full HD (1920 × 1080). `--agents` starts Claude Code, Codex and OMP in their terminals and Claude Code in chat view, each on one read-only task, and makes real model calls with your own sign-ins; leave out `--agents` and `--browser` for a tour without agents. Claude Code and Codex may ask once to trust the demo folder, and the tour answers yes. The agents keep their usual transcripts of these demo turns in their own folders, as any session of yours would. ChatGPT web is not signed in. The SSH hosts use documentation addresses and are never contacted. The tour writes [capture.json](docs/screenshots/capture.json) with the app version, the screenshots and every check it ran.
+The images are Full HD (1920 × 1080). `--agents` starts Claude Code, Codex and OMP in their terminals and Claude Code in chat view, each on one read-only task, and makes real model calls with your own sign-ins; leave out `--agents` and `--browser` for a tour without agents. Claude Code and Codex may ask once to trust the demo folder, and the tour answers yes. The agents keep their usual transcripts of these demo turns in their own folders, as any session of yours would. ChatGPT web is not signed in. The SSH hosts use documentation addresses and are never contacted. The tour writes [capture.json](docs/screenshots/capture.json) with the app version, the screenshots and every check it ran.
 
 </details>
 
