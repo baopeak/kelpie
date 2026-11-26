@@ -58,11 +58,12 @@ impl Axis {
                 // Bilinear: pixel centres mapped onto each other (as a GPU sampler does), clamped at the edges.
                 let pos = ((2 * i + 1) * s * u64::from(ONE) / (2 * o)).saturating_sub(u64::from(ONE / 2));
                 let at = (pos >> 8) as usize;
-                if at >= last {
-                    axis.at.push(last);
+                let frac = (pos as u32) & (ONE - 1);
+                if at >= last || frac == 0 {
+                    // On a pixel (the same size, an edge): that pixel alone.
+                    axis.at.push(at.min(last));
                     axis.weight.push(ONE);
                 } else {
-                    let frac = (pos as u32) & (ONE - 1);
                     axis.at.extend([at, at + 1]);
                     axis.weight.extend([ONE - frac, frac]);
                 }
@@ -72,6 +73,7 @@ impl Axis {
         axis
     }
 
+    #[cfg(test)]
     fn taps(&self, i: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
         let r = self.start[i]..self.start[i + 1];
         self.at[r.clone()].iter().copied().zip(self.weight[r].iter().copied())
@@ -134,32 +136,39 @@ impl Scaler {
     }
 }
 
-/// Output row `y` as R, G, B: its source rows mixed (into `mixed`), then each output pixel's columns.
+/// Output row `y` as R, G, B: its source rows mixed (into `mixed`), then each output pixel's columns. Plain index loops, which stay fast in a
+/// debug build too.
 #[allow(clippy::too_many_arguments)]
 fn scale_row(bgra: &[u8], stride: usize, sw: usize, cols: &Axis, rows: &Axis, y: usize, mixed: &mut [u32], out: &mut [u8]) {
     mixed.fill(0);
-    for (row, wy) in rows.taps(y) {
-        let line = &bgra[row * stride..row * stride + sw * 4];
-        for (px, m) in line.chunks_exact(4).zip(mixed.chunks_exact_mut(3)) {
+    for k in rows.start[y]..rows.start[y + 1] {
+        let wy = rows.weight[k];
+        if wy == 0 {
+            continue;
+        }
+        let line = &bgra[rows.at[k] * stride..rows.at[k] * stride + sw * 4];
+        let mixed = &mut mixed[..sw * 3];
+        for x in 0..sw {
             // BGRA in, RGB out.
-            m[0] += u32::from(px[2]) * wy;
-            m[1] += u32::from(px[1]) * wy;
-            m[2] += u32::from(px[0]) * wy;
+            mixed[x * 3] += u32::from(line[x * 4 + 2]) * wy;
+            mixed[x * 3 + 1] += u32::from(line[x * 4 + 1]) * wy;
+            mixed[x * 3 + 2] += u32::from(line[x * 4]) * wy;
         }
     }
-    for (x, o) in out.chunks_exact_mut(3).enumerate() {
-        let mut acc = [0u32; 3];
-        for (col, wx) in cols.taps(x) {
-            for ch in 0..3 {
-                acc[ch] += mixed[col * 3 + ch] * wx;
-            }
+    let ow = out.len() / 3;
+    for x in 0..ow {
+        let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+        for k in cols.start[x]..cols.start[x + 1] {
+            let (at, w) = (cols.at[k] * 3, cols.weight[k]);
+            r += mixed[at] * w;
+            g += mixed[at + 1] * w;
+            b += mixed[at + 2] * w;
         }
-        for ch in 0..3 {
-            o[ch] = ((acc[ch] + (1 << 15)) >> 16) as u8;
-        }
+        out[x * 3] = ((r + (1 << 15)) >> 16) as u8;
+        out[x * 3 + 1] = ((g + (1 << 15)) >> 16) as u8;
+        out[x * 3 + 2] = ((b + (1 << 15)) >> 16) as u8;
     }
 }
-
 fn luma_row(rgb: &[u8], y: &mut [u8]) {
     for (px, out) in rgb.chunks_exact(3).zip(y.iter_mut()) {
         let v = Y_RGB[0] * i32::from(px[0]) + Y_RGB[1] * i32::from(px[1]) + Y_RGB[2] * i32::from(px[2]) + (16 << 16) + (1 << 15);
@@ -173,9 +182,8 @@ fn chroma_row(first: &[u8], second: &[u8], w: usize, uv: &mut [u8]) {
     for (i, pair) in uv.chunks_exact_mut(2).enumerate() {
         let (l, c, r) = ((2 * i).saturating_sub(1) * 3, 2 * i * 3, (2 * i + 1).min(w - 1) * 3);
         let mut sum = [0i32; 3];
-        for (ch, s) in sum.iter_mut().enumerate() {
-            let row = |p: &[u8]| i32::from(p[l + ch]) + 2 * i32::from(p[c + ch]) + i32::from(p[r + ch]);
-            *s = row(first) + row(second);
+        for ch in 0..3 {
+            sum[ch] = i32::from(first[l + ch]) + 2 * i32::from(first[c + ch]) + i32::from(first[r + ch]) + i32::from(second[l + ch]) + 2 * i32::from(second[c + ch]) + i32::from(second[r + ch]);
         }
         // Eight weights summed: 1/65536 · 1/8 is 1/2^19.
         let cb = CB_RGB[0] * sum[0] + CB_RGB[1] * sum[1] + CB_RGB[2] * sum[2] + (128 << 19) + (1 << 18);
