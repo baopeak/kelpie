@@ -41,6 +41,9 @@ const START_WAIT: Duration = Duration::from_secs(7);
 /// What the phone is told when not even a device that only captures can be made (the graphics' own error code means nothing there).
 const NO_GRAPHICS: &str = "this computer's graphics cannot capture the screen";
 
+/// What the phone is told when this Windows has no window capture (0x80070424: its service is not installed).
+const NO_WINDOW_CAPTURE: &str = "this computer cannot capture a single window: share its whole screen instead";
+
 enum InputCmd {
     Ops(Vec<Value>, Option<u64>),
     Text(String, Option<u64>, u64),
@@ -249,7 +252,14 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
             let rect = targets_win::window_rect(win).ok_or("that window cannot be shown")?;
             let adapter = d3d::adapter_at(rect.x + rect.w / 2, rect.y + rect.h / 2).map_err(|e| e.to_string())?;
             let device = Device::on(&adapter).map_err(|_| NO_GRAPHICS.to_string())?;
-            let wgc = Wgc::start(&device, win).map_err(|e| format!("this window cannot be captured: {e}"))?;
+            let wgc = Wgc::start(&device, win).map_err(|e| {
+                // No Windows Graphics Capture on this edition of Windows (a server, some cloud desktops): said plainly, with what still works.
+                if e.code() == windows::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST.to_hresult() {
+                    NO_WINDOW_CAPTURE.to_string()
+                } else {
+                    format!("this window cannot be captured: {e}")
+                }
+            })?;
             let title = info.title.chars().take(120).collect();
             Ok((device, Source::Window(wgc, *h, *pid), rect, title, info.exe))
         }
@@ -474,17 +484,20 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     // Graphics without video support: the picture is converted on the CPU, for the software encoder.
     let mut cpu = !d.video;
     let open = |hardware: bool, params: &Params| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, hardware);
-    let mut encoder = match (if cpu { Err(windows::core::Error::empty()) } else { open(true, &params) }).or_else(|_| open(false, &params)) {
+    // The software encoder is opened at the software rung's size and rate, which the converter is made for too: an encoder of another size
+    // refuses every frame (MF_E_BUFFERTOOSMALL).
+    let opened = (if cpu { Err(windows::core::Error::empty()) } else { open(true, &params) }).or_else(|_| {
+        ctl.set_software(true);
+        params = ctl.params();
+        open(false, &params)
+    });
+    let mut encoder = match opened {
         Ok(e) => e,
         Err(e) => {
             let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
             return;
         }
     };
-    if !encoder.hardware {
-        ctl.set_software(true);
-        params = ctl.params();
-    }
     let conv = match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps), cpu) {
         Ok(c) => c,
         // A video processor that cannot be made: the CPU converts, and the software encoder takes it.

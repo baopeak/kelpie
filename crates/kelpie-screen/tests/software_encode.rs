@@ -25,10 +25,9 @@ fn pattern(w: u32, h: u32, frame: u32) -> Vec<u8> {
     px
 }
 
-// Not yet in CI's default run: whether the runners' basic render driver offers the D3D11 video processor is owed by the spike. Run it with
-// `cargo test -p kelpie-screen --test software_encode -- --ignored` on a Windows desktop; once it passes on `windows-latest`, drop the ignore.
+// Media Foundation's inbox encoder and a D3D11 device are on every Windows desktop and on `windows-latest`, whose basic render driver has no
+// video processor: there the conversion is the CPU's, as a stream's would be.
 #[test]
-#[ignore = "needs Media Foundation and a D3D11 video device; see the comment above"]
 fn the_software_encoder_makes_every_frame_and_each_keyframe_says_no_reordering() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -37,35 +36,38 @@ fn the_software_encoder_makes_every_frame_and_each_keyframe_says_no_reordering()
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI");
     let adapter = unsafe { factory.EnumAdapters1(0) }.expect("an adapter (the basic render driver at least)");
     let d = Device::on(&adapter).expect("a D3D11 device");
-    let (w, h) = (640u32, 360u32);
-    let tex = d.frame_texture(w, h).expect("a frame texture");
-    // The video processor where the graphics have one, else the CPU (a runner's basic render driver): the stream's own choice.
-    let mut conv = Converter::new(&d, (w, h), (w, h), 30, !d.video).expect("a converter");
-    let mut readback = Readback::new();
-    let mut enc = Encoder::open(&d, w, h, 30, 1000, false).expect("the inbox software encoder");
-    assert!(!enc.hardware);
-    let mut params = sps::Params::default();
-    if let Some(header) = &enc.sequence_header {
-        params.seed(header);
+    // The same size; and a 1024×768 screen at the software rung a stream starts on there (960×720 at 15 fps), scaled.
+    for (src, (w, h), fps, kbps) in [((640u32, 360u32), (640u32, 360u32), 30u32, 1000u32), ((1024, 768), (960, 720), 15, 1500)] {
+        let tex = d.frame_texture(src.0, src.1).expect("a frame texture");
+        // The video processor where the graphics have one, else the CPU: the stream's own choice.
+        let mut conv = Converter::new(&d, src, (w, h), fps, !d.video).expect("a converter");
+        let mut readback = Readback::new();
+        let mut enc = Encoder::open(&d, w, h, fps, kbps, false).expect("the inbox software encoder");
+        assert!(!enc.hardware);
+        let mut params = sps::Params::default();
+        if let Some(header) = &enc.sequence_header {
+            params.seed(header);
+        }
+        let mut out = Vec::new();
+        for i in 0..40u32 {
+            let px = pattern(src.0, src.1, i);
+            unsafe { d.ctx.UpdateSubresource(&tex, 0, None, px.as_ptr() as *const _, src.0 * 4, 0) };
+            let nv12 = conv.convert(&d, &mut readback, false, &tex).expect("converted");
+            let time = i64::from(i) * 10_000_000 / i64::from(fps);
+            assert!(enc.encode(&d, &nv12, time, i == 0).unwrap_or_else(|e| panic!("{w}x{h}: encoded: {e}")), "{w}x{h}: the software encoder takes every frame");
+            out.extend(enc.poll().expect("polled"));
+        }
+        for _ in 0..10 {
+            out.extend(enc.poll().expect("polled"));
+        }
+        assert!(out.len() >= 30, "{w}x{h}: {} frames out of 40", out.len());
+        let fixed: Vec<Vec<u8>> = out.iter().filter_map(|e| params.fix(&e.data)).collect();
+        assert_eq!(fixed.len(), out.len(), "{w}x{h}: every access unit is usable");
+        assert!(sps::is_keyframe(&fixed[0]), "{w}x{h}: the first is a keyframe");
+        let first_sps = nal_units(&fixed[0]).into_iter().find(|n| nal_type(n) == NAL_SPS).expect("a keyframe carries its SPS");
+        let parsed = sps::parse_sps(first_sps).expect("an SPS that reads");
+        assert_eq!((parsed.width, parsed.height, parsed.max_num_reorder_frames), (w, h, Some(0)));
+        // A long GOP: no keyframe nobody asked for.
+        assert!(fixed[1..].iter().all(|au| !sps::is_keyframe(au)), "{w}x{h}: keyframes only when asked");
     }
-    let mut out = Vec::new();
-    for i in 0..40u32 {
-        let px = pattern(w, h, i);
-        unsafe { d.ctx.UpdateSubresource(&tex, 0, None, px.as_ptr() as *const _, w * 4, 0) };
-        let nv12 = conv.convert(&d, &mut readback, false, &tex).expect("converted");
-        assert!(enc.encode(&d, &nv12, i64::from(i) * 333_333, i == 0).expect("encoded"), "the software encoder takes every frame");
-        out.extend(enc.poll().expect("polled"));
-    }
-    for _ in 0..10 {
-        out.extend(enc.poll().expect("polled"));
-    }
-    assert!(out.len() >= 30, "{} frames out of 40", out.len());
-    let fixed: Vec<Vec<u8>> = out.iter().filter_map(|e| params.fix(&e.data)).collect();
-    assert_eq!(fixed.len(), out.len(), "every access unit is usable");
-    assert!(sps::is_keyframe(&fixed[0]), "the first is a keyframe");
-    let first_sps = nal_units(&fixed[0]).into_iter().find(|n| nal_type(n) == NAL_SPS).expect("a keyframe carries its SPS");
-    let parsed = sps::parse_sps(first_sps).expect("an SPS that reads");
-    assert_eq!((parsed.width, parsed.height, parsed.max_num_reorder_frames), (w, h, Some(0)));
-    // A long GOP: no keyframe nobody asked for.
-    assert!(fixed[1..].iter().all(|au| !sps::is_keyframe(au)), "keyframes only when asked");
 }
