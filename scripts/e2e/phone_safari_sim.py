@@ -470,7 +470,7 @@ def tour(d, ph, missed):
 
 def tour_vietnamese(ph_factory, udid, url, missed):
     """The simulator in Vietnamese (its language, which Safari reports to the page), the page opened again and unlocked: the inbox and
-    settings in Vietnamese. The simulator's own language is restored after, with a restart as for the change."""
+    settings in Vietnamese. The simulator's own language is restored after."""
     before = simctl("spawn", udid, "defaults", "read", "-g", "AppleLanguages", check_rc=False)
     langs = [x.strip().strip('",') for x in before.strip().strip("()").split("\n") if x.strip().strip('",')] or ["en"]
     locale = simctl("spawn", udid, "defaults", "read", "-g", "AppleLocale", check_rc=False).strip() or "en_US"
@@ -478,10 +478,9 @@ def tour_vietnamese(ph_factory, udid, url, missed):
     def restart(languages, loc):
         simctl("spawn", udid, "defaults", "write", "-g", "AppleLanguages", "-array", *languages)
         simctl("spawn", udid, "defaults", "write", "-g", "AppleLocale", loc)
-        simctl("shutdown", udid, check_rc=False)
-        simctl("boot", udid)
-        simctl("bootstatus", udid, "-b")
-        face_id(udid, "enroll")
+        # Safari reads the languages when it starts: it is quit, and the next WebDriver session opens it again.
+        simctl("terminate", udid, "com.apple.mobilesafari", check_rc=False)
+        time.sleep(2)
 
     ph = None
     try:
@@ -502,6 +501,7 @@ def tour_vietnamese(ph_factory, udid, url, missed):
     except Exception as e:  # noqa: BLE001
         missed.append(f"vietnamese: {str(e).splitlines()[0][:200]}")
         print(f"  MISSED vietnamese: {e}", flush=True)
+        ph and ph.shot("vi-stuck")
     finally:
         if ph is not None:
             try:
