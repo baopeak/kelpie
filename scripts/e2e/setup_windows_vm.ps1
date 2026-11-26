@@ -120,7 +120,15 @@ function WebView2Version {
 function Msvc {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) { return $null }
-    & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    try {
+        & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    } catch {
+        # An install cut short (the machine stopped mid-way) can leave the installer's files unreadable; the bootstrapper puts a
+        # working installer back only once the broken one is gone.
+        Write-Host "vswhere does not run ($_): removing the broken Visual Studio Installer"
+        Remove-Item -Recurse -Force (Split-Path $vswhere)
+        $null
+    }
 }
 
 try {
