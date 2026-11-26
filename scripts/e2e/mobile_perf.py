@@ -84,7 +84,17 @@ WARM_UP = "--warm-up" in sys.argv
 CALM = {"KELPIE_LOAD_FORCE": "L0:calm"}
 
 ps.isolate("phone-perf")
-PORT = 49000 + os.getpid() % 1000
+
+def free_port():
+    """A port the system hands out itself: a fixed range can fall in Windows' excluded port ranges (bind fails with 10013)."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+PORT = free_port()
 BASE = f"http://127.0.0.1:{PORT}/"
 work = tempfile.mkdtemp(prefix="kelpie-phone-perf-cwd-")
 PRINTER = os.path.join(work, "printer.py")

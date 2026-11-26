@@ -1,0 +1,255 @@
+name: phone-e2e-all
+
+# Every phone end-to-end script on a hosted Windows runner, each in a step of its own that may fail without stopping the
+# others. Outputs go to e2e-out (uploaded); the last job prints a table of what passed. Started by hand (Actions → phone-e2e-all → Run
+# workflow, or `gh workflow run phone-e2e-all.yml --ref <branch>`): about 40 minutes of two Windows runners.
+on:
+  workflow_dispatch:
+
+env:
+  KELPIE_REQUIRE_PHONE: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The daemon-only scripts: no app, phones are Python clients or a headless browser.
+  daemon:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python packages and Playwright's Chromium
+        run: |
+          python -m pip install websockets cryptography psutil Pillow playwright
+          python -m playwright install chromium
+      - name: Phone client
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:phone
+      - name: Debug daemon
+        run: cargo build -p kelpied
+      - name: Release daemon (for the perf gate)
+        run: cargo build --release -p kelpied
+      - name: Relay, self-hosted bundle
+        working-directory: relay
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:selfhost
+      - name: Edge's driver
+        shell: pwsh
+        run: |
+          $edge = Join-Path $env:EdgeWebDriver 'msedgedriver.exe'
+          & $edge --version
+          try { (Get-Item 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe').VersionInfo.ProductVersion } catch { 'no Edge version' }
+          "EDGE_DRIVER=$edge" >> $env:GITHUB_ENV
+      - name: link_noise (the phone's kelpie-link against the Rust vectors)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: bash .github/phone-e2e/run-one.sh link_noise python -X utf8 scripts/e2e/link_noise.py
+      - name: mobile_protocol
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash .github/phone-e2e/run-one.sh mobile_protocol python -X utf8 scripts/e2e/mobile_protocol.py target/debug/kelpied.exe
+      - name: mobile_resilience (full)
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash .github/phone-e2e/run-one.sh mobile_resilience python -X utf8 scripts/e2e/mobile_resilience.py target/debug/kelpied.exe
+      - name: mobile_relay
+        continue-on-error: true
+        timeout-minutes: 20
+        run: bash .github/phone-e2e/run-one.sh mobile_relay python -X utf8 scripts/e2e/mobile_relay.py target/debug/kelpied.exe
+      - name: mobile_hosted (no app)
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash .github/phone-e2e/run-one.sh mobile_hosted python -X utf8 scripts/e2e/mobile_hosted.py target/debug/kelpied.exe --edgedriver "$EDGE_DRIVER"
+      - name: phone_tour (screenshots, no assertions)
+        continue-on-error: true
+        timeout-minutes: 25
+        run: bash .github/phone-e2e/run-one.sh phone_tour python -X utf8 scripts/e2e/phone_tour.py target/debug/kelpied.exe e2e-out/phone-tour
+      - name: mobile_perf (release daemon, paired by the debug one)
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash .github/phone-e2e/run-one.sh mobile_perf python -X utf8 scripts/e2e/mobile_perf.py target/release/kelpied.exe --pair-with target/debug/kelpied.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phone-e2e-daemon
+          path: e2e-out/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The scripts that drive the app through tauri-driver: the desktop side of pairing and the remote screen.
+  gui:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python packages and Playwright's Chromium and Firefox
+        run: |
+          python -m pip install websockets cryptography psutil Pillow playwright
+          python -m playwright install chromium firefox
+      - name: Phone client
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:phone
+      - name: Debug daemon and screen helper
+        run: cargo build -p kelpied -p kelpie-screen
+      - name: Debug app with its frontend embedded
+        working-directory: app
+        run: pnpm tauri build --debug --no-bundle
+      - name: Relay, self-hosted bundle
+        working-directory: relay
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:selfhost
+      - name: tauri-driver
+        run: cargo install tauri-driver --locked
+      - name: WebView2 runtime, updated to the newest
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          "before: $((Get-ItemProperty $key).pv)"
+          $setup = Join-Path $env:RUNNER_TEMP 'wv2-setup.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2124701' -OutFile $setup
+          Start-Process $setup -ArgumentList '/silent','/install' -Wait
+          "after: $((Get-ItemProperty $key).pv)"
+          Get-ChildItem 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application' | Select-Object -ExpandProperty Name
+      - name: Drivers (Edge's, and one matching the WebView2 runtime exactly)
+        shell: pwsh
+        run: |
+          $edge = Join-Path $env:EdgeWebDriver 'msedgedriver.exe'
+          & $edge --version
+          $wv = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}').pv
+          "WebView2 runtime $wv"
+          $dir = Join-Path $env:RUNNER_TEMP 'wv2-driver'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          try {
+            Invoke-WebRequest "https://msedgedriver.microsoft.com/$wv/edgedriver_win64.zip" -OutFile (Join-Path $dir 'd.zip')
+            Expand-Archive (Join-Path $dir 'd.zip') $dir -Force
+            & (Join-Path $dir 'msedgedriver.exe') --version
+          } catch { "no driver for WebView2 $wv : $_" }
+          "EDGE_DRIVER=$edge" >> $env:GITHUB_ENV
+          "WV2_DRIVER=$(Join-Path $dir 'msedgedriver.exe')" >> $env:GITHUB_ENV
+      # The screen steps run as a standard local user (E2E_DEELEVATE, run-deelevated.py): the app does not share the screen while it runs as
+      # administrator, and with UAC off every process of the runner's user is elevated. That user writes the workspace and the runner's
+      # temp folder, and reads the tools installed in the runner's profile and tool cache.
+      - name: A standard user for the screen scripts
+        shell: pwsh
+        run: |
+          "EnableLUA: $((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System').EnableLUA)"
+          Get-CimInstance Win32_VideoController | ForEach-Object { "display adapter: $($_.Name), driver $($_.DriverVersion), $($_.CurrentHorizontalResolution)x$($_.CurrentVerticalResolution)" }
+          $user = 'kelpie-e2e'
+          $pw = 'Kp1!' + [guid]::NewGuid().ToString('N')
+          "::add-mask::$pw"
+          New-LocalUser -Name $user -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          try { Add-LocalGroupMember -Group Users -Member $user } catch { "Users: $_" }
+          foreach ($dir in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP)) { icacls $dir /grant "$($user):(OI)(CI)F" /C /Q | Out-Null }
+          $browsers = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+          $read = @($browsers, (Join-Path $env:USERPROFILE '.cargo\bin'), $env:pythonLocation, (Split-Path (Get-Command node).Source))
+          foreach ($dir in $read) { icacls $dir /grant "$($user):(OI)(CI)RX" /T /C /Q | Out-Null; "readable: $dir" }
+          "PLAYWRIGHT_BROWSERS_PATH=$browsers" >> $env:GITHUB_ENV
+          "E2E_USER=$user" >> $env:GITHUB_ENV
+          "E2E_PASS=$pw" >> $env:GITHUB_ENV
+      - name: mobile (desktop and phone, tauri-driver started here)
+        continue-on-error: true
+        timeout-minutes: 40
+        run: python .github/phone-e2e/run-deelevated.py mobile 2300 "C:\\Program Files\\Git\\bin\\bash.exe" .github/phone-e2e/mobile-step.sh
+      - name: mobile_hosted --gui
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          KELPIE_E2E_SHOTS: e2e-out/mobile-hosted-shots
+        run: python .github/phone-e2e/run-deelevated.py mobile_hosted_gui 1740 python -X utf8 scripts/e2e/mobile_hosted.py target/debug/kelpied.exe --edgedriver "$EDGE_DRIVER" --native-driver "$MSEDGEDRIVER" --gui target/debug/kelpie.exe --tauri-driver "$TAURI_DRIVER"
+      - name: takeover (a browser pane taken over from the phone)
+        continue-on-error: true
+        timeout-minutes: 25
+        run: python .github/phone-e2e/run-deelevated.py takeover 1440 python -X utf8 scripts/e2e/takeover.py e2e-work/takeover target/debug/kelpie.exe
+      - name: screen
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          E2E_DEELEVATE: "1"
+        run: python .github/phone-e2e/run-deelevated.py screen 1440 python -X utf8 scripts/e2e/screen.py e2e-work/screen target/debug/kelpie.exe
+      - name: screen_phone (the phone page as an iPhone in Chromium)
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          E2E_DEELEVATE: "1"
+        run: python .github/phone-e2e/run-deelevated.py screen_phone 1740 python -X utf8 scripts/e2e/screen_phone.py e2e-work/screen-phone target/debug/kelpie.exe --json e2e-out/screen_phone.json
+      - name: screen_relay
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          E2E_DEELEVATE: "1"
+        run: python .github/phone-e2e/run-deelevated.py screen_relay 1440 python -X utf8 scripts/e2e/screen_relay.py e2e-work/screen-relay target/debug/kelpie.exe
+      - name: screen_rtc (Chromium and Firefox peers)
+        continue-on-error: true
+        timeout-minutes: 25
+        env:
+          E2E_DEELEVATE: "1"
+        run: python .github/phone-e2e/run-deelevated.py screen_rtc 1440 python -X utf8 scripts/e2e/screen_rtc.py e2e-work/screen-rtc target/debug/kelpie.exe
+      - name: screen_net (20 s per condition)
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          E2E_DEELEVATE: "1"
+        run: python .github/phone-e2e/run-deelevated.py screen_net 1740 python -X utf8 scripts/e2e/screen_net.py e2e-work/screen-net target/debug/kelpie.exe --seconds 20 --label ci
+      - name: Keep the scripts' own results
+        if: always()
+        run: |
+          set +e
+          mkdir -p e2e-out/work
+          cd e2e-work && /usr/bin/find . \( -name '*.png' -o -name '*.json' -o -name '*.md' -o -name '*.log' \) -size -5M -exec cp --parents {} ../e2e-out/work/ \;
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phone-e2e-gui
+          path: e2e-out/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  summary:
+    needs: [daemon, gui]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+      - name: Table
+        run: python3 .github/phone-e2e/summary.py results/phone-e2e-daemon results/phone-e2e-gui
