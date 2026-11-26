@@ -109,9 +109,6 @@ jobs:
           # No GPU under Xvfb: WebKitGTK's DMA-BUF renderer and compositing can leave the window blank there.
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
           WEBKIT_DISABLE_COMPOSITING_MODE: "1"
-          # WebKit's process, inspector (the WebDriver's link to the app) and IPC logs land in the driver log: a run that
-          # loses its WebDriver connection then says which side went away.
-          WEBKIT_DEBUG: "Process,Inspector,IPC"
         run: |
           set -euo pipefail
           # A crash of the app, its web process or the driver leaves a core for the step after a failure.
