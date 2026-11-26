@@ -109,8 +109,15 @@ jobs:
           # No GPU under Xvfb: WebKitGTK's DMA-BUF renderer and compositing can leave the window blank there.
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
           WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+          # WebKit's process, inspector (the WebDriver's link to the app) and IPC logs land in the driver log: a run that
+          # loses its WebDriver connection then says which side went away.
+          WEBKIT_DEBUG: "Process,Inspector,IPC"
         run: |
           set -euo pipefail
+          # A crash of the app, its web process or the driver leaves a core for the step after a failure.
+          ulimit -c unlimited
+          sudo mkdir -p /var/tmp/cores && sudo chmod 1777 /var/tmp/cores
+          sudo sysctl -q -w kernel.core_pattern=/var/tmp/cores/core.%e.%p
           cargo install tauri-driver --locked
           python -m pip install psutil
           mkdir -p smoke
@@ -121,6 +128,20 @@ jobs:
           dbus-run-session -- xvfb-run -a -s "-screen 0 1600x1000x24" \
             python scripts/e2e/boot_smoke.py smoke target/release/kelpie \
               --out smoke/linux-smoke.json "${baseline[@]}"
+      - name: Linux smoke crash evidence (on failure)
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p smoke
+          sudo dmesg -T | tail -n 300 > smoke/dmesg.txt || true
+          ls -la /var/tmp/cores > smoke/cores.txt 2>&1 || true
+          if compgen -G "/var/tmp/cores/core.*" > /dev/null; then
+            sudo apt-get install -y --no-install-recommends gdb > /dev/null
+            for c in /var/tmp/cores/core.*; do
+              exe=$(sudo file "$c" | sed -n "s/.*execfn: '\([^']*\)'.*/\1/p")
+              sudo gdb -batch -nx -ex "info threads" -ex "thread apply all bt" "$exe" "$c" > "smoke/bt-$(basename "$c").txt" 2>&1 || true
+            done
+          fi
       # Not gating yet: it shows how often a boot check through the window helper passes on this runner, where a WebDriver session
       # with the app could not be opened (0 of 10 boot smokes in the trial of 2026-11-22).
       - name: Windows boot check through the window helper (isolated daemon, release app)

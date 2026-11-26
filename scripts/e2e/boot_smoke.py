@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -390,6 +391,34 @@ def teardown(run):
     shutil.rmtree(WORK, ignore_errors=True)
 
 
+def snapshot(run):
+    """When the scenario breaks, which of the processes it depends on are still there, written beside the driver log:
+    a dropped WebDriver connection reads the same whether the native driver, the app or its web process went away."""
+    lines = [time.strftime("%H:%M:%S")]
+    for name, p in procs.items():
+        lines.append(f"{name} (pid {p.pid}): {'running' if p.poll() is None else f'exited {p.returncode}'}")
+    if psutil:
+        watched = ("tauri-driver", "WebKitWebDriver", "WebKitWebProcess", "WebKitNetworkProcess", "WebKitGPUProcess", "kelpie", "kelpied")
+        for p in psutil.process_iter(["pid", "ppid", "name", "status", "exe"]):
+            exe = p.info["exe"] or ""
+            if p.info["name"] in watched or os.path.basename(exe) in watched:
+                lines.append(f"  pid {p.info['pid']} ppid {p.info['ppid']} {p.info['name']} {p.info['status']} {exe}")
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{DRIVER_PORT}/status", timeout=10) as r:
+            lines.append("driver /status: " + r.read().decode(errors="replace")[:300])
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"driver /status: {e!r}")
+    if run is not None:
+        try:
+            lines.append("session still answers: " + repr(run.d.js("return document.readyState")))
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"session still answers: {e!r}")
+    text = "\n".join(lines)
+    print(text, flush=True)
+    with open(os.path.join(scratch, "boot-smoke-procs.log"), "a", encoding="utf-8") as f:
+        f.write(text + "\n")
+
+
 def main():
     os.makedirs(PROJ)
     shots = os.path.join(scratch, "shots")
@@ -408,6 +437,7 @@ def main():
         raise
     except Exception:
         traceback.print_exc()
+        snapshot(run)
         if run is None:
             raise SystemExit("could not start the app")
         run.check("scenario ran to completion", False)
