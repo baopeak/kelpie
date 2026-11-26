@@ -20,7 +20,7 @@
         "en": "A shell waits at a menu; on the phone the session shows in the inbox, one tap on 1 answers it, and the desktop pane carries on.",
         "vi": "Một shell đang chờ ở một menu; trên điện thoại phiên đó hiện trong hộp thư, một chạm vào số 1 là trả lời xong, và khung trên máy tính chạy tiếp."
       },
-      "how": "scripts/e2e/readme_phone_win.py --what answer: ffmpeg gdigrab of the app's window beside Playwright's video of the phone page, joined with ffmpeg hstack (10 s, 1628x844, H.264, no sound, 90 KB). The menu is a small demo program, not an agent.",
+      "how": "scripts/e2e/readme_phone_win.py --what answer: ffmpeg gdigrab of the app's window beside Playwright's video of the phone page, joined with ffmpeg hstack (10 s, 1628x844, H.264, no sound, 99 KB). The menu is a small demo program, not an agent.",
       "agent": "simulated",
       "hosting": "GitHub attachment (not in the repository)"
     },
