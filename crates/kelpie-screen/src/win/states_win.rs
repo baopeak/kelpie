@@ -98,7 +98,7 @@ impl Looker {
             Some((h, pid)) if !exists(h, pid) => (TargetSeen::Closed, false),
             Some((h, _)) => (if minimized(h) { TargetSeen::Minimized } else { TargetSeen::Shown }, elevated(h, self.mine)),
         };
-        Observed { desktop, session_locked, foreground_elevated, target_elevated, target }
+        Observed { desktop, session_locked, foreground_elevated, target_elevated, target, secure_input: false }
     }
 }
 

@@ -122,7 +122,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// same; and merging from the phone: `pr_challenge {project, method}` (control; the daemon reads the pull request itself and answers `{nonce, expiry, command, repo, number, head, method, title}`) and `pr_merge {…, nonce,
 /// recheck}` (control, with a passkey assertion over `merge:<nonce>`, the command and the expiry; answered `{result: merged}`, `{result: pending, state}` when GitHub only queued it, or `merge_refused`), and a
 /// `pr_merge` line in the phone audit log. An older daemon has none of it, so the phone shows a pull request's line and Merge only at 49.
-pub const API_LEVEL: u32 = 49;
+/// 50: the screen on a Mac: the `screens` and `sc_start` answers carry `os` (`mac` | `windows`), so the phone shows ⌘ ⌥ ⌃ ⇧ and the Mac's
+/// texts; a start or a text the Mac has not allowed is refused `no_screen_permission` / `no_accessibility` with a plain reason; and the
+/// `secure_input` state (a password field holds the Mac's keyboard). An older daemon says no `os`, which the phone takes as Windows.
+pub const API_LEVEL: u32 = 50;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

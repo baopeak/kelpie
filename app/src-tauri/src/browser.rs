@@ -350,7 +350,12 @@ pub async fn browser_open(app: AppHandle, state: tauri::State<'_, Browsers>, lab
             }
             NewWindowResponse::Deny
         });
-    let wv = match window.add_child(builder, LogicalPosition::new(rect.x, rect.y), LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0))) {
+    #[cfg(all(windows, debug_assertions))]
+    let builder = match crate::test_browser_args(None) {
+        Some(args) => builder.additional_browser_args(&args),
+        None => builder,
+    };
+    let wv = match window.add_child(builder,LogicalPosition::new(rect.x, rect.y), LogicalSize::new(rect.width.max(1.0), rect.height.max(1.0))) {
         Ok(wv) => wv,
         Err(e) => {
             state.forget(&label);

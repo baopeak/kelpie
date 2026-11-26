@@ -2,7 +2,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { locale } from "./i18n";
-import type { AttachReply, BranchInfo, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, RemoteEntry, RemoteMeta, SessionInfo, SessionUsage, UsageReport, UsageTotals, XferChoice, XferJob, XferStart } from "./types";
+import type { AttachReply, BranchInfo, MacPermissionId, MacPermissions, Worktree, DirEntry, FileContent, GitStatus, HistoryItem, MemoryStats, RemoteEntry, RemoteMeta, SessionInfo, SessionUsage, UsageReport, UsageTotals, XferChoice, XferJob, XferStart } from "./types";
 
 export const daemon = <T = unknown>(method: string, params: object = {}) =>
   invoke<T>("daemon_call", { method, params });
@@ -26,6 +26,11 @@ export const owedOpen = (entry: { project: string; kind: string; what: string; c
 export const owedClose = (id: string, evidence: string) => daemon<unknown>("owed.close", { id, evidence });
 /** The daemon's policy. The sub-session part: `sub_sessions` off|ask|allow, `sub_max` (0: automatic), read-only `sub_auto_max`. The browser-pane
  *  part: `browser_agents` off|read|act, `browser_eval`, `browser_sites` (origins). */
+/** What a Mac allows Kelpie for the screen; null on any other computer, and on a Mac that cannot share its screen. */
+export const screenPermissions = () => invoke<MacPermissions | null>("screen_permissions");
+/** Opens System Settings where the person allows Kelpie `what`, asking macOS first. */
+export const screenOpenPermission = (what: MacPermissionId) => invoke<void>("screen_open_permission", { what });
+
 export const policyGet = () => daemon<unknown>("daemon.policy");
 export const subPolicySet = (patch: { sub_sessions?: "off" | "ask" | "allow"; sub_max?: number }) => daemon<unknown>("daemon.set_policy", patch);
 export const browserPolicySet = (patch: { browser_agents?: "off" | "read" | "act"; browser_eval?: boolean; browser_sites?: string[] }) => daemon<unknown>("daemon.set_policy", patch);

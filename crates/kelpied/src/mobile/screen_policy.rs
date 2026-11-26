@@ -251,6 +251,27 @@ fn hosted_block(opts: &ScreenOptions, lock_on: bool, passkey: bool) -> Option<Re
     }
 }
 
+/// What the phone says when it asked for a way this computer does not have, or when Automatic finds only such ways turned on.
+pub const NO_PEER_HERE: &str = "This computer cannot send its screen peer to peer or through TURN (Windows only for now). Turn on the relay WebSocket in Kelpie → Settings → Mobile → Advanced.";
+
+/// Whether this computer sends its screen peer to peer, straight or through the relay's TURN (`screen::rtc`): Windows only for now.
+pub const PEER_HERE: bool = cfg!(windows);
+
+/// The ways as this computer has them: one that cannot send its screen peer to peer (`peer_here` false) has neither peer to peer nor TURN,
+/// whatever their switches say, so Automatic never picks them and no rule counts them as a way through. Unchanged where it can.
+pub fn usable(opts: &ScreenOptions, peer_here: bool) -> ScreenOptions {
+    let mut o = opts.clone();
+    o.methods.p2p &= peer_here;
+    o.methods.relay_turn &= peer_here;
+    o
+}
+
+/// Whether a start over `via`, refused with the ways as this computer has them, was refused only because it has no peer to peer: with the
+/// switches as they are, no way would have been off.
+pub fn no_peer_here(f: &Facts, opts: &ScreenOptions, via: Via, peer_here: bool) -> bool {
+    !peer_here && may_start(f, &usable(opts, false), via, Uv::Fresh) == Err(Reason::MethodOff) && may_start(f, opts, via, Uv::Fresh) != Err(Reason::MethodOff)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +395,74 @@ mod tests {
             }
         }
         assert!(rows > 10_000, "{rows}");
+    }
+
+    /// On a computer without peer to peer (a Mac), every combination of the grid: Automatic never picks peer to peer or TURN; what still
+    /// starts starts the way it would where they exist; a start that went peer to peer or TURN there is refused here, and said to be for want
+    /// of them. Where they exist the ways are untouched.
+    #[test]
+    fn a_computer_without_peer_to_peer_never_picks_it() {
+        let mut rows = 0;
+        for native in [false, true] {
+            for hosted in [false, true] {
+                for secure_origin in [false, true] {
+                    for relay in [false, true] {
+                        for remote in [false, true] {
+                            for (lock_on, passkey, window) in [(true, true, true), (false, true, true), (true, false, true), (true, true, false)] {
+                                for record in [Permission::Write, Permission::Control] {
+                                    for (relay_ws, tailscale, p2p, relay_turn) in [(true, true, true, false), (false, true, true, false), (true, false, true, false), (true, true, false, false), (false, true, false, false), (false, true, false, true), (true, true, true, true), (false, false, true, true)] {
+                                        for uv in [Uv::Fresh, Uv::Missing] {
+                                            for via in [Via::Auto, Via::Tailscale, Via::Relay, Via::P2p, Via::Turn] {
+                                                if native && hosted {
+                                                    continue;
+                                                }
+                                                rows += 1;
+                                                let f = Facts { record, native, secure_origin, hosted, lock_on, passkey, window, relay };
+                                                let o = opts_all(remote, relay_ws, tailscale, p2p, relay_turn);
+                                                assert_eq!(usable(&o, true), o);
+                                                assert!(!no_peer_here(&f, &o, via, true));
+                                                let windows = may_start(&f, &o, via, uv);
+                                                let here = may_start(&f, &usable(&o, false), via, uv);
+                                                let ctx = format!("{f:?} remote {remote} relay_ws {relay_ws} tailscale {tailscale} p2p {p2p} turn {relay_turn} {via:?} {uv:?}");
+                                                assert!(!matches!(here, Ok(Via::P2p | Via::Turn)), "{ctx}");
+                                                if let Ok(way) = here {
+                                                    assert_eq!(windows, Ok(way), "{ctx}");
+                                                }
+                                                if matches!(windows, Ok(Via::Relay | Via::Tailscale)) {
+                                                    assert_eq!(here, windows, "{ctx}");
+                                                }
+                                                if matches!(windows, Ok(Via::P2p | Via::Turn)) {
+                                                    assert_eq!(here, Err(Reason::MethodOff), "{ctx}");
+                                                    assert!(no_peer_here(&f, &o, via, false), "{ctx}");
+                                                }
+                                                if here == Err(Reason::MethodOff) && windows != Err(Reason::MethodOff) {
+                                                    assert!(no_peer_here(&f, &o, via, false), "{ctx}");
+                                                }
+                                                if windows == Err(Reason::MethodOff) {
+                                                    assert!(!no_peer_here(&f, &o, via, false), "a way the person turned off is said as such: {ctx}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(rows > 5_000, "{rows}");
+        // Through the relay, its WebSocket on and peer to peer on too: Automatic goes by the WebSocket; with the WebSocket off, nothing is left,
+        // and that is said as this computer's lack of peer to peer.
+        let f = Facts { record: Permission::Control, native: false, secure_origin: true, hosted: true, lock_on: true, passkey: true, window: true, relay: true };
+        let both = opts_all(true, true, true, true, true);
+        assert_eq!(may_start(&f, &both, Via::Auto, Uv::Fresh), Ok(Via::Relay), "the WebSocket first wherever it is on, as before");
+        assert_eq!(may_start(&f, &usable(&both, false), Via::Auto, Uv::Fresh), Ok(Via::Relay));
+        let p2p_only = opts_p2p(true, false, true, true);
+        assert_eq!(may_start(&f, &usable(&p2p_only, false), Via::Auto, Uv::Fresh), Err(Reason::MethodOff));
+        assert!(no_peer_here(&f, &p2p_only, Via::Auto, false));
+        assert!(no_peer_here(&f, &p2p_only, Via::P2p, false));
+        assert!(!no_peer_here(&f, &opts_p2p(true, false, true, false), Via::Auto, false), "every way turned off: that is what it says");
     }
 
     /// A screen going one way ends when that way is turned off; the switch for the other way leaves it alone.

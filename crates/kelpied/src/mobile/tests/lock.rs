@@ -1327,21 +1327,34 @@ async fn the_screen_through_the_relay_needs_the_switch_and_a_fresh_face_id_used_
     assert_eq!(start(Via::Auto, true, &good), Ok((Via::Relay, Some(store::RELAY_WS_KBPS))), "held to the relay WebSocket's rate");
     assert_eq!(start(Via::Auto, true, &good), Err("needs_face_id"), "used once");
     assert_eq!(start(Via::Tailscale, true, &good), Err("no_direct_link"));
-    // Peer to peer through the relay's connection: the same Face ID; over a direct link, none asked.
-    assert_eq!(start(Via::P2p, true, &Value::Null), Err("needs_face_id"));
-    assert_eq!(start(Via::P2p, true, &proof(&mut a, "screen:m:1", "relay", soon() + 1)), Ok((Via::P2p, Some(store::RELAY_WS_KBPS))), "the rate it is held to if it falls back to the relay WebSocket");
-    assert_eq!(start(Via::P2p, false, &Value::Null), Ok((Via::P2p, None)));
-    assert!(m.screen_held("phone", true, true, Via::P2p));
-    // Automatic with the relay WebSocket off goes peer to peer only, and only for a phone that says it can.
     let ws_on = m.screen_options();
-    m.set_screen(store::ScreenOptions { methods: store::ScreenMethods { relay_ws: false, ..ws_on.methods }, ..ws_on.clone() }).unwrap();
     let auto = |can: bool, proof: &Value| m.screen_may_start("phone", true, true, Via::Auto, can, "m:1", proof).map(|(way, _)| way).map_err(|(code, _)| code);
-    assert_eq!(auto(false, &Value::Null), Err("method_off"), "an older page or a browser without WebRTC is told, not left waiting");
-    assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 2)), Ok(Via::P2p));
-    // With peer to peer off too, Automatic goes through TURN only, under the same guard.
-    m.set_screen(store::ScreenOptions { methods: store::ScreenMethods { relay_ws: false, p2p: false, ..ws_on.methods }, ..ws_on.clone() }).unwrap();
-    assert_eq!(auto(false, &Value::Null), Err("method_off"));
-    assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 3)), Ok(Via::Turn));
+    if crate::mobile::screen_policy::PEER_HERE {
+        // Peer to peer through the relay's connection: the same Face ID; over a direct link, none asked.
+        assert_eq!(start(Via::P2p, true, &Value::Null), Err("needs_face_id"));
+        assert_eq!(start(Via::P2p, true, &proof(&mut a, "screen:m:1", "relay", soon() + 1)), Ok((Via::P2p, Some(store::RELAY_WS_KBPS))), "the rate it is held to if it falls back to the relay WebSocket");
+        assert_eq!(start(Via::P2p, false, &Value::Null), Ok((Via::P2p, None)));
+        assert!(m.screen_held("phone", true, true, Via::P2p));
+        // Automatic with the relay WebSocket off goes peer to peer only, and only for a phone that says it can.
+        m.set_screen(store::ScreenOptions { methods: store::ScreenMethods { relay_ws: false, ..ws_on.methods }, ..ws_on.clone() }).unwrap();
+        assert_eq!(auto(false, &Value::Null), Err("method_off"), "an older page or a browser without WebRTC is told, not left waiting");
+        assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 2)), Ok(Via::P2p));
+        // With peer to peer off too, Automatic goes through TURN only, under the same guard.
+        m.set_screen(store::ScreenOptions { methods: store::ScreenMethods { relay_ws: false, p2p: false, ..ws_on.methods }, ..ws_on.clone() }).unwrap();
+        assert_eq!(auto(false, &Value::Null), Err("method_off"));
+        assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 3)), Ok(Via::Turn));
+    } else {
+        // A computer without peer to peer (a Mac) says so, whatever the switches, and Automatic never waits on a way it does not have.
+        assert_eq!(start(Via::P2p, true, &Value::Null), Err("no_p2p_here"));
+        assert_eq!(start(Via::P2p, false, &Value::Null), Err("no_p2p_here"));
+        assert_eq!(start(Via::Turn, true, &Value::Null), Err("no_p2p_here"));
+        assert!(!m.screen_held("phone", true, true, Via::P2p));
+        assert_eq!(m.screen_way("phone", true, true, Via::P2p).map_err(|(code, _)| code), Err("no_p2p_here"));
+        assert_eq!(m.screen_paths("phone", true, true)[0], json!({"id": "auto", "ok": true}), "the relay WebSocket is on");
+        m.set_screen(store::ScreenOptions { methods: store::ScreenMethods { relay_ws: false, ..ws_on.methods }, ..ws_on.clone() }).unwrap();
+        assert_eq!(auto(true, &proof(&mut a, "screen:m:1", "relay", soon() + 2)), Err("no_p2p_here"), "the relay WebSocket off: no way is left here");
+        assert_eq!(m.screen_paths("phone", true, true)[0], json!({"id": "auto", "ok": false, "why": "no_p2p_here"}));
+    }
     m.set_screen(ws_on).unwrap();    // The month's allowance spent: refused before any Face ID is asked for.
     m.count_relay_screen(u64::from(store::RELAY_WS_MONTH_MB) * 1024 * 1024);
     assert!(m.relay_screen_spent());

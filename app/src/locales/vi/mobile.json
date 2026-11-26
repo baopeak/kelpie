@@ -229,10 +229,19 @@
   "Relay (TURN)": "Relay (TURN)",
   "Relay WebSocket": "WebSocket của relay",
   "Not available yet: it comes in a later update.": "Chưa dùng được: cách này sẽ có trong một bản cập nhật sau.",
+  "Windows only for now: this computer sends its screen through Tailscale or the relay WebSocket.": "Hiện cách này chỉ có trên Windows, nên máy tính này gửi màn hình qua Tailscale hoặc qua relay WebSocket.",
   "Straight between the phone and this computer when both networks allow it. Each side then sees the other's network addresses.": "Điện thoại và máy tính này nối thẳng với nhau khi mạng ở cả hai phía cho phép. Khi đó mỗi bên sẽ thấy địa chỉ mạng của bên kia.",
   "Counts only while seeing the screen without Tailscale is on.": "Cách này chỉ có tác dụng khi tính năng xem màn hình không cần Tailscale đang bật.",
   "{used} MB of {total} MB this month": "{used} MB trên tổng {total} MB trong tháng này",
   "May take control (screen only)": "Được điều khiển (chỉ màn hình)",
   "The screen too, with Face ID for every session and once you allow control for this phone; never browser panes, which need the app from this computer.": "Cả màn hình, với Face ID cho mỗi phiên và sau khi bạn cho phép điều khiển với điện thoại này; riêng khung trình duyệt thì không bao giờ, vì khung đó cần ứng dụng từ máy tính này.",
-  "Turning a way on asks you to verify first.": "Bật thêm một cách sẽ yêu cầu bạn xác minh trước."
+  "Turning a way on asks you to verify first.": "Bật thêm một cách sẽ yêu cầu bạn xác minh trước.",
+  "Screen Recording": "Ghi màn hình",
+  "Accessibility": "Trợ năng",
+  "Lets a phone see this Mac's screen.": "Quyền này cho điện thoại xem màn hình của máy Mac này.",
+  "Lets a phone click and type on this Mac. Without it, a phone only sees the screen.": "Quyền này cho điện thoại bấm và gõ trên máy Mac này. Khi chưa có quyền này, điện thoại chỉ xem được màn hình.",
+  "Allowed": "Đã cho phép",
+  "Not allowed": "Chưa cho phép",
+  "Open System Settings": "Mở Cài đặt hệ thống",
+  "After allowing Screen Recording, quit Kelpie and open it again: macOS applies it from the next start.": "Sau khi cho phép Ghi màn hình, bạn hãy thoát Kelpie rồi mở lại, vì macOS chỉ áp dụng quyền này từ lần khởi động sau."
 }

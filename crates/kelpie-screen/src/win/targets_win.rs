@@ -71,6 +71,7 @@ pub fn info(h: HWND) -> WindowInfo {
             title: from_wide(&title[..n.max(0) as usize]),
             class: from_wide(&class[..c.max(0) as usize]),
             exe: exe_name(pid),
+            bundle: String::new(),
             rect: window_rect(h).unwrap_or_default(),
             visible: IsWindowVisible(h).as_bool(),
             cloaked: cloaked != 0,

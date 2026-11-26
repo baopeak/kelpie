@@ -334,9 +334,27 @@ fn end_message(sc: &str, reason: &str) -> String {
 }
 
 /// Why a stream ended, as the phone knows the words.
-const END_REASONS: &[&str] = &["hotkey", "closed", "desktop", "encoder_failed", "app_closed", "replaced", "display_changed", "failed", "device_lost"];
+const END_REASONS: &[&str] = &["hotkey", "closed", "desktop", "encoder_failed", "app_closed", "replaced", "display_changed", "failed", "device_lost", "no_screen_permission"];
 /// What the helper says about the picture, as the phone knows the words.
-const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimized", "elevated", "covered", "covered_dialog", "paused_load", "blocked", "not_front"];
+const STATES: &[&str] = &["live", "locked", "secure_desktop", "closed", "minimized", "elevated", "covered", "covered_dialog", "paused_load", "blocked", "not_front", "secure_input"];
+
+/// Which computer this is, as the phone's key bar and texts need it (⌘ ⌥ ⌃ ⇧ on a Mac): the daemon runs on the computer it shares.
+const HOST_OS: &str = if cfg!(target_os = "macos") { "mac" } else { "windows" };
+
+const NO_SCREEN_PERMISSION: &str = "The Mac has not allowed Kelpie to record the screen. Allow it in System Settings → Privacy & Security → Screen Recording, on the Mac, then quit and open Kelpie again.";
+const NO_ACCESSIBILITY: &str = "Not typed: the Mac has not allowed Kelpie to control it. Allow it in System Settings → Privacy & Security → Accessibility, on the Mac.";
+
+/// A permission the Mac has not given, which the helper names first in its error (`no_screen_permission: …`, `no_accessibility: …`), as a
+/// refusal with its own code and a plain text of the daemon's (never the helper's words).
+fn permission_refusal(e: &str) -> Option<Refused> {
+    if e.starts_with("no_screen_permission") {
+        Some(refused("no_screen_permission", NO_SCREEN_PERMISSION))
+    } else if e.starts_with("no_accessibility") {
+        Some(refused("no_accessibility", NO_ACCESSIBILITY))
+    } else {
+        None
+    }
+}
 
 /// A target as the phone is told it: only known fields, short strings.
 /// The stage timings a stats event may carry (`kelpie_screen::control::Stages`).
@@ -850,7 +868,7 @@ impl Broker {
                 Err(e) if e.to_string().starts_with("covered_dialog") => Err(refused("covered", "Not typed: a dialog of another program is in front of the shared window, and this phone cannot see it. Share the whole monitor to type into this dialog.")),
                 Err(e) if e.to_string().starts_with("not_front_partial") => Err(refused("not_front", "Stopped partway: another window took the focus on the computer. Check what was typed before typing again.")),
                 Err(e) if e.to_string().starts_with("not_front") => Err(refused("not_front", "Not typed: the shared window is not in front on the computer. Tap it, then type again.")),
-                Err(e) => Err(refused("not_sent", format!("Not sent: {e}. Check the screen, then type it again."))),
+                Err(e) => Err(permission_refusal(&e.to_string()).unwrap_or_else(|| refused("not_sent", format!("Not sent: {e}. Check the screen, then type it again.")))),
             }
         })
     }
@@ -860,7 +878,7 @@ impl Broker {
         if d.providers.provider("screen").is_none() {
             return Err(refused("no_app", "Open Kelpie on the computer to see its screen."));
         }
-        let got = d.providers.request_within("screen", "screen.targets", json!({}), START_LIMIT).await.map_err(|e| refused("no_app", format!("{e}")))?;
+        let got = d.providers.request_within("screen", "screen.targets", json!({}), START_LIMIT).await.map_err(|e| permission_refusal(&e.to_string()).unwrap_or_else(|| refused("no_app", format!("{e}"))))?;
         let mut rows: Vec<Value> = got["targets"].as_array().map(|a| a.iter().take(kelpie_screen::targets::MAX_TARGETS).filter_map(target_row).collect()).unwrap_or_default();
         // Through the relay a window is named by its program, never by its title (a document's name): the list is asked for with no Face ID.
         if phone.relay {
@@ -869,7 +887,7 @@ impl Broker {
             }
         }
         let paths = d.mobile.screen_paths(phone.device, phone.browser, phone.relay);
-        Ok(json!({"type": "ack", "result": "ok", "targets": rows, "paths": paths, "relay": d.mobile.relay_label()}))
+        Ok(json!({"type": "ack", "result": "ok", "targets": rows, "paths": paths, "relay": d.mobile.relay_label(), "os": HOST_OS}))
     }
 
     async fn start(&self, d: &Arc<Daemon>, phone: &Phone<'_>, req: &Value) -> Result<Value, Refused> {
@@ -918,7 +936,7 @@ impl Broker {
             Err(e) => {
                 // It may yet start in the app after this gave up on it (a timeout): it is told to let go.
                 d.providers.notify("screen", "screen.stop", json!({"sc": sc, "reason": "failed"}));
-                return Err(refused("no_screen", format!("{e}")));
+                return Err(permission_refusal(&e.to_string()).unwrap_or_else(|| refused("no_screen", format!("{e}"))));
             }
         };
         if !grant.load(Ordering::SeqCst) {
@@ -1017,7 +1035,7 @@ impl Broker {
         let n = |k: &str| started[k].as_u64().unwrap_or(0).min(100_000);
         // `t0`: the computer's clock when the stream started, from which each frame's capture time is counted (the phone works out how old a
         // picture is from it).
-        Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }, "t0": started["t0"].as_u64(), "via": via.word()}))
+        Ok(json!({"type": "ack", "result": "ok", "sc": sc, "kind": kind, "title": title, "w": n("w"), "h": n("h"), "encoder": if started["encoder"] == "sw" { "sw" } else { "hw" }, "t0": started["t0"].as_u64(), "via": via.word(), "os": HOST_OS}))
     }
 
     fn rebind(&self, d: &Daemon, phone: &Phone<'_>, req: &Value) -> Result<(), Refused> {

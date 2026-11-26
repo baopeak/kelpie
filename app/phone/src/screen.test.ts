@@ -21,10 +21,18 @@ import {
   fitView,
   FREEZE_MS,
   Gestures,
+  hostOs,
+  keyLabel,
+  keyOp,
   KEYS,
+  keysFor,
   KICK_EVERY_MS,
   LONG_PRESS_MS,
+  modLabel,
   MODS,
+  modsFor,
+  pickerHint,
+  shortcutHint,
   nalType,
   nalUnits,
   Overlay,
@@ -628,6 +636,39 @@ describe("one screen from the phone", () => {
   it("the key bar has the Windows key, alone and as a modifier", () => {
     expect(KEYS).toContain("Meta");
     expect(MODS).toEqual(["ctrl", "shift", "alt", "meta"]);
+  });
+
+  it("on a Mac the key bar is ⌘ ⌥ ⌃ ⇧, Spotlight takes the Windows key's place, and there is no menu key", () => {
+    expect(modsFor("mac").map((m) => modLabel(m, "mac"))).toEqual(["⌘", "⌥", "⌃", "⇧"]);
+    expect(modsFor("windows").map((m) => modLabel(m, "windows"))).toEqual(["Ctrl", "Shift", "Alt", "Win"]);
+    const mac = keysFor("mac");
+    expect(mac).not.toContain("Meta");
+    expect(mac).not.toContain("ContextMenu");
+    expect(mac).toContain("Spotlight");
+    expect(keyLabel("Spotlight")).toBe("⌘Space");
+    expect(keysFor("windows")).toEqual([...KEYS]);
+    expect(keyOp("Spotlight", []), "Command+Space").toEqual({ k: "key", key: "Space", mods: ["meta"] });
+    expect(keyOp("Spotlight", ["meta", "shift"]), "Command held once").toEqual({ k: "key", key: "Space", mods: ["meta", "shift"] });
+    expect(keyOp("S", ["meta"]), "⌘ then S").toEqual({ k: "key", key: "S", mods: ["meta"] });
+    expect(shortcutHint("mac", (x) => x)).toContain("⌘ then S");
+    expect(shortcutHint("windows", (x) => x)).toContain("Ctrl then S");
+    expect(pickerHint("mac", (x) => x)).toContain("login window");
+  });
+
+  it("learns which computer it is from its list and its start, and says the Mac's own reasons", async () => {
+    expect(hostOs(undefined), "a computer that does not say is Windows").toBe("windows");
+    const r = rig({ targets: { t: "ack", targets: [], os: "mac" }, start: { t: "ack", result: "ok", sc: "sc1", title: "Notes", kind: "window", encoder: "hw", os: "mac" }, text: { t: "error", code: "no_accessibility", message: "Not typed" } });
+    await r.s.openPicker();
+    expect(r.s.state?.os).toBe("mac");
+    await r.s.pick("w:1:2");
+    expect(r.s.state?.os).toBe("mac");
+    r.s.onMessage({ type: "sc_state", sc: "sc1", state: "secure_input" });
+    expect(remoteText(r.s.state!.remote, (x) => x, "mac")).toContain("password field on the Mac");
+    expect(await r.s.type("hello")).toBe(false);
+    expect(r.s.state).toMatchObject({ text: "not_sent", remote: "blocked" });
+    expect(remoteText("blocked", (x) => x, "mac")).toContain("Privacy & Security → Accessibility");
+    expect(remoteText("blocked", (x) => x, "windows")).toContain("administrator");
+    expect(endedText("no_screen_permission", (x) => x), "Screen Recording taken back").toContain("Screen Recording");
   });
 
   it("text is said as sent or not, and never sent twice", async () => {
