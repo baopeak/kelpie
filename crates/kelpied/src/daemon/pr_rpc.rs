@@ -7,7 +7,8 @@
 use super::*;
 
 impl Daemon {
-    /// `pr.status {project}` → `{repo, number, title, url, base, head, line}`, or `{none: true}` when the project's branch has no pull request.
+    /// `pr.status {project}` → `{repo, number, title, url, base, head, line}`, or `{none: true}` when the project's branch has no pull request
+    /// (`{none: true, github: false}` when the project has no `origin` on github.com).
     pub(super) fn pr_rpc(self: &Arc<Self>, tx: &ClientTx, id: &Value, method: &str, params: Value) -> Result<Option<Value>> {
         if method != "pr.status" {
             bail!("unknown method {method}");

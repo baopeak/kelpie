@@ -194,9 +194,11 @@ export interface ReplyError {
   at?: number;
 }
 
-/** A project's pull request as the computer reads it (`pr_get`'s `pr`): `none` when the branch has none. `line` is GitHub's word on merging it. */
+/** A project's pull request as the computer reads it (`pr_get`'s `pr`): `none` when the branch has none, with `github: false` when the project has
+ *  no `origin` on github.com at all (an older computer never says it). `line` is GitHub's word on merging it. */
 export interface PullStatus {
   none?: boolean;
+  github?: boolean;
   repo?: string;
   number?: number;
   title?: string;

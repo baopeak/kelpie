@@ -252,7 +252,8 @@ impl Conn {
         None
     }
 
-    /// `pr_get {project}`: the pull request of the project's branch and GitHub's word on merging it (`pulls::status`), or `{none: true}`.
+    /// `pr_get {project}`: the pull request of the project's branch and GitHub's word on merging it (`pulls::status`), or `{none: true}`
+    /// (with `github: false` for a project that is not on github.com).
     fn pr_get(&self, req: &Value) -> Result<Work, Refusal> {
         if !self.daemon.mobile.pr.allow_read(&self.device) {
             return Err(refuse("rate_limited", "Asking too often: wait a moment."));

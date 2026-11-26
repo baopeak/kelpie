@@ -19,8 +19,9 @@ export interface PullInfo {
   detail: string;
 }
 
-/** What the phone knows of a project's pull request: asked for, answered, or why not. */
-export type PullView = { kind: "loading" } | { kind: "none" } | { kind: "pr"; pr: PullInfo } | { kind: "unavailable"; message: string };
+/** What the phone knows of a project's pull request: asked for, answered, or why not. "hidden": the project is not on GitHub (no `origin`, or one on
+ *  another host), so there is no pull request to look for and no line is shown. */
+export type PullView = { kind: "loading" } | { kind: "none" } | { kind: "hidden" } | { kind: "pr"; pr: PullInfo } | { kind: "unavailable"; message: string };
 
 const REASONS: readonly string[] = ["unknown", "not_open", "draft", "conflicts", "checks_failing", "checks_running", "blocked"];
 
@@ -49,7 +50,7 @@ export function pullView(o: Outcome): PullView {
   if (o.t === "unknown") return { kind: "unavailable", message: t("Your computer did not answer.") };
   if (o.t === "error") return { kind: "unavailable", message: o.code === "not_ready" || o.code === "no_project" ? t("Open Kelpie on your computer so it can tell this phone about the project.") : o.code === "rate_limited" ? t("Asking too often: wait a moment.") : o.message };
   if (!o.pr) return { kind: "unavailable", message: t("Your computer did not answer.") };
-  if (o.pr.none) return { kind: "none" };
+  if (o.pr.none) return o.pr.github === false ? { kind: "hidden" } : { kind: "none" };
   const pr = infoOf(o.pr);
   return pr ? { kind: "pr", pr } : { kind: "unavailable", message: t("Your computer's answer about the pull request could not be read.") };
 }
@@ -87,7 +88,10 @@ export function pullSubline(pr: PullInfo): string {
   return pr.title ? `${pr.repo} · ${pr.title}` : pr.repo;
 }
 
-/** What a view of no pull request, or one not read, says. */
+/** Whether a view shows a line at all: not for a project that is not on GitHub. */
+export const pullLineShown = (view: PullView): boolean => view.kind !== "hidden";
+
+/** What a view of no pull request, or one not read, says (nothing for a hidden one). */
 export function pullViewWords(view: PullView): string | null {
   switch (view.kind) {
     case "loading":
