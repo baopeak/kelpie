@@ -103,6 +103,7 @@ jobs:
           done
           cd .. && rm -rf appimage-check
       - name: Linux smoke under Xvfb (isolated daemon, release app)
+        id: smoke
         if: runner.os == 'Linux'
         timeout-minutes: 20
         shell: bash
@@ -130,7 +131,7 @@ jobs:
             python scripts/e2e/boot_smoke.py smoke target/release/kelpie \
               --out smoke/linux-smoke.json "${baseline[@]}"
       - name: Linux smoke repeats (manual runs only)
-        if: always() && github.event_name == 'workflow_dispatch' && runner.os == 'Linux'
+        if: always() && github.event_name == 'workflow_dispatch' && runner.os == 'Linux' && (steps.smoke.outcome == 'success' || steps.smoke.outcome == 'failure')
         timeout-minutes: 30
         shell: bash
         env:
