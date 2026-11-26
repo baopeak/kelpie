@@ -768,7 +768,8 @@ it. A new terminal or session opens in a new tab; *Split right / down* halves th
 and asks what to run there. A tab with one pane has no pane header — the tab shows its agent,
 title and host, and the pane's buttons (chat view, dictation, split, close) appear when you hover
 its top-right corner. As soon as a tab holds two or more panes, each gets a header and the tab
-shows one coloured dot per pane.
+shows one coloured dot per pane. The focused pane wears a ring in the app's accent colour,
+whatever runs in it; a maximized pane, alone on screen, has none.
 
 **Tile all** (layout menu, or the palette) puts the tab's panes and every tab that holds a
 single CLI (terminal or chat) into one even grid: 4 CLIs become 2 × 2, a 5th makes it 3 + 2,

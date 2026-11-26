@@ -298,7 +298,8 @@ input, textarea, select { font: inherit; color: var(--text); }
 }
 .session-row.reveal-pulse-a::after { animation: reveal-pulse-a .9s ease-out; }
 .session-row.reveal-pulse-b::after { animation: reveal-pulse-b .9s ease-out; }
-.pane-pulse { position: absolute; inset: 0; z-index: 6; border-radius: inherit; pointer-events: none; opacity: 0; box-shadow: inset 0 0 0 2px var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+/* The pane's pulse is wider than the 2px focus ring, so it still shows on the focused pane and never reads as focus elsewhere. */
+.pane-pulse { position: absolute; inset: 0; z-index: 6; border-radius: inherit; pointer-events: none; opacity: 0; box-shadow: inset 0 0 0 4px var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .pane-pulse.reveal-pulse-a { animation: reveal-pulse-a .9s ease-out; }
 .pane-pulse.reveal-pulse-b { animation: reveal-pulse-b .9s ease-out; }
 @keyframes reveal-pulse-a { 0% { opacity: 0; } 18% { opacity: 1; } 100% { opacity: 0; } }
@@ -385,13 +386,16 @@ input, textarea, select { font: inherit; color: var(--text); }
 .gutter:hover::after, .gutter.dragging::after { opacity: 1; }
 /* --pane-color is the pane's agent colour (set from its session kind). */
 .pane { position: absolute; inset: 0; display: flex; flex-direction: column; --pane-color: var(--accent); }
-/* The header is tinted by its agent; the focused pane is lit (full-strength edge, top rule and
-   title) so the active one reads at a glance. Pane content is never dimmed: the others stay readable. */
+/* The header is tinted by its agent; the focused pane wears a 2px ring in the app accent, the same for
+   every kind (a terminal's kind colour is grey, too close to the others' edge), plus its kind-coloured top
+   rule and a bold title, so the active one reads at a glance. Pane content is never dimmed: the others
+   stay readable. A maximized pane is alone on screen: like a lone pane, no ring. */
 .multi .pane { border-radius: 6px; overflow: hidden; }
 .multi .pane::after { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; box-shadow: inset 0 0 0 1px var(--border-strong); z-index: 5; }
-.multi .pane.focused::after { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pane-color) 75%, transparent); }
+.multi .pane.focused:not(.zoomed)::after { box-shadow: inset 0 0 0 2px var(--accent); }
 .multi .pane-header { background: color-mix(in srgb, var(--pane-color) 5%, var(--bg-elev)); box-shadow: inset 0 2px 0 color-mix(in srgb, var(--pane-color) 30%, transparent); transition: background .15s, color .15s; }
-.multi .pane.focused .pane-header { background: color-mix(in srgb, var(--pane-color) 13%, var(--bg-elev)); box-shadow: inset 0 2px 0 var(--pane-color); color: var(--text); }
+/* 4px, of which the ring covers the top 2: the kind's rule still shows under it. */
+.multi .pane.focused .pane-header { background: color-mix(in srgb, var(--pane-color) 13%, var(--bg-elev)); box-shadow: inset 0 4px 0 var(--pane-color); color: var(--text); }
 .multi .pane.focused .pane-header .title { font-weight: 600; }
 .pane-header { height: 34px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 6px 0 10px; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); background: var(--bg-elev); }
 .pane-header .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1216,6 +1220,8 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 .multi .pane-header { cursor: grab; }
 .multi .pane-header:active { cursor: grabbing; }
 .pane.broadcast::before { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--waiting) 70%, transparent); z-index: 5; }
+/* On the focused pane the broadcast mark sits just inside the focus ring rather than under it. */
+.multi .pane.focused.broadcast:not(.zoomed)::before { inset: 2px; border-radius: 4px; }
 /* A split tab's panes as dots in their agent colours: how many, which agents, which is focused. */
 .tab-panes { display: inline-flex; align-items: center; gap: 3px; flex: none; }
 .tab-panes i { width: 5px; height: 5px; border-radius: 3px; opacity: .5; transition: width .15s, opacity .15s; }
@@ -1542,6 +1548,8 @@ textarea.text-input { height: auto; min-height: 56px; padding: 6px 9px; line-hei
 
 /* ---------- panes on SSH hosts, "Run on", Termius-style host drawer ---------- */
 .pane-host-stripe { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--host-color); z-index: 6; pointer-events: none; }
+/* Inside the focus ring, so the ring stays whole on all four sides. */
+.multi .pane.focused:not(.zoomed) .pane-host-stripe { left: 2px; top: 2px; bottom: 2px; }
 .host-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 45%; flex: none; padding: 1px 7px; border-radius: 10px; font-size: 11px; color: var(--text); background: color-mix(in srgb, var(--host-color) 18%, transparent); border: 1px solid color-mix(in srgb, var(--host-color) 45%, transparent); white-space: nowrap; overflow: hidden; }
 .host-chip .host-dot { background: var(--host-color); width: 7px; height: 7px; }
 .host-chip-name { font-weight: 600; }
