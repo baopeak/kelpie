@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  allPanes, autoGrid, buildGrid, cellCount, cyclePane, equalize, fromTemplate, gridLabel, insertBeside, leaf, migrateLayout, movePane,
+  allPanes, autoGrid, buildGrid, cellCount, cyclePane, equalize, fromTemplate, gridCellNames, gridLabel, insertBeside, leaf, migrateLayout, movePane,
   moveGutter, readingOrder, removePane, splitPane, swapPanes, templateKinds, toTemplate, validGrid, MAX_GRID,
 } from "./layout";
 import type { LayoutNode, Pane } from "./types";
@@ -69,6 +69,28 @@ describe("gridLabel / validGrid", () => {
     expect(validGrid({ mode: "rows", counts: [MAX_GRID + 1] })).toBe(false);
     expect(validGrid({ mode: "rows", counts: Array(MAX_GRID + 1).fill(1) })).toBe(false);
     expect(validGrid({ mode: "cols", counts: [1, 2] })).toBe(true);
+  });
+});
+
+describe("gridCellNames", () => {
+  it("numbers a typed name from 1, top to bottom then left to right", () => {
+    expect(gridCellNames({ mode: "rows", counts: [2, 2] }, "api")).toEqual(["api 1", "api 2", "api 3", "api 4"]);
+    expect(gridCellNames({ mode: "rows", counts: [3, 2] }, "api")).toEqual(["api 1", "api 2", "api 3", "api 4", "api 5"]);
+  });
+
+  it("numbers a column grid by screen position, not by the column-first cell order", () => {
+    // Cells: left column top, left column bottom, then the tall right one, which sits on the top line.
+    expect(gridCellNames({ mode: "cols", counts: [2, 1] }, "api")).toEqual(["api 1", "api 3", "api 2"]);
+    expect(gridCellNames({ mode: "cols", counts: [1, 2] }, "api")).toEqual(["api 1", "api 2", "api 3"]);
+  });
+
+  it("gives a single cell the name as typed", () => {
+    expect(gridCellNames({ mode: "rows", counts: [1] }, "api")).toEqual(["api"]);
+  });
+
+  it("leaves the default names when none was typed", () => {
+    expect(gridCellNames({ mode: "rows", counts: [2, 2] }, undefined)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(gridCellNames({ mode: "rows", counts: [2] }, "")).toEqual([undefined, undefined]);
   });
 });
 

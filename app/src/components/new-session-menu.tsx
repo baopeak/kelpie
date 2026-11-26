@@ -95,13 +95,13 @@ export function NewSessionMenu() {
     const target = chat ? undefined : await resolveRunOn(project, runOn(), kind());
     if (target === null) return;
     const firstPrompt = isAgentKind(kind()) ? prompt().trim() || undefined : undefined;
+    const typedName = name().trim() || undefined;
     if (w === "grid") {
-      // The same agent in every cell; the first prompt (if any) goes to each of them.
-      return void store.launchGrid(project.id, grid(), Array(cellCount(grid())).fill(kind()), { args: argv, account: chosenAccount(), target, prompt: firstPrompt });
+      // The same agent in every cell; the first prompt (if any) goes to each of them, and a typed name is numbered per cell.
+      return void store.launchGrid(project.id, grid(), Array(cellCount(grid())).fill(kind()), { args: argv, account: chosenAccount(), target, prompt: firstPrompt, name: typedName });
     }
     // "This pane" falls back to a new tab if the empty pane was closed meanwhile (and a new project has no such pane).
     place = w === "pane" ? { where: "tab" as const, into: projectId === project.id ? into ?? undefined : undefined } : { where: w, into: undefined };
-    const typedName = name().trim() || undefined;
     if (chat) return void newChat(projectId, kind(), place.where, { account: chosenAccount(), into: place.into, prompt: firstPrompt, name: typedName });
     void store.newSession(projectId, kind(), { ...place, args: argv, account: chosenAccount(), target, name: typedName, prompt: firstPrompt });
   };
