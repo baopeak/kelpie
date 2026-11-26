@@ -17,6 +17,7 @@
 //! - `sps`: the SPS rewrite that tells a decoder no frame is reordered, and the codec string.
 //! - `wire`: the helper's stdout frames and the media messages the phone reads.
 //! - `input`: the closed set of input a phone may send, the keys, the stop hotkey.
+//! - `cpu_convert`: BGRA → NV12 and scaling on the CPU, for graphics without a video processor (a virtual machine).
 //! - `stream_core` (with the `helper` feature, on every OS): one stream's loop, which uses all of the above and drives the machine through
 //!   the `Backend` trait: commands, frames in flight, the keyframe gate, pacing and top-off, paint-over tiles, the cursor and the stats. A
 //!   backend (`win`) only grabs, converts, encodes, reads back and says what it sees.
@@ -45,6 +46,7 @@ mod tests {
     }
 }
 pub mod control;
+pub mod cpu_convert;
 pub mod geom;
 pub mod input;
 pub mod pace;

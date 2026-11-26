@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use super::border::Border;
 use super::capture_dxgi::{self, Dxgi};
 use super::capture_wgc::{self, Wgc};
-use super::convert::Converter;
+use super::convert::{Converter, Frame};
 use super::d3d::{self, Device, Readback};
 use super::encode_mf::{self, Encoder};
 use super::input_win::{self, Geometry, Outcome};
@@ -37,6 +37,9 @@ use crate::wire::Shape;
 
 /// How long `start` waits for the stream's first look (the app waits a little longer, the daemon longer still).
 const START_WAIT: Duration = Duration::from_secs(7);
+
+/// What the phone is told when not even a device that only captures can be made (the graphics' own error code means nothing there).
+const NO_GRAPHICS: &str = "this computer's graphics cannot capture the screen";
 
 enum InputCmd {
     Ops(Vec<Value>, Option<u64>),
@@ -227,7 +230,7 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
             sorted.sort_by_key(|(m, ..)| !m.primary);
             let index = sorted.iter().position(|(m, ..)| &m.name == name).ok_or("that screen is no longer connected")?;
             let (monitor, adapter, output) = sorted.swap_remove(index);
-            let device = Device::on(&adapter).map_err(|e| e.to_string())?;
+            let device = Device::on(&adapter).map_err(|_| NO_GRAPHICS.to_string())?;
             let dxgi = Dxgi::new(&device, output, monitor.rect)?;
             // The encoder's sides must be even: the picture is the monitor's top-left even part.
             let tex = device.frame_texture(monitor.rect.w.max(2) as u32 & !1, monitor.rect.h.max(2) as u32 & !1).map_err(|e| e.to_string())?;
@@ -245,7 +248,7 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
             }
             let rect = targets_win::window_rect(win).ok_or("that window cannot be shown")?;
             let adapter = d3d::adapter_at(rect.x + rect.w / 2, rect.y + rect.h / 2).map_err(|e| e.to_string())?;
-            let device = Device::on(&adapter).map_err(|e| e.to_string())?;
+            let device = Device::on(&adapter).map_err(|_| NO_GRAPHICS.to_string())?;
             let wgc = Wgc::start(&device, win).map_err(|e| format!("this window cannot be captured: {e}"))?;
             let title = info.title.chars().take(120).collect();
             Ok((device, Source::Window(wgc, *h, *pid), rect, title, info.exe))
@@ -263,6 +266,8 @@ struct WinBackend {
     outcome_rx: Receiver<Outcome>,
     stopping: Arc<AtomicBool>,
     readback: Readback,
+    /// The CPU conversion's picture is already read back, whole (the tiles' readback of this frame).
+    read_whole: bool,
     looker: Looker,
     /// The window target and its process.
     window_handle: Option<(HWND, u32)>,
@@ -283,7 +288,7 @@ impl WinBackend {
 
 impl Backend for WinBackend {
     type Picture = ID3D11Texture2D;
-    type Input = ID3D11Texture2D;
+    type Input = Frame;
 
     fn hotkey_pressed(&mut self) -> bool {
         self.hk_rx.try_recv().is_ok()
@@ -360,7 +365,9 @@ impl Backend for WinBackend {
 
     fn resize(&mut self, src: (u32, u32), params: &Params, hardware: bool) -> Result<(), String> {
         let fps = u32::from(params.fps);
-        match (Converter::new(&self.d, src, (params.w, params.h), fps), Encoder::open(&self.d, params.w, params.h, fps, params.kbps, hardware)) {
+        // The CPU conversion feeds only the software encoder.
+        let cpu = self.conv.cpu();
+        match (Converter::new(&self.d, src, (params.w, params.h), fps, cpu), Encoder::open(&self.d, params.w, params.h, fps, params.kbps, hardware && !cpu)) {
             (Ok(c), Ok(e)) => {
                 self.conv = c;
                 self.encoder = e;
@@ -401,11 +408,22 @@ impl Backend for WinBackend {
         self.encoder.set_bitrate(kbps);
     }
 
-    fn convert(&mut self, picture: &ID3D11Texture2D) -> Result<ID3D11Texture2D, String> {
-        self.conv.convert(picture).map_err(|e| e.to_string())
+    fn convert(&mut self, picture: &ID3D11Texture2D) -> Result<Frame, String> {
+        let read_whole = std::mem::take(&mut self.read_whole);
+        match &mut self.conv {
+            Converter::Gpu(c) => c.convert(picture).map(Frame::Texture).map_err(|e| e.to_string()),
+            Converter::Cpu(scaler) => {
+                // The picture through the tiles' staging texture, unless their readback of this frame already brought all of it.
+                if !read_whole {
+                    self.readback.read(&self.d, picture, scaler.src.0, scaler.src.1).map_err(|e| e.to_string())?;
+                }
+                let (px, stride) = (&self.readback.buf, self.readback.stride);
+                encode_mf::memory_buffer(scaler.out_len(), |nv12| scaler.convert(px, stride, nv12)).map(Frame::Memory).map_err(|e| e.to_string())
+            }
+        }
     }
 
-    fn encode(&mut self, input: &ID3D11Texture2D, time: i64, key: bool) -> Result<bool, String> {
+    fn encode(&mut self, input: &Frame, time: i64, key: bool) -> Result<bool, String> {
         self.encoder.encode(&self.d, input, time, key).map_err(|e| e.to_string())
     }
 
@@ -415,7 +433,12 @@ impl Backend for WinBackend {
     }
 
     fn readback(&mut self, picture: &ID3D11Texture2D, src: (u32, u32), dirty: Option<&[Rect]>) -> bool {
-        self.readback.read_regions(&self.d, picture, src.0, src.1, dirty).is_ok()
+        // The CPU conversion reads the picture whole (a region the capture's metadata missed must not stay stale in the video): one read
+        // serves the tiles and the conversion.
+        let cpu = self.conv.cpu();
+        let ok = self.readback.read_regions(&self.d, picture, src.0, src.1, if cpu { None } else { dirty }).is_ok();
+        self.read_whole = cpu && ok;
+        ok
     }
 
     fn pixels(&self) -> (&[u8], usize) {
@@ -458,7 +481,10 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     let cfg = Config { sc: opts.sc.clone(), window, src, rect, level: opts.level, tiles: opts.tiles, max_kbps: opts.max_kbps, title, exe };
     let mut ctl = stream_core::controller(&cfg);
     let mut params = ctl.params();
-    let encoder = match Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, true).or_else(|_| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false)) {
+    // Graphics without video support: the picture is converted on the CPU, for the software encoder.
+    let mut cpu = !d.video;
+    let open = |hardware: bool, params: &Params| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, hardware);
+    let mut encoder = match (if cpu { Err(windows::core::Error::empty()) } else { open(true, &params) }).or_else(|_| open(false, &params)) {
         Ok(e) => e,
         Err(e) => {
             let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
@@ -469,11 +495,29 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         ctl.set_software(true);
         params = ctl.params();
     }
-    let conv = match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps)) {
+    let conv = match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps), cpu) {
         Ok(c) => c,
-        Err(e) => {
-            let _ = started.send(Err(format!("the picture cannot be converted for the encoder: {e}")));
-            return;
+        // A video processor that cannot be made: the CPU converts, and the software encoder takes it.
+        Err(_) => {
+            cpu = true;
+            if encoder.hardware {
+                ctl.set_software(true);
+                params = ctl.params();
+                encoder = match open(false, &params) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
+                        return;
+                    }
+                };
+            }
+            match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps), cpu) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = started.send(Err(format!("the picture cannot be converted for the encoder: {e}")));
+                    return;
+                }
+            }
         }
     };
     // The border and the hotkey first: without them nothing is shared, and the phone is told why.
@@ -495,7 +539,7 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
         InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping))) }
     };
-    let mut backend = WinBackend { input_guard: Some(input_guard), border: Some(border), shared: Some(shared), hk_rx, outcome_rx, stopping, readback: Readback::new(), looker: Looker::new(), window_handle, desktop, src, conv, encoder, source, d };
+    let mut backend = WinBackend { input_guard: Some(input_guard), border: Some(border), shared: Some(shared), hk_rx, outcome_rx, stopping, readback: Readback::new(), read_whole: false, looker: Looker::new(), window_handle, desktop, src, conv, encoder, source, d };
     stream_core::run(cfg, ctl, &mut backend, cmds, out, started);
 }
 
