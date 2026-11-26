@@ -17,6 +17,7 @@ import hmac
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,8 +80,10 @@ def forget_secrets(endpoint):
     for key in ("mobile-link-key", "mobile-device-key", "mobile-push-vapid", "notify-ntfy-topic", "mobile-relay-room-key", "mobile-relay-operator-key"):
         if os.name == "nt":
             ctypes.windll.advapi32.CredDeleteW(f"{key}.{service}", 1, 0)  # CRED_TYPE_GENERIC
-        else:
+        elif sys.platform == "darwin":
             subprocess.run(["security", "delete-generic-password", "-s", service, "-a", key], capture_output=True, check=False)
+        elif shutil.which("secret-tool"):  # Linux: the keyring crate's Secret Service entry
+            subprocess.run(["secret-tool", "clear", "service", service, "username", key], capture_output=True, check=False)
 
 
 def certificate_for_loopback(folder):

@@ -1,0 +1,1788 @@
+{
+  "about": "Pictures and clips for the README, captured on the macOS and Windows test machines, a hosted Linux runner and the phone page in Chromium: platform, feature, captions and how each was made. \"agent\": \"simulated\" marks a picture whose agent sessions are small local programs (scripts/e2e/demo_agents.py) or synthetic transcripts, never a real agent or a model call; their model shows as \"simulated\". Windows pictures without a prefix replace the earlier ones of the same name; workspace, claude, codex, omp, chat, chatgpt, powershell, light, vietnamese and agents are kept from the owner's own sign-ins and installed agents.",
+  "clips": {
+    "mac-phone-control.mp4": {
+      "platform": "macOS + phone",
+      "feature": "Seeing the Mac's screen",
+      "poster": "mac-phone-control-poster.png",
+      "caption": {
+        "en": "From the phone: tap into TextEdit on the Mac, type a line, then ⌘S saves it.",
+        "vi": "Từ điện thoại, chạm vào TextEdit trên Mac, gõ một dòng rồi bấm ⌘S để lưu."
+      },
+      "how": "scripts/e2e/screen_mac.py --video: Playwright video of the phone page beside `screencapture -v` of the Mac, joined with ffmpeg",
+      "hosting": "GitHub attachment (not in the repository)"
+    },
+    "clip-phone-answer.mp4": {
+      "platform": "Windows + phone (iPhone-sized Chromium)",
+      "feature": "Answering from the phone",
+      "poster": "clip-phone-answer-poster.png",
+      "caption": {
+        "en": "A shell waits at a menu; on the phone the session shows in the inbox, one tap on 1 answers it, and the desktop pane carries on.",
+        "vi": "Một shell đang chờ ở một menu; trên điện thoại phiên đó hiện trong hộp thư, một chạm vào số 1 là trả lời xong, và khung trên máy tính chạy tiếp."
+      },
+      "how": "scripts/e2e/readme_phone_win.py --what answer: ffmpeg gdigrab of the app's window beside Playwright's video of the phone page, joined with ffmpeg hstack (10 s, 1628x844, H.264, no sound, 99 KB). The menu is a small demo program, not an agent.",
+      "agent": "simulated",
+      "hosting": "GitHub attachment (not in the repository)"
+    },
+    "clip-worktree-finish.mp4": {
+      "platform": "Windows",
+      "feature": "Worktrees, Review and Finish",
+      "poster": "clip-worktree-finish-poster.png",
+      "caption": {
+        "en": "New worktree, a shell commits a check in it, then Finish merges it into main and the worktree is gone.",
+        "vi": "Tạo worktree mới, một shell commit thêm một bước kiểm tra trong đó, rồi Finish gộp nó vào main và worktree biến mất."
+      },
+      "how": "scripts/e2e/readme_shots.py --clip-finish on a throwaway clone of the demo checkout: ffmpeg gdigrab of the app's window, played 1.2 times faster (19.6 s, 1238x720, H.264, no sound, 270 KB)",
+      "hosting": "GitHub attachment (not in the repository)"
+    }
+  },
+  "pictures": {
+    "mac-hero.png": {
+      "platform": "macOS",
+      "feature": "Workspace",
+      "caption": {
+        "en": "The Mac app at work: two shells and a chat side by side, with the demo projects in the sidebar.",
+        "vi": "Ứng dụng trên Mac đang làm việc: hai shell và một cuộc chat đặt cạnh nhau, các dự án mẫu nằm ở thanh bên."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)",
+      "agent": "simulated"
+    },
+    "mac-workspace.png": {
+      "platform": "macOS",
+      "feature": "Workspace",
+      "caption": {
+        "en": "One tab with two shell sessions and the Files panel.",
+        "vi": "Một tab có hai phiên shell và bảng Files."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-welcome.png": {
+      "platform": "macOS",
+      "feature": "First start",
+      "caption": {
+        "en": "The welcome screen before any project is added.",
+        "vi": "Màn hình chào khi chưa thêm dự án nào."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-chat.png": {
+      "platform": "macOS",
+      "feature": "Chat view",
+      "caption": {
+        "en": "Chat view with the agent's tool calls, its edits and the files it changed.",
+        "vi": "Chế độ chat hiện các lệnh công cụ của agent, các chỗ sửa và những tệp đã đổi."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)",
+      "agent": "simulated"
+    },
+    "mac-chat-approval.png": {
+      "platform": "macOS",
+      "feature": "Chat approval",
+      "caption": {
+        "en": "A chat waiting for approval of a risky command: Allow, Allow for session or Deny.",
+        "vi": "Một cuộc chat đang chờ duyệt một lệnh có rủi ro: Allow, Allow for session hoặc Deny."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)",
+      "agent": "simulated"
+    },
+    "mac-dashboard-agents.png": {
+      "platform": "macOS",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "The Agent Dashboard: sessions that need you, those working, and the idle ones.",
+        "vi": "Bảng điều khiển agent cho thấy phiên nào cần bạn, phiên nào đang chạy và phiên nào đang rảnh."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)",
+      "agent": "simulated"
+    },
+    "mac-search.png": {
+      "platform": "macOS",
+      "feature": "Search everything",
+      "caption": {
+        "en": "Search everything: sessions, projects, files and settings from one box.",
+        "vi": "Ô tìm kiếm chung tìm được phiên, dự án, tệp và cài đặt."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-new-session.png": {
+      "platform": "macOS",
+      "feature": "New session",
+      "caption": {
+        "en": "The new-session dialog with agents, quick commands and where to open it.",
+        "vi": "Hộp thoại phiên mới với danh sách agent, lệnh nhanh và nơi mở phiên."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-changes.png": {
+      "platform": "macOS",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel: branch, commit message and changed files.",
+        "vi": "Bảng Changes hiện nhánh, ô thông điệp commit và các tệp đã đổi."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-editor.png": {
+      "platform": "macOS",
+      "feature": "Files",
+      "caption": {
+        "en": "The built-in editor on a demo source file.",
+        "vi": "Trình soạn thảo có sẵn mở một tệp mã nguồn mẫu."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-review-notes.png": {
+      "platform": "macOS",
+      "feature": "Review notes",
+      "caption": {
+        "en": "A review note on a line of the diff, ready to send to an agent.",
+        "vi": "Một ghi chú review gắn vào một dòng của diff, sẵn sàng gửi cho agent."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-markdown.png": {
+      "platform": "macOS",
+      "feature": "Files",
+      "caption": {
+        "en": "Markdown with a Mermaid diagram, rendered.",
+        "vi": "Tệp Markdown có sơ đồ Mermaid được hiển thị."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-csv.png": {
+      "platform": "macOS",
+      "feature": "Files",
+      "caption": {
+        "en": "A CSV file as a sortable table.",
+        "vi": "Tệp CSV hiện thành bảng có thể sắp xếp."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-notebook.png": {
+      "platform": "macOS",
+      "feature": "Files",
+      "caption": {
+        "en": "A Jupyter notebook with its outputs.",
+        "vi": "Một notebook Jupyter cùng kết quả của nó."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-plan.png": {
+      "platform": "macOS",
+      "feature": "Specs and tasks",
+      "caption": {
+        "en": "The Plan tab with the project's specs and their tasks.",
+        "vi": "Tab Plan với các spec của dự án và danh sách việc."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-board.png": {
+      "platform": "macOS",
+      "feature": "Workspace board",
+      "caption": {
+        "en": "The workspace board: projects and worktrees by stage.",
+        "vi": "Bảng workspace xếp dự án và worktree theo từng giai đoạn."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-layouts.png": {
+      "platform": "macOS",
+      "feature": "Layouts",
+      "caption": {
+        "en": "The layout menu: grid presets, Tile all and Broadcast input.",
+        "vi": "Menu bố cục với các lưới dựng sẵn, Tile all và Broadcast input."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-composer.png": {
+      "platform": "macOS",
+      "feature": "Composer",
+      "caption": {
+        "en": "The floating composer for a longer prompt.",
+        "vi": "Khung soạn nổi để viết prompt dài."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-terminal-menu.png": {
+      "platform": "macOS",
+      "feature": "Terminals",
+      "caption": {
+        "en": "A terminal's context menu.",
+        "vi": "Menu ngữ cảnh của một terminal."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-floating.png": {
+      "platform": "macOS",
+      "feature": "Floating terminal",
+      "caption": {
+        "en": "The floating terminal over the workspace.",
+        "vi": "Terminal nổi phía trên workspace."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-inbox.png": {
+      "platform": "macOS",
+      "feature": "Activity",
+      "caption": {
+        "en": "The activity inbox (labelled demo samples).",
+        "vi": "Hộp hoạt động với các mẫu được ghi rõ là demo."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-worktree-dialog.png": {
+      "platform": "macOS",
+      "feature": "Worktrees",
+      "caption": {
+        "en": "The new-worktree dialog with the project's .kelpie.yaml.",
+        "vi": "Hộp thoại tạo worktree cùng tệp .kelpie.yaml của dự án."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-finish.png": {
+      "platform": "macOS",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "The Finish dialog: how to merge and the checks it runs.",
+        "vi": "Hộp thoại Finish cho chọn cách merge và các bước kiểm tra sẽ chạy."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-try.png": {
+      "platform": "macOS",
+      "feature": "Try with several agents",
+      "caption": {
+        "en": "Try with several agents: one task, one worktree per agent.",
+        "vi": "Try with several agents giao một việc cho nhiều agent, mỗi agent một worktree."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-runs.png": {
+      "platform": "macOS",
+      "feature": "Orchestration runs",
+      "caption": {
+        "en": "A run waiting for approval of its first tasks.",
+        "vi": "Một lượt chạy đang chờ duyệt các việc đầu tiên."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-processes.png": {
+      "platform": "macOS",
+      "feature": "Processes and ports",
+      "caption": {
+        "en": "The Processes panel showing the demo server's port.",
+        "vi": "Bảng Processes hiện cổng của máy chủ mẫu."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-hosts.png": {
+      "platform": "macOS",
+      "feature": "SSH hosts",
+      "caption": {
+        "en": "SSH hosts (documentation addresses, never connected).",
+        "vi": "Danh sách máy SSH dùng địa chỉ tài liệu và không hề kết nối."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-automations.png": {
+      "platform": "macOS",
+      "feature": "Automations",
+      "caption": {
+        "en": "Scheduled automations (disabled samples).",
+        "vi": "Các tự động hóa theo lịch, là mẫu đang tắt."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-plugins.png": {
+      "platform": "macOS",
+      "feature": "Plugins",
+      "caption": {
+        "en": "Plugins: the demo plugin waiting for review.",
+        "vi": "Trang Plugins với plugin mẫu đang chờ duyệt."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-settings.png": {
+      "platform": "macOS",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Appearance.",
+        "vi": "Cài đặt → Giao diện."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-terminal-settings.png": {
+      "platform": "macOS",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Terminal.",
+        "vi": "Cài đặt → Terminal."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-shortcuts.png": {
+      "platform": "macOS",
+      "feature": "Keyboard shortcuts",
+      "caption": {
+        "en": "Settings → Shortcuts with the Mac's keys.",
+        "vi": "Cài đặt → Phím tắt với các phím của Mac."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-settings-mobile.png": {
+      "platform": "macOS",
+      "feature": "Phone access",
+      "caption": {
+        "en": "Settings → Mobile with phone access on (no pairing code shown).",
+        "vi": "Cài đặt → Di động khi bật truy cập từ điện thoại, không hiện mã ghép đôi."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)"
+    },
+    "mac-mobile-permissions.png": {
+      "platform": "macOS",
+      "feature": "Phone access (Mac)",
+      "caption": {
+        "en": "The Mac's Screen Recording and Accessibility rows in Settings → Mobile.",
+        "vi": "Hai dòng quyền Screen Recording và Accessibility của Mac trong Cài đặt → Di động."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)"
+    },
+    "mac-settings-notifications.png": {
+      "platform": "macOS",
+      "feature": "Notifications",
+      "caption": {
+        "en": "Settings → Notifications: desktop alerts and channels to the phone.",
+        "vi": "Cài đặt → Thông báo gồm thông báo trên máy và các kênh gửi tới điện thoại."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)"
+    },
+    "mac-settings-commands.png": {
+      "platform": "macOS",
+      "feature": "Quick commands",
+      "caption": {
+        "en": "Settings → Quick Commands.",
+        "vi": "Cài đặt → Lệnh nhanh."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)"
+    },
+    "mac-settings-daemon.png": {
+      "platform": "macOS",
+      "feature": "Session daemon",
+      "caption": {
+        "en": "Settings → Session Daemon: what happens when Kelpie closes, export and import.",
+        "vi": "Cài đặt → Session Daemon cho biết điều gì xảy ra khi đóng Kelpie, cùng chức năng xuất và nhập."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)"
+    },
+    "mac-settings-about.png": {
+      "platform": "macOS",
+      "feature": "About",
+      "caption": {
+        "en": "Settings → About on macOS.",
+        "vi": "Cài đặt → Giới thiệu trên macOS."
+      },
+      "how": "scripts/e2e/mac_shots.py (debug Mac app driven through the Vite bridge, demo projects of readme_demo.py)"
+    },
+    "mac-light.png": {
+      "platform": "macOS",
+      "feature": "Themes",
+      "caption": {
+        "en": "The light theme.",
+        "vi": "Giao diện sáng."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-vietnamese.png": {
+      "platform": "macOS",
+      "feature": "Language",
+      "caption": {
+        "en": "The app in Vietnamese.",
+        "vi": "Ứng dụng hiển thị bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/mac_shots.py, shared tour readme_shots.capture (zsh shells, demo projects)"
+    },
+    "mac-screen-from-phone.png": {
+      "platform": "macOS",
+      "feature": "Seeing the Mac's screen",
+      "caption": {
+        "en": "The phone sees a TextEdit window on the Mac, with the ⌘ ⌥ ⌃ ⇧ key bar.",
+        "vi": "Điện thoại xem một cửa sổ TextEdit trên Mac, kèm thanh phím ⌘ ⌥ ⌃ ⇧."
+      },
+      "how": "scripts/e2e/screen_mac.py --shots (Kelpie.app on the Mac, phone page in Chrome as an iPhone, TextEdit document)"
+    },
+    "mac-phone-control-poster.png": {
+      "platform": "macOS",
+      "feature": "Seeing the Mac's screen (clip)",
+      "caption": {
+        "en": "Poster of the clip: the phone taps into TextEdit, types and saves with ⌘S.",
+        "vi": "Ảnh bìa của clip: điện thoại chạm vào TextEdit, gõ chữ rồi lưu bằng ⌘S."
+      },
+      "how": "scripts/e2e/screen_mac.py --video (last frame of the clip)"
+    },
+    "phone-safari-first.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "The phone page in Safari before pairing.",
+        "vi": "Trang điện thoại trong Safari trước khi ghép đôi."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-pair-code.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "The pairing code to type on the computer.",
+        "vi": "Mã ghép đôi để gõ vào máy tính."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-lock-setup.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "App lock",
+      "caption": {
+        "en": "Setting up the app lock.",
+        "vi": "Thiết lập khóa ứng dụng."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-passkey-sheet.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "App lock",
+      "caption": {
+        "en": "Safari saves a passkey for the app lock (Face ID).",
+        "vi": "Safari lưu passkey cho khóa ứng dụng bằng Face ID."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-inbox.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox by status: sessions that need you first.",
+        "vi": "Hộp phiên xếp theo trạng thái, phiên cần bạn nằm trên cùng."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-inbox-workspace.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox by project.",
+        "vi": "Hộp phiên xếp theo dự án."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-terminal.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone session",
+      "caption": {
+        "en": "A terminal session on the phone with its key bar.",
+        "vi": "Một phiên terminal trên điện thoại cùng thanh phím."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-approval.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "Answering a menu prompt from the phone.",
+        "vi": "Trả lời một câu hỏi dạng menu ngay trên điện thoại."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-chat-approval.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "Approving an agent's command from the phone, with its risk.",
+        "vi": "Duyệt lệnh của agent từ điện thoại, kèm mức rủi ro."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-chat.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone chat",
+      "caption": {
+        "en": "A finished chat on the phone.",
+        "vi": "Một cuộc chat đã xong trên điện thoại."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-new-session.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone new session",
+      "caption": {
+        "en": "Starting a session from the phone.",
+        "vi": "Bắt đầu một phiên mới từ điện thoại."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-settings.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone settings",
+      "caption": {
+        "en": "The phone's settings: app lock and alerts.",
+        "vi": "Phần cài đặt trên điện thoại gồm khóa ứng dụng và cảnh báo."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-locked.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "App lock",
+      "caption": {
+        "en": "The page locked until Face ID.",
+        "vi": "Trang bị khóa cho đến khi xác thực Face ID."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-unlock-sheet.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "App lock",
+      "caption": {
+        "en": "Unlocking with the passkey.",
+        "vi": "Mở khóa bằng passkey."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-inbox-dark.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox in dark mode.",
+        "vi": "Hộp phiên ở chế độ tối."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-chat-approval-dark.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "An approval in dark mode.",
+        "vi": "Một yêu cầu duyệt ở chế độ tối."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-terminal-dark.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone session",
+      "caption": {
+        "en": "A terminal session in dark mode.",
+        "vi": "Một phiên terminal ở chế độ tối."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-first-vi.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "The phone page in Vietnamese before pairing.",
+        "vi": "Trang điện thoại bằng tiếng Việt trước khi ghép đôi."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-pair-code-vi.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "The pairing code, in Vietnamese.",
+        "vi": "Mã ghép đôi, hiển thị bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-lock-setup-vi.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "App lock",
+      "caption": {
+        "en": "Setting up the app lock, in Vietnamese.",
+        "vi": "Thiết lập khóa ứng dụng bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-passkey-sheet-vi.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "App lock",
+      "caption": {
+        "en": "Saving the passkey, in Vietnamese.",
+        "vi": "Lưu passkey trên trang tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "phone-safari-inbox-vi.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox in Vietnamese.",
+        "vi": "Hộp phiên bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)",
+      "agent": "simulated"
+    },
+    "phone-safari-settings-vi.png": {
+      "platform": "iPhone (Mobile Safari, iOS Simulator)",
+      "feature": "Phone settings",
+      "caption": {
+        "en": "The phone's settings in Vietnamese.",
+        "vi": "Phần cài đặt trên điện thoại bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "welcome.png": {
+      "platform": "Windows",
+      "feature": "First start",
+      "caption": {
+        "en": "The welcome screen before any project is added.",
+        "vi": "Màn hình chào khi chưa thêm dự án nào."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "search.png": {
+      "platform": "Windows",
+      "feature": "Search everything",
+      "caption": {
+        "en": "Search everything: sessions, projects, files and settings from one box.",
+        "vi": "Một ô tìm kiếm chung tìm được phiên, dự án, tệp và cài đặt."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "changes.png": {
+      "platform": "Windows",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel beside two shells: the branch, the changed file and Commit all.",
+        "vi": "Bảng Changes nằm cạnh hai shell, cho thấy nhánh, tệp đã đổi và nút Commit all."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "editor.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "The editor on the demo checkout code, with the Changes panel open.",
+        "vi": "Trình soạn thảo mở mã checkout của dự án mẫu, bên cạnh là bảng Changes."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "review-notes.png": {
+      "platform": "Windows",
+      "feature": "Review notes",
+      "caption": {
+        "en": "A review note on a line of the diff, ready to send to an agent.",
+        "vi": "Một ghi chú review gắn vào một dòng của diff, sẵn sàng gửi cho agent."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "markdown.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "Markdown with a Mermaid diagram, rendered in the file viewer.",
+        "vi": "Tệp Markdown có sơ đồ Mermaid được hiển thị ngay trong trình xem tệp."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "csv.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "A CSV file as a sortable table.",
+        "vi": "Tệp CSV được hiển thị thành một bảng có thể sắp xếp."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "plan.png": {
+      "platform": "Windows",
+      "feature": "Specs and tasks",
+      "caption": {
+        "en": "The Plan tab lists the plans and specs of the project with their tasks.",
+        "vi": "Tab Plan liệt kê các kế hoạch và đặc tả của dự án cùng các việc cần làm."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "new-session.png": {
+      "platform": "Windows",
+      "feature": "Agents",
+      "caption": {
+        "en": "The new-session launcher: agent, first prompt, worktree and where it opens.",
+        "vi": "Hộp mở phiên mới cho chọn agent, lời nhắn đầu tiên, worktree và nơi mở phiên."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "dashboard.png": {
+      "platform": "Windows",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "The Agent Dashboard with a shell waiting for an answer.",
+        "vi": "Bảng điều khiển agent cho thấy một shell đang chờ câu trả lời."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "board.png": {
+      "platform": "Windows",
+      "feature": "Worktrees and the board",
+      "caption": {
+        "en": "The workspace board: projects and worktrees by stage.",
+        "vi": "Bảng công việc xếp các dự án và worktree theo từng giai đoạn."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "layouts.png": {
+      "platform": "Windows",
+      "feature": "Layouts",
+      "caption": {
+        "en": "The layout menu: grid presets and saved layouts.",
+        "vi": "Menu bố cục có sẵn các lưới và những bố cục đã lưu."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "composer.png": {
+      "platform": "Windows",
+      "feature": "Composer",
+      "caption": {
+        "en": "The floating composer for a longer prompt.",
+        "vi": "Khung soạn nổi dùng để viết một lời nhắn dài hơn."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "terminal-menu.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "A terminal's context menu: split, hand off, theme and more.",
+        "vi": "Menu chuột phải của terminal có các lệnh chia khung, chuyển giao, đổi theme và nhiều lệnh khác."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "floating.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "The floating terminal over the workspace.",
+        "vi": "Terminal nổi hiện ra phía trên không gian làm việc."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "inbox.png": {
+      "platform": "Windows",
+      "feature": "Activity",
+      "caption": {
+        "en": "The Activity inbox with labelled demo entries.",
+        "vi": "Hộp Activity hiện các mục mẫu đã được ghi rõ là dữ liệu demo."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "worktree-dialog.png": {
+      "platform": "Windows",
+      "feature": "Worktrees",
+      "caption": {
+        "en": "The new-worktree dialog, with the project's .kelpie.yaml setup.",
+        "vi": "Hộp tạo worktree mới đi kèm phần thiết lập từ tệp .kelpie.yaml của dự án."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "automations.png": {
+      "platform": "Windows",
+      "feature": "Automations",
+      "caption": {
+        "en": "Scheduled automations (demo, switched off).",
+        "vi": "Danh sách automation chạy theo lịch, đều là mẫu và đang tắt."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "settings.png": {
+      "platform": "Windows",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Appearance.",
+        "vi": "Trang Settings → Appearance."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "terminal-settings.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "Settings → Terminal: font, renderer, cursor and colour theme.",
+        "vi": "Trang Settings → Terminal gồm phông chữ, bộ vẽ, con trỏ và bảng màu."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "shortcuts.png": {
+      "platform": "Windows",
+      "feature": "Keyboard shortcuts",
+      "caption": {
+        "en": "Settings → Shortcuts.",
+        "vi": "Trang Settings → Shortcuts."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "notebook.png": {
+      "platform": "Windows",
+      "feature": "Files",
+      "caption": {
+        "en": "A Jupyter notebook with its outputs.",
+        "vi": "Một notebook Jupyter được hiển thị cùng kết quả của nó."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "processes.png": {
+      "platform": "Windows",
+      "feature": "Processes and ports",
+      "caption": {
+        "en": "The Processes panel: the catalog server and the port it listens on.",
+        "vi": "Bảng Processes cho thấy máy chủ catalog và cổng mà nó đang lắng nghe."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "runs.png": {
+      "platform": "Windows",
+      "feature": "Orchestration runs",
+      "caption": {
+        "en": "A run whose tasks wait for an approval or a dependency.",
+        "vi": "Một lượt chạy có các việc đang chờ duyệt hoặc chờ việc khác xong trước."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "try.png": {
+      "platform": "Windows",
+      "feature": "Try with several agents",
+      "caption": {
+        "en": "Try with several agents: one task, each agent in its own worktree.",
+        "vi": "Hộp Try with several agents giao một việc cho nhiều agent, mỗi agent làm trong worktree riêng."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "finish.png": {
+      "platform": "Windows",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "The Finish dialog: approved checks, then merge into main.",
+        "vi": "Hộp Finish cho thấy các bước kiểm tra đã duyệt, sau đó gộp vào main."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "hosts.png": {
+      "platform": "Windows",
+      "feature": "SSH hosts",
+      "caption": {
+        "en": "The SSH hosts page (documentation addresses, never connected).",
+        "vi": "Trang SSH hosts dùng địa chỉ dành cho tài liệu và không kết nối thật."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "plugins.png": {
+      "platform": "Windows",
+      "feature": "Plugins",
+      "caption": {
+        "en": "Settings → Plugins: the demo plugin waiting for review.",
+        "vi": "Trang Settings → Plugins có plugin mẫu đang chờ được xem xét."
+      },
+      "how": "scripts/e2e/readme_shots.py base tour on the Devin Windows VM (debug app, PowerShell shells, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "sidebar.png": {
+      "platform": "Windows",
+      "feature": "Sidebar",
+      "caption": {
+        "en": "The sidebar: a session that needs you, one at work, and each project's branch, comment and worktrees.",
+        "vi": "Thanh bên cho thấy một phiên đang cần bạn, một phiên đang chạy, cùng nhánh, ghi chú và worktree của từng dự án."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "quick-answer.png": {
+      "platform": "Windows",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "Answer from the dashboard: the waiting session's question and its keys, without leaving the board.",
+        "vi": "Bạn trả lời ngay trên bảng điều khiển: câu hỏi của phiên đang chờ hiện ra cùng các phím chọn, không cần rời bảng."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "split-picker.png": {
+      "platform": "Windows",
+      "feature": "Layouts",
+      "caption": {
+        "en": "Ctrl+Shift+D splits a pane, and the empty pane asks what to run.",
+        "vi": "Phím Ctrl+Shift+D chia đôi khung, và khung trống hỏi bạn muốn chạy gì trong đó."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "broadcast.png": {
+      "platform": "Windows",
+      "feature": "Layouts",
+      "caption": {
+        "en": "Four shells tiled 2 × 2 with Broadcast input: one line typed once runs in all four.",
+        "vi": "Bốn shell xếp lưới 2 × 2 và bật Broadcast input, nên một dòng gõ một lần sẽ chạy ở cả bốn."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "file-link.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "A path printed in a terminal is a link: Ctrl+click opens the file at that line.",
+        "vi": "Đường dẫn in ra trong terminal là một liên kết, và Ctrl+click sẽ mở tệp đúng ở dòng đó."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "theme-editor.png": {
+      "platform": "Windows",
+      "feature": "Terminals",
+      "caption": {
+        "en": "The theme editor: Dracula duplicated into a theme of your own, with a live preview.",
+        "vi": "Trình sửa theme cho phép nhân bản Dracula thành một theme riêng và xem trước ngay."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "git-history.png": {
+      "platform": "Windows",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel with History unfolded: the last commits of the branch.",
+        "vi": "Bảng Changes mở phần History để xem các commit gần nhất của nhánh."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "git-stashes.png": {
+      "platform": "Windows",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel with Stashes unfolded: a demo stash with Apply and Drop.",
+        "vi": "Bảng Changes mở phần Stashes, có một stash mẫu cùng hai nút Apply và Drop."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "review-queue.png": {
+      "platform": "Windows",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "The Review tab: a worktree waiting for review, its diff, Review with… and Approve → Finish.",
+        "vi": "Tab Review cho thấy một worktree đang chờ duyệt cùng diff của nó, nút Review with… và Approve → Finish."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "review-with.png": {
+      "platform": "Windows",
+      "feature": "Review with another agent",
+      "caption": {
+        "en": "Review with another agent: pick the reviewer and the prompt; the diff goes with it.",
+        "vi": "Hộp Review with cho chọn agent duyệt và lời nhắn, còn diff được gửi kèm theo."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "automation-event.png": {
+      "platform": "Windows",
+      "feature": "Automations",
+      "caption": {
+        "en": "A new automation started by an event: a Markdown file under docs/ changes (not saved).",
+        "vi": "Một automation mới được kích hoạt bởi sự kiện khi một tệp Markdown trong docs/ thay đổi (chưa lưu)."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "design-mode.png": {
+      "platform": "Windows",
+      "feature": "Browser panes and design mode",
+      "caption": {
+        "en": "Design mode in a browser pane: pick an element of a local demo page and write what should change.",
+        "vi": "Chế độ thiết kế trong khung trình duyệt cho chọn một phần tử của trang mẫu chạy tại máy và ghi điều cần sửa."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "host-edit.png": {
+      "platform": "Windows",
+      "feature": "SSH hosts",
+      "caption": {
+        "en": "A host's drawer with its appearance: label colour, theme, font, cursor and a live preview.",
+        "vi": "Ngăn chỉnh máy chủ có phần giao diện gồm màu nhãn, theme, phông chữ, con trỏ và bản xem trước."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "notifications.png": {
+      "platform": "Windows",
+      "feature": "Notifications",
+      "caption": {
+        "en": "Settings → Notifications: desktop alerts, phone alerts, ntfy, Telegram and webhook.",
+        "vi": "Trang Settings → Notifications gồm thông báo trên máy, trên điện thoại, ntfy, Telegram và webhook."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "mobile-settings.png": {
+      "platform": "Windows",
+      "feature": "Phone access",
+      "caption": {
+        "en": "Settings → Mobile with phone access on (no pairing code shown).",
+        "vi": "Trang Settings → Mobile khi đã bật truy cập từ điện thoại (không hiện mã ghép đôi)."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "agent-setup.png": {
+      "platform": "Windows",
+      "feature": "Agent setup",
+      "caption": {
+        "en": "Agent setup: each agent's MCP servers, with the demo project's own server.",
+        "vi": "Trang Agent setup liệt kê máy chủ MCP của từng agent, kể cả máy chủ riêng của dự án mẫu."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "voice.png": {
+      "platform": "Windows",
+      "feature": "Voice dictation",
+      "caption": {
+        "en": "Settings → Voice: the on-device speech models (no microphone on the test machine).",
+        "vi": "Trang Settings → Voice liệt kê các mô hình nhận giọng nói chạy ngay trên máy (máy thử không có micro)."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "settings-export.png": {
+      "platform": "Windows",
+      "feature": "Export and import settings",
+      "caption": {
+        "en": "Export and import settings, with the parts to include.",
+        "vi": "Phần xuất và nhập cài đặt cho chọn những mục muốn đưa vào."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)"
+    },
+    "chat-approval.png": {
+      "platform": "Windows",
+      "feature": "Chat approval",
+      "caption": {
+        "en": "A chat waiting for approval of a risky command: Allow, Allow for session or Deny.",
+        "vi": "Một cuộc chat đang chờ duyệt một lệnh có rủi ro với các lựa chọn Allow, Allow for session hoặc Deny."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "sub-sessions-ask.png": {
+      "platform": "Windows",
+      "feature": "Sub-sessions",
+      "caption": {
+        "en": "An agent asks to open a sub-session: Allow once, Allow for this session, Always allow or Deny.",
+        "vi": "Một agent xin mở phiên con, và bạn chọn Allow once, Allow for this session, Always allow hoặc Deny."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "sub-sessions.png": {
+      "platform": "Windows",
+      "feature": "Sub-sessions",
+      "caption": {
+        "en": "An agent with two sub-sessions: the sub-tab strip over its pane and the tree in the sidebar.",
+        "vi": "Một agent có hai phiên con, hiện thành dải tab con phía trên khung và thành cây ở thanh bên."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "owed-checks.png": {
+      "platform": "Windows",
+      "feature": "Checks still owed",
+      "caption": {
+        "en": "Activity: a sub-session's report and the check it could not run itself.",
+        "vi": "Hộp Activity hiện báo cáo của một phiên con và bước kiểm tra mà nó không tự chạy được."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080)",
+      "agent": "simulated"
+    },
+    "past-conversations.png": {
+      "platform": "Windows",
+      "feature": "Past conversations",
+      "caption": {
+        "en": "The Sessions tab: past Claude Code and Codex conversations of this project.",
+        "vi": "Tab Sessions liệt kê các cuộc trò chuyện cũ với Claude Code và Codex của dự án này."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080); synthetic demo transcripts in the run's own agent homes, never a real conversation",
+      "agent": "simulated"
+    },
+    "usage.png": {
+      "platform": "Windows",
+      "feature": "Usage and cost",
+      "caption": {
+        "en": "Usage & cost by project, from the agents' transcripts.",
+        "vi": "Trang Usage & cost tính mức dùng và chi phí theo dự án từ bản ghi của các agent."
+      },
+      "how": "scripts/e2e/readme_shots.py --extra on the Devin Windows VM (debug app, demo projects of readme_demo.py, 1920x1080); synthetic demo transcripts in the run's own agent homes; the numbers are not real usage",
+      "agent": "simulated"
+    },
+    "phone-screen-windows.png": {
+      "platform": "Windows + phone (iPhone-sized Chromium)",
+      "feature": "Seeing the computer's screen",
+      "caption": {
+        "en": "The phone sees the Windows desktop live, with the trackpad, the Ctrl / Shift / Alt / Win keys and a field to type into.",
+        "vi": "Điện thoại xem màn hình Windows trực tiếp, có bàn di chuột, các phím Ctrl / Shift / Alt / Win và một ô để gõ chữ."
+      },
+      "how": "scripts/e2e/readme_phone_win.py --what screen, run as the standard user kelpieshare (Kelpie does not share the screen while elevated): debug app and kelpie-screen (software H.264 encoder, no GPU), phone page served by this run's own daemon on 127.0.0.1; demo projects, a ticking demo shell and a demo Notepad on screen"
+    },
+    "clip-phone-answer-poster.png": {
+      "platform": "Windows + phone (iPhone-sized Chromium)",
+      "feature": "Answering from the phone",
+      "caption": {
+        "en": "Poster of the clip: the phone answered the waiting session with one tap, and the desktop pane carries on.",
+        "vi": "Ảnh đại diện của đoạn phim: điện thoại trả lời phiên đang chờ chỉ bằng một chạm, và khung trên máy tính chạy tiếp."
+      },
+      "how": "a frame of clip-phone-answer.mp4 (scripts/e2e/readme_phone_win.py --what answer)",
+      "poster_of": "clip-phone-answer.mp4"
+    },
+    "clip-worktree-finish-poster.png": {
+      "platform": "Windows",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "Poster of the clip: Finish merged the worktree into main and removed it.",
+        "vi": "Ảnh đại diện của đoạn phim: Finish đã gộp worktree vào main rồi xoá nó đi."
+      },
+      "how": "a frame of clip-worktree-finish.mp4 (scripts/e2e/readme_shots.py --clip-finish)",
+      "poster_of": "clip-worktree-finish.mp4"
+    },
+    "linux-hero.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Workspace",
+      "caption": {
+        "en": "The Linux app at work: two shells and a chat side by side, with the demo projects in the sidebar.",
+        "vi": "Ứng dụng trên Linux đang làm việc: hai shell và một cuộc chat đặt cạnh nhau, các dự án mẫu nằm ở thanh bên."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-workspace.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Workspace",
+      "caption": {
+        "en": "One tab with two shell sessions and the Files panel.",
+        "vi": "Một tab có hai phiên shell và bảng Files."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-welcome.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "First start",
+      "caption": {
+        "en": "The welcome screen before any project is added.",
+        "vi": "Màn hình chào khi chưa thêm dự án nào."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-chat.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Chat view",
+      "caption": {
+        "en": "Chat view with the agent's tool calls, its edits and the files it changed.",
+        "vi": "Chế độ chat hiện các lệnh công cụ của agent, các chỗ sửa và những tệp đã đổi."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-chat-approval.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Chat approval",
+      "caption": {
+        "en": "A chat waiting for approval of a risky command: Allow, Allow for session or Deny.",
+        "vi": "Một cuộc chat đang chờ duyệt một lệnh có rủi ro: Allow, Allow for session hoặc Deny."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-dashboard-agents.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "The Agent Dashboard: sessions that need you, those working, and the idle ones.",
+        "vi": "Bảng điều khiển agent cho thấy phiên nào cần bạn, phiên nào đang chạy và phiên nào đang rảnh."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-search.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Search everything",
+      "caption": {
+        "en": "Search everything: sessions, projects, files and settings from one box.",
+        "vi": "Ô tìm kiếm chung tìm được phiên, dự án, tệp và cài đặt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-new-session.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "New session",
+      "caption": {
+        "en": "The new-session dialog with agents, quick commands and where to open it.",
+        "vi": "Hộp thoại phiên mới với danh sách agent, lệnh nhanh và nơi mở phiên."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-changes.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel: branch, commit message and changed files.",
+        "vi": "Bảng Changes hiện nhánh, ô thông điệp commit và các tệp đã đổi."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-editor.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "The built-in editor on a demo source file.",
+        "vi": "Trình soạn thảo có sẵn mở một tệp mã nguồn mẫu."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-review-notes.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Review notes",
+      "caption": {
+        "en": "A review note on a line of the diff, ready to send to an agent.",
+        "vi": "Một ghi chú review gắn vào một dòng của diff, sẵn sàng gửi cho agent."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-markdown.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "Markdown with a Mermaid diagram, rendered.",
+        "vi": "Tệp Markdown có sơ đồ Mermaid được hiển thị."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-notebook.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "A Jupyter notebook with its outputs.",
+        "vi": "Một notebook Jupyter cùng kết quả của nó."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-plan.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Specs and tasks",
+      "caption": {
+        "en": "The Plan tab with the project's specs and their tasks.",
+        "vi": "Tab Plan với các spec của dự án và danh sách việc."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-board.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Workspace board",
+      "caption": {
+        "en": "The workspace board: projects and worktrees by stage.",
+        "vi": "Bảng workspace xếp dự án và worktree theo từng giai đoạn."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-layouts.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Layouts",
+      "caption": {
+        "en": "The layout menu: grid presets, Tile all and Broadcast input.",
+        "vi": "Menu bố cục với các lưới dựng sẵn, Tile all và Broadcast input."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-floating.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Floating terminal",
+      "caption": {
+        "en": "The floating terminal over the workspace.",
+        "vi": "Terminal nổi phía trên workspace."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-inbox.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Activity",
+      "caption": {
+        "en": "The activity inbox (labelled demo samples).",
+        "vi": "Hộp hoạt động với các mẫu được ghi rõ là demo."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-worktree-dialog.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Worktrees",
+      "caption": {
+        "en": "The new-worktree dialog with the project's .kelpie.yaml.",
+        "vi": "Hộp thoại tạo worktree cùng tệp .kelpie.yaml của dự án."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-finish.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "The Finish dialog: how to merge and the checks it runs.",
+        "vi": "Hộp thoại Finish cho chọn cách merge và các bước kiểm tra sẽ chạy."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-try.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Try with several agents",
+      "caption": {
+        "en": "Try with several agents: one task, one worktree per agent.",
+        "vi": "Try with several agents giao một việc cho nhiều agent, mỗi agent một worktree."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-runs.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Orchestration runs",
+      "caption": {
+        "en": "A run waiting for approval of its first tasks.",
+        "vi": "Một lượt chạy đang chờ duyệt các việc đầu tiên."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-processes.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Processes and ports",
+      "caption": {
+        "en": "The Processes panel showing the demo server's port.",
+        "vi": "Bảng Processes hiện cổng của máy chủ mẫu."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-hosts.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "SSH hosts",
+      "caption": {
+        "en": "SSH hosts (documentation addresses, never connected).",
+        "vi": "Danh sách máy SSH dùng địa chỉ tài liệu và không hề kết nối."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-automations.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Automations",
+      "caption": {
+        "en": "Scheduled automations (disabled samples).",
+        "vi": "Các tự động hóa theo lịch, là mẫu đang tắt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-plugins.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Plugins",
+      "caption": {
+        "en": "Plugins: the demo plugin waiting for review.",
+        "vi": "Trang Plugins với plugin mẫu đang chờ duyệt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Appearance.",
+        "vi": "Cài đặt → Giao diện."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-mobile.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Phone access",
+      "caption": {
+        "en": "Settings → Mobile with phone access on (no pairing code shown).",
+        "vi": "Cài đặt → Di động khi bật truy cập từ điện thoại, không hiện mã ghép đôi."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-notifications.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Notifications",
+      "caption": {
+        "en": "Settings → Notifications: desktop alerts and channels to the phone.",
+        "vi": "Cài đặt → Thông báo gồm thông báo trên máy và các kênh gửi tới điện thoại."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-daemon.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Session daemon",
+      "caption": {
+        "en": "Settings → Session Daemon: what happens when Kelpie closes, export and import.",
+        "vi": "Cài đặt → Session Daemon cho biết điều gì xảy ra khi đóng Kelpie, cùng chức năng xuất và nhập."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-light.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Themes",
+      "caption": {
+        "en": "The light theme.",
+        "vi": "Giao diện sáng."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-vietnamese.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Language",
+      "caption": {
+        "en": "The app in Vietnamese.",
+        "vi": "Ứng dụng hiển thị bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-agents.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Agents",
+      "caption": {
+        "en": "Settings → Agents: the agent CLIs Kelpie knows and how each one starts.",
+        "vi": "Cài đặt → Agent: các CLI agent mà Kelpie biết và cách khởi động từng cái."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-about.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "About",
+      "caption": {
+        "en": "Settings → About on Linux.",
+        "vi": "Cài đặt → Giới thiệu trên Linux."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-terminal-settings.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Terminal.",
+        "vi": "Cài đặt → Terminal."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-commands.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Quick commands",
+      "caption": {
+        "en": "Settings → Quick Commands.",
+        "vi": "Cài đặt → Lệnh nhanh."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-composer.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Composer",
+      "caption": {
+        "en": "The floating composer for a longer prompt.",
+        "vi": "Khung soạn nổi để viết prompt dài."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-csv.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "A CSV file as a sortable table.",
+        "vi": "Tệp CSV hiện thành bảng có thể sắp xếp."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-terminal-menu.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Terminals",
+      "caption": {
+        "en": "A terminal's context menu.",
+        "vi": "Menu ngữ cảnh của một terminal."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-shortcuts.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Keyboard shortcuts",
+      "caption": {
+        "en": "Settings → Shortcuts with the Linux keys.",
+        "vi": "Cài đặt → Phím tắt với các phím trên Linux."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-dashboard.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "The Agent Dashboard with a shell waiting for an answer and Answer at hand.",
+        "vi": "Bảng điều khiển agent có một shell đang chờ trả lời, nút Answer nằm sẵn bên cạnh."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "phone-pair-scan.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "Pairing starts by scanning the code the computer shows, or pasting its link.",
+        "vi": "Việc ghép đôi bắt đầu bằng cách quét mã mà máy tính hiện ra, hoặc dán đường liên kết của nó."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/02-pair-scan.png"
+    },
+    "phone-pair-name.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "The phone names itself before the computer approves it.",
+        "vi": "Điện thoại tự đặt tên trước khi máy tính chấp thuận nó."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/04-pair-name.png"
+    },
+    "phone-inbox-control.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox of a phone allowed to take control, with See the screen at the top.",
+        "vi": "Hộp phiên của một điện thoại được phép điều khiển, nút xem màn hình nằm ở trên cùng."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/23-inbox-control.png",
+      "agent": "simulated"
+    },
+    "phone-terminal-keys.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone session",
+      "caption": {
+        "en": "Typing into a terminal session, with the key bar above the keyboard.",
+        "vi": "Gõ vào một phiên terminal, thanh phím nằm ngay trên bàn phím."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/12-terminal-keyboard.png"
+    },
+    "phone-chat-tools.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone chat",
+      "caption": {
+        "en": "A chat on the phone lists each tool the agent ran and what it changed.",
+        "vi": "Cuộc chat trên điện thoại liệt kê từng công cụ mà agent đã chạy và những gì nó đã sửa."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/15-chat-top.png",
+      "agent": "simulated"
+    },
+    "phone-chat-approval.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "An agent asks to tag a release and push the tag: allow or deny it from the phone.",
+        "vi": "Agent xin gắn thẻ bản phát hành rồi đẩy thẻ lên, bạn cho phép hoặc từ chối ngay từ điện thoại."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/14-chat-approval.png",
+      "agent": "simulated"
+    },
+    "phone-chat-keyboard.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone chat",
+      "caption": {
+        "en": "Writing back to an agent while it waits for approval.",
+        "vi": "Nhắn lại cho agent trong lúc nó đang chờ duyệt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/17-chat-keyboard.png",
+      "agent": "simulated"
+    },
+    "phone-connection.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone connection",
+      "caption": {
+        "en": "The connection sheet: how the phone reaches the computer and how fresh the link is.",
+        "vi": "Bảng kết nối cho biết điện thoại đến máy tính bằng đường nào và đường liên kết còn mới tới đâu."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/20-connection-sheet.png"
+    },
+    "phone-settings-2.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone settings",
+      "caption": {
+        "en": "Phone settings: theme, language, text size and how the inbox sorts.",
+        "vi": "Cài đặt trên điện thoại gồm giao diện, ngôn ngữ, cỡ chữ và cách hộp phiên sắp xếp."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-2.png"
+    },
+    "phone-settings-3.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone settings",
+      "caption": {
+        "en": "Choosing and ordering the keys of the key bar.",
+        "vi": "Chọn và sắp xếp các phím trên thanh phím."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-3.png"
+    },
+    "phone-offline.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "With the computer gone, the phone says so and keeps what it last saw.",
+        "vi": "Khi máy tính không còn kết nối, điện thoại báo điều đó và giữ lại những gì nó thấy lần cuối."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/25-offline-inbox.png",
+      "agent": "simulated"
+    },
+    "phone-chat-approval-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "An approval on the Vietnamese page.",
+        "vi": "Một yêu cầu duyệt trên trang tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/14-chat-approval.png",
+      "agent": "simulated"
+    },
+    "phone-chat-tools-vi-light.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone chat",
+      "caption": {
+        "en": "A chat on the Vietnamese page, light theme.",
+        "vi": "Một cuộc chat trên trang tiếng Việt ở chế độ sáng."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-light/15-chat-top.png",
+      "agent": "simulated"
+    },
+    "phone-connection-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone connection",
+      "caption": {
+        "en": "The connection sheet in Vietnamese.",
+        "vi": "Bảng kết nối bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/20-connection-sheet.png"
+    },
+    "phone-offline-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The offline inbox in Vietnamese.",
+        "vi": "Hộp phiên khi mất kết nối, bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/25-offline-inbox.png",
+      "agent": "simulated"
+    },
+    "phone-android-inbox.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox in Chrome on an Android-sized phone (Pixel 7).",
+        "vi": "Hộp phiên trong Chrome trên một điện thoại cỡ Android (Pixel 7)."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/08-inbox-status.png",
+      "agent": "simulated"
+    },
+    "phone-android-terminal.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone session",
+      "caption": {
+        "en": "A terminal session on an Android-sized phone.",
+        "vi": "Một phiên terminal trên điện thoại cỡ Android."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/11-terminal.png"
+    },
+    "phone-android-approval.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "Answering a menu prompt on an Android-sized phone.",
+        "vi": "Trả lời một câu hỏi dạng menu trên điện thoại cỡ Android."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/13-terminal-prompt.png"
+    },
+    "phone-android-inbox-vi-light.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox in Vietnamese, light theme, on an Android-sized phone.",
+        "vi": "Hộp phiên bằng tiếng Việt ở chế độ sáng, trên điện thoại cỡ Android."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-vi-light/08-inbox-status.png",
+      "agent": "simulated"
+    },
+    "phone-pull-checks-running.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The project's pull request on the phone: a required check is still running, so it cannot be merged yet.",
+        "vi": "Pull request của project trên điện thoại: một bước kiểm tra bắt buộc vẫn đang chạy, nên chưa merge được."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/27-pull-running.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-pull-line.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "Every check passed: the session's pull request can be merged from the phone.",
+        "vi": "Mọi bước kiểm tra đã đạt, nên pull request của phiên có thể được merge từ điện thoại."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/28-pull-can-merge.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merge-sheet.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The merge sheet names the repository, the pull request, its head commit and how to merge.",
+        "vi": "Bảng merge ghi rõ kho mã, pull request, commit đầu nhánh và cách merge."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/29-merge-sheet.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merge-passkey.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The passkey signs exactly this merge, and the computer merges only that.",
+        "vi": "Passkey ký đúng lệnh merge này, và máy tính chỉ merge đúng lệnh đó."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/30-merge-passkey.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merged.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "Merged from the phone; the worktree and its sessions stay on the computer.",
+        "vi": "Pull request đã được merge từ điện thoại, còn worktree và các phiên của nó vẫn ở trên máy tính."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-en-light/31-merged.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-pull-line-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "A pull request ready to merge, on the Vietnamese page, dark theme.",
+        "vi": "Một pull request sẵn sàng để merge, trên trang tiếng Việt với giao diện tối."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-vi-dark/28-pull-can-merge.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merge-sheet-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "The merge sheet in Vietnamese.",
+        "vi": "Bảng merge bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-vi-dark/29-merge-sheet.png",
+      "agent": "simulated",
+      "github": "simulated"
+    },
+    "phone-merged-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone merge",
+      "caption": {
+        "en": "Merged, in Vietnamese.",
+        "vi": "Đã merge, trên trang tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py --readme on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45845619045): Playwright's Chromium as an iPhone 15 (390x844 at 3x), isolated daemon, a stand-in gh that simulates the demo pull request (it never reaches GitHub), passkey with Chromium's virtual authenticator; iphone-vi-dark/31-merged.png",
+      "agent": "simulated",
+      "github": "simulated"
+    }
+  }
+}

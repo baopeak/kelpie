@@ -31,6 +31,9 @@ ap.add_argument("exe")
 ap.add_argument("out")
 ap.add_argument("--devices", default="iphone,pixel")
 ap.add_argument("--locales", default="en,vi")
+ap.add_argument("--readme", action="store_true", help="the README's sessions instead: the demo projects and simulated agents of the Safari tour "
+                "(phone_safari_sim.demo_sessions), a stand-in `gh` (no pull request, then a simulated one for the merge pictures; GitHub is "
+                "never asked) and stand-ins for the claude and codex CLIs (Unix)")
 ARGS = ap.parse_args()
 
 WORK = ps.isolate("phone-tour")
@@ -88,11 +91,11 @@ user(sys.argv[1])
 say("m1", [{"type": "thinking", "thinking": "I should read the merged pull requests since the last tag, then group them by area."}])
 say("m2", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git log --oneline v0.1.20..HEAD", "description": "List the commits since the last release"}}])
 result("t1", "bca9fff fix(storage): survive a power cut and restore state from its previous save (#71)\n449fbe3 feat(sidebar): compact worktree rows and fold quiet worktrees (#70)\n3d1e2aa fix(chat): keep the queue when a turn is cut mid-way (#72)")
-say("m3", [{"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "D:/Works/Kelpie/CHANGELOG.md"}}])
+say("m3", [{"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "CHANGELOG.md"}}])
 result("t2", "# Changelog\n\n## 0.1.20\n- Phone: remote screen gestures\n- Relay: TURN for peer to peer")
 say("m4", [{"type": "text", "text": "Here is a draft for **0.1.21**:\n\n- Sessions survive a power cut: state is written atomically and the previous save is restored if the last one is torn.\n- The sidebar folds quiet worktrees and shows compact rows.\n- A chat keeps its queue when a turn is cut mid-way.\n\nThe entry in CHANGELOG.md would be:\n\n```markdown\n## 0.1.21\n- Survive a power cut (#71)\n- Compact worktree rows (#70)\n- Keep the chat queue mid-turn (#72)\n```"}])
 user(sys.argv[2])
-say("m5", [{"type": "tool_use", "id": "t3", "name": "Edit", "input": {"file_path": "D:/Works/Kelpie/CHANGELOG.md", "old_string": "# Changelog\n", "new_string": "# Changelog\n\n## 0.1.21\n- Survive a power cut (#71)\n"}}])
+say("m5", [{"type": "tool_use", "id": "t3", "name": "Edit", "input": {"file_path": "CHANGELOG.md", "old_string": "# Changelog\n", "new_string": "# Changelog\n\n## 0.1.21\n- Survive a power cut (#71)\n"}}])
 result("t3", "The file was updated.")
 say("m6", [{"type": "text", "text": "Done: CHANGELOG.md has the 0.1.21 entry. Next I would push the release branch so CI can build it."}])
 out({"type": "control_request", "request_id": "req-push", "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "git push --force-with-lease origin release/0.1.21", "description": "Push the release branch"}}})
@@ -148,6 +151,13 @@ class Phone:
         self.name = f"{device}-{locale}"
 
     def shot(self, state, themes=THEMES):
+        if ARGS.readme:
+            # News about another phone (its permission changed, a device was paired) shows for 8 s and then goes on its own: README
+            # pictures wait for that, as a person looking a moment later would see the page.
+            try:
+                self.page.wait_for_selector("[data-banner=device-news]", state="detached", timeout=12000)
+            except Exception:  # noqa: BLE001 - noted in the measures, the picture is still taken
+                MISSED.append(f"{self.name} {state}: device news still shown")
         for theme in themes:
             self.page.emulate_media(color_scheme=theme)
             time.sleep(0.25)
@@ -228,6 +238,10 @@ def pair(d, phone):
 
 def sessions(d):
     """The computer's sessions, in every state the inbox shows."""
+    if ARGS.readme:
+        import phone_safari_sim
+        phone_safari_sim.demo_sessions(d, WORK)
+        return
     projects = {"p-kelpie": "kelpie", "p-site": "website", "p-docs": "Tài liệu hướng dẫn"}
     d.call("mobile.set_projects", {"projects": projects})
     folders = {}
@@ -264,6 +278,82 @@ def sessions(d):
     return made
 
 
+# The sessions each screen opens, by role: this tour's own, or the README's (phone_safari_sim.demo_sessions).
+NAMES = {"ticker": "test-watch", "menu": "build-release", "approval": "release-notes", "done": "rename-helpers",
+         "typed": "pnpm test --run", "reply": "Wait, push it after CI is green."}
+if ARGS.readme:
+    NAMES = {"ticker": "Checks (watch)", "menu": "Migration", "approval": "Release 0.4.0", "done": "How retries work",
+             "typed": "python smoke.py", "reply": "Tag it after the release notes are reviewed."}
+
+
+# README mode's stand-in for GitHub's `gh`: it answers the three calls the daemon makes (crates/kelpied/src/pulls.rs) about one demo pull
+# request on the demo repository, from a state file the tour sets, and never reaches the network. `none` (no state file): no pull request,
+# as for every other picture; `running`: open, a required check still running; `open`: open, every required check passed, GitHub would
+# merge it; `merged`: what `gh pr merge` leaves.
+FAKE_GH = r'''
+import json, os, sys
+STATE, REPO, NUMBER = __STATE__, "github.com/kelpie-demo/atlas-commerce", 42
+HEAD = "8c1f4e2a9b7d6c5e3f1a0b2c4d6e8f9a1b3c5d7e"
+args = sys.argv[1:]
+def arg(flag):
+    return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
+def refuse(text, code=1):
+    sys.stderr.write(text + "\n")
+    sys.exit(code)
+if args[:1] != ["pr"] or len(args) < 3 or arg("-R") != REPO:
+    refuse("stand-in gh: only the demo pull request is simulated")
+try:
+    with open(STATE, encoding="utf-8") as f:
+        state = f.read().strip()
+except OSError:
+    state = "none"
+verb = args[1]
+if state == "none":
+    refuse('no pull requests found for branch "main"')
+if verb == "view":
+    def run(name, done=True, ok=True):
+        return {"__typename": "CheckRun", "name": name, "status": "COMPLETED" if done else "IN_PROGRESS", "conclusion": ("SUCCESS" if ok else "FAILURE") if done else ""}
+    running = state == "running"
+    print(json.dumps({"number": NUMBER, "title": "Accept pasted coupon codes with spaces", "url": "https://github.com/kelpie-demo/atlas-commerce/pull/42",
+                      "state": "MERGED" if state == "merged" else "OPEN", "isDraft": False, "baseRefName": "main", "headRefOid": HEAD,
+                      "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED" if running else "CLEAN",
+                      "statusCheckRollup": [run("build"), run("unit tests"), run("smoke checks", done=not running)]}))
+elif verb == "checks":
+    print(json.dumps([{"name": "build"}, {"name": "unit tests"}, {"name": "smoke checks"}]))
+    # gh exits non-zero while a check runs; the daemon reads the list it printed.
+    sys.exit(8 if state == "running" else 0)
+elif verb == "merge":
+    if state != "open" or arg("--match-head-commit") != HEAD:
+        refuse("stand-in gh: the demo pull request cannot be merged now")
+    with open(STATE, "w", encoding="utf-8") as f:
+        f.write("merged")
+else:
+    refuse("stand-in gh: only the demo pull request is simulated")
+'''
+
+
+def fake_gh_state(state):
+    """What the stand-in `gh` answers from now on: none, running, open or merged."""
+    with open(os.path.join(WORK, "fake-gh", "state"), "w", encoding="utf-8") as f:
+        f.write(state)
+
+
+def readme_tools():
+    """README mode, Unix: first on PATH for the daemon, the stand-in `gh` above (GitHub is never asked; it finds no pull request until the
+    merge step) and do-nothing `claude` and `codex`, so the new-session sheet lists the agents a person would have. None of the agents is
+    ever started by the tour."""
+    import phone_safari_sim
+    phone_safari_sim.fake_gh(WORK)
+    bin_dir = os.path.join(WORK, "fake-gh")
+    with open(os.path.join(bin_dir, "gh"), "w", encoding="utf-8") as f:
+        f.write(f"#!{sys.executable}\n" + FAKE_GH.replace("__STATE__", repr(os.path.join(bin_dir, "state"))))
+    for name in ("claude", "codex"):
+        path = os.path.join(bin_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, 0o755)
+
+
 def tour(d, phone, device_id):
     page = phone.page
     page.set_default_timeout(15000)
@@ -278,12 +368,12 @@ def tour(d, phone, device_id):
 
     def terminal():
         inbox()
-        phone.open_row("test-watch")
+        phone.open_row(NAMES["ticker"])
         phone.wait(".screen, [data-terminal]")
         time.sleep(1.0)
         phone.shot("11-terminal")
         phone.keyboard_up(".composer textarea")
-        page.keyboard.type("pnpm test --run")
+        page.keyboard.type(NAMES["typed"])
         phone.shot("12-terminal-keyboard", themes=("dark",))
         page.fill(".composer textarea", "")
         phone.keyboard_down()
@@ -291,7 +381,7 @@ def tour(d, phone, device_id):
 
     def prompt():
         inbox()
-        phone.open_row("build-release")
+        phone.open_row(NAMES["menu"])
         phone.wait("[data-prompt]", 20000)
         time.sleep(0.5)
         phone.shot("13-terminal-prompt")
@@ -299,7 +389,7 @@ def tour(d, phone, device_id):
 
     def chat():
         inbox()
-        phone.open_row("release-notes")
+        phone.open_row(NAMES["approval"])
         phone.wait("[data-perm]", 20000)
         time.sleep(0.8)
         phone.shot("14-chat-approval")
@@ -310,7 +400,7 @@ def tour(d, phone, device_id):
         time.sleep(0.4)
         phone.shot("16-chat-middle")
         phone.keyboard_up(".chat-composer textarea")
-        page.keyboard.type("Wait, push it after CI is green.")
+        page.keyboard.type(NAMES["reply"])
         phone.shot("17-chat-keyboard", themes=("dark",))
         page.fill(".chat-composer textarea", "")
         phone.keyboard_down()
@@ -318,7 +408,7 @@ def tour(d, phone, device_id):
 
     def done_chat():
         inbox()
-        phone.open_row("rename-helpers")
+        phone.open_row(NAMES["done"])
         time.sleep(1.5)
         phone.shot("18-chat-done")
     step(phone, "chat-done", done_chat)
@@ -385,6 +475,65 @@ def tour(d, phone, device_id):
         inbox()
     step(phone, "screen-picker", screen_picker)
 
+    if ARGS.readme and os.name != "nt":
+        step(phone, "merge", lambda: merge(phone, inbox))
+
+
+def pull_line(phone, want):
+    """The session view's pull-request line, read again (its refresh button) until `want(headline or other text, can)` holds. A phone may read
+    a pull request four times at once, then once every five seconds, so a refresh that came too soon is tried again."""
+    page = phone.page
+    phone.wait("[data-pull-line]", 20000)
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        line = page.locator("[data-pull-line]").first
+        if want(line.text_content() or "", "can" in (line.get_attribute("class") or "").split()) and page.locator("[data-pull-refresh]:not([disabled])").count() > 0:
+            time.sleep(0.4)
+            return
+        if page.locator("[data-pull-refresh]:not([disabled])").count() > 0:
+            page.click("[data-pull-refresh]")
+        time.sleep(6)
+    raise TimeoutError(f"the pull-request line never came to what was wanted: {page.locator('[data-pull-line]').first.text_content()}")
+
+
+def merge(phone, inbox):
+    """README mode: the demo pull request on the phone, from the stand-in `gh` (never GitHub): a required check still running, then one that can
+    be merged, the merge sheet, the passkey step, Merged, and the line after it. Control was granted by the screen-picker step."""
+    page = phone.page
+    try:
+        fake_gh_state("running")
+        inbox()
+        phone.open_row("Fix pasted coupon codes")
+        pull_line(phone, lambda text, can: "#42" in text and not can)
+        phone.shot("27-pull-running")
+        fake_gh_state("open")
+        pull_line(phone, lambda text, can: can)
+        phone.wait("[data-pull-merge]", 20000)
+        phone.shot("28-pull-can-merge")
+        page.click("[data-pull-merge]")
+        phone.wait("[data-merge-sheet=choose]")
+        time.sleep(0.4)
+        phone.shot("29-merge-sheet")
+        page.click("[data-merge-continue]")
+        phone.wait("[data-merge-sheet=verify]", 60000)
+        time.sleep(0.4)
+        phone.shot("30-merge-passkey")
+        page.click("[data-merge-go]")
+        phone.wait("[data-merge-sheet=done]", 60000)
+        time.sleep(0.4)
+        phone.shot("31-merged")
+        page.click("[data-merge-close]")
+        phone.wait("[data-merge-sheet]", state="detached")
+        pull_line(phone, lambda text, can: "#42" in text and not can)
+        phone.shot("32-pull-merged")
+    finally:
+        # Back to no pull request, so what the page last read of the demo project is that again (the offline pictures show it).
+        fake_gh_state("none")
+        try:
+            pull_line(phone, lambda text, can: "#42" not in text)
+        finally:
+            inbox()
+
 
 def offline(phone):
     page = phone.page
@@ -393,7 +542,7 @@ def offline(phone):
         phone.wait("[data-banner]", 30000)
         time.sleep(1.0)
         phone.shot("25-offline-inbox")
-        phone.open_row("test-watch")
+        phone.open_row(NAMES["ticker"])
         time.sleep(0.8)
         phone.shot("26-offline-terminal")
     step(phone, "offline", go)
@@ -402,6 +551,8 @@ def offline(phone):
 def main():
     from playwright.sync_api import sync_playwright
 
+    if ARGS.readme and os.name != "nt":
+        readme_tools()
     d = ps.Daemon(ARGS.exe).start()
     cert, key = ps.certificate_for_loopback(WORK)
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": cert, "key": key})
