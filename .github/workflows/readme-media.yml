@@ -8,6 +8,9 @@ name: readme-media
 # (docs/screenshots/README-media.json lists each one with what made it). Demo projects and simulated agents only: no sign-in, no model.
 on:
   workflow_dispatch:
+  # A branch of README pictures runs it on each push (a workflow can be started by hand only once it is on the default branch).
+  push:
+    branches: ["docs/readme-media-*"]
 
 env:
   KELPIE_REQUIRE_PHONE: "1"
