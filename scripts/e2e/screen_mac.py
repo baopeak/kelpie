@@ -2,7 +2,10 @@
 """The phone's remote screen on a Mac, end to end: the real app (a debug Kelpie.app, with its daemon and screen helper inside), a daemon of this
 script's own, and the phone page in Google Chrome as an iPhone (Playwright: 390×844 at 3×, touch, a virtual authenticator for the app lock).
 
-    python3 scripts/e2e/screen_mac.py <scratch-dir> <Kelpie.app> [--json out.json] [--chromium] [--no-refusal]
+    python3 scripts/e2e/screen_mac.py <scratch-dir> <Kelpie.app> [--json out.json] [--chromium] [--no-refusal] [--shots DIR] [--video DIR]
+
+--shots and --video make the README's pictures and clip from the same run (see their help); the document then has a demo name. Whatever
+else is on the Mac's screen is in them: leave only the desktop and the app.
 
 <Kelpie.app> is a debug bundle: `cd app && pnpm build:phone`, then `cargo build -p kelpied -p kelpie-screen`, the two copied to
 `app/src-tauri/binaries/<name>-<host triple>`, then `APPLE_SIGNING_IDENTITY=- pnpm tauri build --debug --bundles app --config
@@ -50,6 +53,10 @@ ap.add_argument("app")
 ap.add_argument("--json", default=None)
 ap.add_argument("--chromium", action="store_true", help="Playwright's Chromium instead of the installed Google Chrome")
 ap.add_argument("--no-refusal", action="store_true", help="skip the check without Screen Recording (it opens the app through LaunchServices)")
+ap.add_argument("--shots", default=None, help="a folder for README pictures: the phone page seeing the Mac (mac-screen-from-phone.png) and the "
+                "Mac's whole screen while it is shared (mac-sharing-border.png)")
+ap.add_argument("--video", default=None, help="a folder for the README clip mac-phone-control.mp4 (the phone page beside the Mac's screen while "
+                "the phone taps into TextEdit, types and presses ⌘S; needs ffmpeg) and its poster still")
 ARGS = ap.parse_args()
 if sys.platform != "darwin":
     raise SystemExit(__doc__)
@@ -71,9 +78,13 @@ os.environ.pop("KELPIE_ALLOW_REAL_DAEMON", None)
 
 PORT = 48900 + os.getpid() % 400
 PHONE_NAME = "Chrome iPhone"
-DOC = os.path.join(WORK, f"kelpie-mac-e2e-{os.getpid()}.txt")
-# Words TextEdit's spelling correction leaves as they are.
-TYPED = "KELPIE 4711 MAC TEXT"
+MEDIA = bool(ARGS.shots or ARGS.video)
+# For the README the document has a demo name and plain words; otherwise a name of this run's. Words TextEdit's spelling correction leaves
+# as they are.
+DOC = os.path.join(WORK, "release-notes.txt" if MEDIA else f"kelpie-mac-e2e-{os.getpid()}.txt")
+TYPED = "Release notes checked from my phone" if MEDIA else "KELPIE 4711 MAC TEXT"
+VIDEO_RAW = os.path.join(WORK, "video")
+clip = {}
 results = []
 procs = {}
 
@@ -184,9 +195,13 @@ def close_document():
 class Phone:
     def __init__(self, pw):
         self.browser = pw.chromium.launch() if ARGS.chromium else pw.chromium.launch(channel="chrome")
+        video = {"record_video_dir": VIDEO_RAW, "record_video_size": {"width": 390, "height": 844}} if ARGS.video else {}
         self.ctx = self.browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=3, is_mobile=True, has_touch=True, ignore_https_errors=True,
-                                           user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1")
+                                           user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
+                                           **video)
         self.page = self.ctx.new_page()
+        # The page's video starts with the page: clip times are measured from here.
+        self.started = time.time()
         self.errors = []
         self.page.on("pageerror", lambda e: self.errors.append(str(e)))
         self.cdp = self.ctx.new_cdp_session(self.page)
@@ -203,6 +218,7 @@ class Phone:
         return self.page.locator(selector).count() > 0
 
     def close(self):
+        self.ctx.close()  # writes the page's video, if one is recorded
         self.browser.close()
 
 
@@ -295,8 +311,67 @@ def see(phone, row):
 def type_on_phone(phone, text):
     page = phone.page
     box = page.locator("[data-screen-text]").first
-    box.fill(text)
+    if ARGS.video and len(text) > 1:
+        box.fill("")
+        box.type(text, delay=55)  # typed as a person would, for the clip
+    else:
+        box.fill(text)
     page.click("[data-screen-type]")
+
+
+# ---------- README pictures and the clip ----------
+
+
+def pause(seconds=1.2):
+    """A beat between steps, only while the clip is recorded, so a viewer can follow."""
+    if ARGS.video:
+        time.sleep(seconds)
+
+
+def take_shots(phone):
+    os.makedirs(ARGS.shots, exist_ok=True)
+    time.sleep(1.5)
+    phone.page.screenshot(path=os.path.join(ARGS.shots, "mac-screen-from-phone.png"))
+    # The Mac's whole screen while it is shared: the orange border and its badge.
+    subprocess.run(["screencapture", "-x", os.path.join(ARGS.shots, "mac-sharing-border.png")], check=True, timeout=30)
+    print("        pictures in " + ARGS.shots, flush=True)
+
+
+def start_clip(phone):
+    """The Mac's screen recorded from now (`screencapture -v`); the phone page's video has run since the page opened."""
+    clip["mac"] = os.path.join(WORK, "mac-screen.mov")
+    procs["screen_video"] = subprocess.Popen(["screencapture", "-x", "-v", "-V", "40", clip["mac"]], stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.5)  # screencapture takes a moment to start recording
+    clip["start"] = time.time() - phone.started
+
+
+def stop_clip(phone):
+    clip["end"] = time.time() - phone.started
+    p = procs.pop("screen_video")
+    p.send_signal(signal.SIGINT)
+    try:
+        p.wait(20)
+    except subprocess.TimeoutExpired:
+        p.kill()
+
+
+def make_clip(phone_video):
+    """The phone page (390×844) beside the Mac's screen scaled to the same height: H.264, no sound, small enough for a README."""
+    os.makedirs(ARGS.video, exist_ok=True)
+    out = os.path.join(ARGS.video, "mac-phone-control.mp4")
+    length = clip["end"] - clip["start"]
+    graph = ("[0:v]trim=start={s:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=390:844[p];"
+             "[1:v]trim=duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844[m];"
+             "[p][m]hstack=inputs=2,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(s=clip["start"], n=length)
+    for crf in (26, 30, 34):
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", phone_video, "-i", clip["mac"], "-filter_complex", graph, "-map", "[v]",
+                        "-an", "-c:v", "libx264", "-preset", "slow", "-crf", str(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart", out], check=True)
+        if os.path.getsize(out) <= 3 * 1024 * 1024:
+            break
+    # The poster: the last moment, the text saved.
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-sseof", "-1", "-i", out, "-frames:v", "1", os.path.join(ARGS.video, "mac-phone-control-poster.png")], check=True)
+    print(f"        clip: {out} ({os.path.getsize(out) // 1024} KB, {length:.1f} s)", flush=True)
 
 
 # ---------- the run ----------
@@ -320,22 +395,30 @@ def scenario(d, pw):
         check("…the key bar's modifiers are ⌘ ⌥ ⌃ ⇧", mods == ["⌘", "⌥", "⌃", "⇧"], mods)
         keys = phone.js("() => [...document.querySelectorAll('.keybar [data-key]')].map((b) => b.dataset.key)")
         check("…with ⌘Space for Spotlight and no menu key", "Spotlight" in keys and "ContextMenu" not in keys and "Meta" not in keys, keys)
+        if ARGS.shots:
+            take_shots(phone)
 
         # 4. A tap on the window, with Finder in front, brings TextEdit to the front.
         subprocess.run(["open", "-a", "Finder"])
         until(lambda: "Finder" in front_app(), 5)
         before = front_app()
+        if ARGS.video:
+            start_clip(phone)
         page.click("[data-screen-mode]")
         check("…the mode switches to direct touch", "Direct" in page.locator("[data-screen-mode]").inner_text())
+        pause()
         box = page.locator(".screen-canvas").bounding_box()
         phone.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         after = until(lambda: "TextEdit" in front_app() and front_app(), 5) or front_app()
         check("4. a tap on the picture clicks the window: TextEdit comes to the front", "TextEdit" in after and "TextEdit" not in before, f"{before} -> {after}")
+        pause()
 
         # 5. Text, then ⌘ then S.
         type_on_phone(phone, TYPED)
         check("5. the phone says the text was typed", bool(until(lambda: phone.has("[data-text-result=sent]"), 10)), page.locator("[data-text-result]").all_inner_texts())
+        pause()
         page.click(".keybar [data-mod=meta]")
+        pause(0.8)
         type_on_phone(phone, "s")
 
         def saved():
@@ -343,6 +426,9 @@ def scenario(d, pw):
                 return TYPED in f.read()
 
         check("…and ⌘ then S saves it: the file holds the text", bool(until(saved, 10)), open(DOC, encoding="utf-8").read()[:80])
+        if ARGS.video:
+            pause(2.5)
+            stop_clip(phone)
         stats = phone.js("() => window.__kelpieScreenTimes?.()")
         print("        phone: " + json.dumps({"frames_drawn": (stats or {}).get("presentInterval", {}).get("n")}))
         print("        quality: " + page.locator(".screen-quality").inner_text().strip())
@@ -379,7 +465,10 @@ def scenario(d, pw):
                 check("…and no picture starts", page.locator(".screen-live").count() == 0)
     finally:
         check("no error on the page", not phone.errors, phone.errors[:3])
+        video = phone.page.video.path() if ARGS.video and phone.page.video else None
         phone.close()
+        if video and "end" in clip:
+            make_clip(video)
 
 
 def main():
@@ -398,6 +487,10 @@ def main():
         traceback.print_exc()
         check("scenario ran to completion", False)
     finally:
+        recording = procs.pop("screen_video", None)
+        if recording is not None and recording.poll() is None:
+            recording.send_signal(signal.SIGINT)
+            recording.wait(20)
         stop_app()
         close_document()
         assert os.environ["KELPIE_ENDPOINT"].startswith("kelpie-screen-mac-")

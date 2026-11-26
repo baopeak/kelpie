@@ -37,6 +37,15 @@ from smoke_support import Run, daemon, default_app
 from readme_demo import seed
 
 S = "window.__kelpie.store"
+# What the tour types into a shell: PowerShell on Windows, a POSIX shell (zsh or bash) elsewhere.
+WINDOWS = os.name == "nt"
+# zsh marks output that ends without a newline with a reverse "%": not in pictures.
+PROMPT = "function prompt { 'PS> ' }; Clear-Host" if WINDOWS else "PS1='$ '; [ -n \"$ZSH_VERSION\" ] && unsetopt PROMPT_SP; clear"
+ASK = 'Read-Host "Run the next demo check (y/n)"' if WINDOWS else "printf 'Run the next demo check (y/n) '; read answer"
+
+
+def go_to(folder):
+    return f"Set-Location '{folder}'; Clear-Host" if WINDOWS else f"cd '{folder}'; clear"
 
 
 def capture(run, projects, out, chat=None):
@@ -88,7 +97,7 @@ def capture(run, projects, out, chat=None):
         if not info:
             raise RuntimeError("shell did not start: " + name)
         time.sleep(2)
-        daemon(d, "session.input", {"handle": info["handle"], "data": "function prompt { 'PS> ' }; Clear-Host\r"})
+        daemon(d, "session.input", {"handle": info["handle"], "data": PROMPT + "\r"})
         time.sleep(0.5)
         return info
 
@@ -157,7 +166,7 @@ def capture(run, projects, out, chat=None):
     d.keys("ctrl+shift+n")
     shot("new-session")
     esc()
-    send(background[0], 'Read-Host "Run the next demo check (y/n)"')
+    send(background[0], ASK)
     d.wait(f"return Object.values({S}.sessions).some(s=>s.handle===arguments[0] && s.status==='waiting')", 30, 0.25, background[0]["handle"])
     d.keys("ctrl+shift+m")
     shot("dashboard")
@@ -185,7 +194,7 @@ def capture(run, projects, out, chat=None):
     d.wait("return !!document.querySelector('.floating-term .xterm')", 20)
     fh = d.js(f"return {S}.sessions[{S}.state.floating.active].handle")
     time.sleep(2)
-    daemon(d, "session.input", {"handle": fh, "data": "function prompt { 'PS> ' }; Set-Location '" + projects[0]["path"] + "'; Clear-Host\r"})
+    daemon(d, "session.input", {"handle": fh, "data": ("function prompt { 'PS> ' }; " if WINDOWS else PROMPT.replace("clear", "")) + go_to(projects[0]["path"]) + "\r"})
     time.sleep(0.8)
     daemon(d, "session.input", {"handle": fh, "data": "git worktree list; python smoke.py\r"})
     shot("floating", 2)
@@ -330,7 +339,9 @@ def capture(run, projects, out, chat=None):
     shot("vietnamese", 2)
     d.js(f"{S}.setSettings({{language:'en'}})")
     version = json.loads((Path(__file__).resolve().parents[2] / "app" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))["version"]
-    (out / "capture.json").write_text(json.dumps({
+    # open() rather than write_text(newline=), which macOS's own Python 3.9 lacks.
+    with open(out / "capture.json", "w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps({
         "application": "Kelpie", "app_version": version, "platform": platform.platform(terse=True),
         "native": True, "viewport": [1920, 1080],
         "projects": [p["name"] for p in projects], "worktrees": ["feature/coupon-validation", "fix/shipping-threshold"],
@@ -339,7 +350,7 @@ def capture(run, projects, out, chat=None):
                          "labelled inbox samples, disabled automations, a run waiting for approval, documentation-address SSH hosts "
                          "that are never connected to, and a demo plugin that stays disabled. Shell output, the catalog server's "
                          "port and the optional chat answer are real.",
-        "checks": run.results}, indent=2) + "\n", encoding="utf-8", newline="\n")
+        "checks": run.results}, indent=2) + "\n")
     return shots
 
 
