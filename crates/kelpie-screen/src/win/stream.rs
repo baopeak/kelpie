@@ -1,27 +1,19 @@
-//! One stream, from `start` to its end, and `Host`, which the stdin commands reach.
+//! `Host`, which the stdin commands reach, and the Windows side of one stream: the `stream_core::Backend` over D3D11, Desktop Duplication,
+//! Windows Graphics Capture and Media Foundation, the border with the stop hotkey, and the input thread.
 //!
-//! A stream is two threads. The **stream thread** owns the device, the capture, the converter and the encoder: it looks at the machine four
-//! times a second (states, the window's place, the border), takes the newest picture when the phone has room and the pacer says so
-//! (`pace::Pacer`: a constant-rate timer from the last capture's start, one frame in the encoder unless it asks for another), encodes it,
-//! rewrites the SPS (`sps`), sends video, paint-over tiles (`tiles`) and the cursor, and once a second the stats with the stages' timings,
-//! and asks the device four times a second whether it was removed. A still picture is topped off in the codec first (`pace::TopOff`, not for
-//! a caret's few pixels), and only then painted over with tiles; an update or a keyframe too large to arrive in time is encoded at a one-frame
-//! bitrate dip (`pace::BigFrame`), undone however that frame leaves the encoder (`pace::Dip`). The **input thread** does the phone's input
-//! as it comes, so that encoding never delays a click; it reads the target's place and what the state allows from what the stream thread
-//! last wrote.
-//!
-//! Frames lost on the way never hold the stream (`control::Flight`): a keyframe request, or the daemon saying what it dropped, gives up the
-//! frames in flight. A frame that is not sent after all (too large) puts its unpaint rectangles back, so a crisp tile is never left over a
-//! change. Sharing does not start without the border and the stop hotkey.
+//! A stream is two threads. The **stream thread** owns the device, the capture, the converter and the encoder and runs `stream_core::run`
+//! (what decides anything, in the order it is decided: see there). The **input thread** does the phone's input as it comes, so that encoding
+//! never delays a click; it reads the target's place and what the state allows from what the stream thread last wrote (`Backend::publish`).
+//! Sharing does not start without the border and the stop hotkey.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
+use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
@@ -35,52 +27,16 @@ use super::input_win::{self, Geometry, Outcome};
 use super::states_win::Looker;
 use super::targets_win::{self, hwnd};
 use super::{system, wall_ms};
-use crate::control::{Controller, Event, Flight, Params, Stats, MIN_KBPS};
-use crate::pace::{self, BigFrame, Dip, EncoderRate, Pacer, ReencodeGate, TopOff, BIG_FRAME_PERCENT};
+use crate::control::Params;
 use crate::geom::{self, Rect};
 use crate::input::{fresh, parse_hotkey, Hotkey, QUEUE};
-use crate::sps;
-use crate::states::{input_policy, InputPolicy, State, Tracker};
+use crate::states::{input_policy, InputPolicy, Observed, State};
+use crate::stream_core::{self, emit, Backend, Cmd, Config, Encoded, EncoderInfo, Grab, InputSignal, Parsed};
 use crate::targets::{self, TargetId};
-use crate::tiles::{Grid, Sharpen};
-use crate::tile_image;
-use crate::wire::{self, Video};
+use crate::wire::Shape;
 
-const LOOK_EVERY: Duration = Duration::from_millis(250);
-/// How often the monitors are looked at again (one plugged in or out moves the virtual desktop `SendInput` maps over).
-const DESKTOP_EVERY: Duration = Duration::from_secs(2);
-const CURSOR_EVERY: Duration = Duration::from_millis(33);
-/// How long the loop waits for a picture while frames are still in the encoder (its output is taken on the way round).
-const ENCODER_POLL_MS: u64 = 4;
-/// How long the loop waits for a change once a capture is due (it comes round for the encoder, the cursor and the app at least this often).
-const CAPTURE_WAIT_MS: u64 = 30;
-/// Captures or conversions failed this many times in a row: the device is asked whether it was removed.
-const DEVICE_CHECK_AFTER: u32 = 20;
-/// Paint-over tiles: at most this share of the video's rate, with this much at once.
-const TILE_SHARE: f64 = 0.5;
-const TILE_BURST: f64 = 256.0 * 1024.0;
-const TILE_CELLS_AT_ONCE: usize = 32;
 /// How long `start` waits for the stream's first look (the app waits a little longer, the daemon longer still).
 const START_WAIT: Duration = Duration::from_secs(7);
-
-fn emit(out: &SyncSender<Vec<u8>>, v: Value) {
-    let _ = out.send(wire::out_json(&v));
-}
-
-enum Cmd {
-    /// `link_full_ms`: how long the daemon has seen the link's window full (`Bandwidth::on_link_window`); `win`: the daemon takes a window
-    /// sized to the link (`Controller::window`), said with the `window` event.
-    Flow { acked: u32, rtt_ms: u32, level: u8, lost_tiles: bool, dropped_through: u32, raw: u64, wire: u64, link_full_ms: u64, win: bool },
-    Keyframe,
-    /// The part of the picture the phone shows, sent crisp once (`tiles::Sharpen`).
-    Sharpen(Rect),
-    Pause(bool),
-    ResumeLoad,
-    /// The most the stream may send from now on (kbps; None: no more than any stream): the way changed (the relay WebSocket is held to a rate,
-    /// peer to peer is not), or the daemon holds it under the rate a lossy path carries.
-    Cap(Option<u32>),
-    Stop(String),
-}
 
 enum InputCmd {
     Ops(Vec<Value>, Option<u64>),
@@ -111,18 +67,6 @@ impl Drop for InputGuard {
             let _ = t.join();
         }
     }
-}
-
-/// A frame in the encoder: its time (the encoder's key for it), when it went in, when its picture was taken (ms since the stream started),
-/// the conversion's time, and whether it is a top-off pass of a still picture.
-struct InEncoder {
-    time: i64,
-    began: Instant,
-    captured: u64,
-    convert_ms: f64,
-    pass: bool,
-    /// The pixels its picture changed (all of it for a keyframe): a small change does not start a top-off.
-    area: u64,
 }
 
 unsafe impl Send for Shared {}
@@ -234,7 +178,6 @@ impl Host {
             return (cmd == "text").then(|| Err("that screen has ended".to_string()));
         };
         let t = req["t"].as_u64();
-        let n = |k: &str| req[k].as_u64().unwrap_or(0);
         match cmd {
             "input" => {
                 let ops = crate::input::checked_ops(&req["ops"])?;
@@ -244,51 +187,20 @@ impl Host {
             }
             "text" => {
                 let Some(text) = req["text"].as_str().and_then(crate::input::checked_text) else { return Some(Err("not text that can be typed".into())) };
-                Some(match r.input.try_send(InputCmd::Text(text.to_string(), t, n("id"))) {
+                Some(match r.input.try_send(InputCmd::Text(text.to_string(), t, req["id"].as_u64().unwrap_or(0))) {
                     // The answer comes from the input thread, once typed.
                     Ok(()) => return None,
                     Err(_) => Err("too much input waiting".into()),
                 })
             }
-            "flow" => {
-                let _ = r.cmds.send(Cmd::Flow {
-                    acked: n("acked") as u32,
-                    rtt_ms: n("rtt_ms").min(60_000) as u32,
-                    level: n("level").min(3) as u8,
-                    lost_tiles: req["lost_tiles"].as_bool() == Some(true),
-                    dropped_through: n("dropped_through") as u32,
-                    raw: n("raw"),
-                    wire: n("wire"),
-                    link_full_ms: n("link_full_ms").min(3_600_000),
-                    win: req["win"].as_bool() == Some(true),
-                });
-                None
-            }
-            "sharpen" => {
-                let rect = &req["rect"];
-                let v = |k: &str| rect[k].as_u64().filter(|v| *v <= u64::from(u16::MAX)).map(|v| v as i32);
-                if let (Some(x), Some(y), Some(w), Some(h)) = (v("x"), v("y"), v("w"), v("h")) {
-                    let _ = r.cmds.send(Cmd::Sharpen(Rect::new(x, y, w, h)));
+            _ => match Cmd::parse(cmd, req) {
+                Parsed::Cmd(c) => {
+                    let _ = r.cmds.send(c);
+                    None
                 }
-                None
-            }
-            "keyframe" => {
-                let _ = r.cmds.send(Cmd::Keyframe);
-                None
-            }
-            "pause" => {
-                let _ = r.cmds.send(Cmd::Pause(req["paused"].as_bool() == Some(true)));
-                None
-            }
-            "resume_load" => {
-                let _ = r.cmds.send(Cmd::ResumeLoad);
-                None
-            }
-            "cap" => {
-                let _ = r.cmds.send(Cmd::Cap(req["max_kbps"].as_u64().map(|k| k.min(u64::from(u32::MAX)) as u32)));
-                None
-            }
-            _ => Some(Err(format!("unknown command {cmd:?}"))),
+                Parsed::Nothing => None,
+                Parsed::Unknown => Some(Err(format!("unknown command {cmd:?}"))),
+            },
         }
     }
 }
@@ -303,11 +215,6 @@ struct Opts {
     tiles: bool,
     /// The most the stream may send (kbps), for a way that is held to a rate (the relay WebSocket).
     max_kbps: Option<u32>,
-}
-
-/// `KELPIE_SCREEN_TEST_ENCODE_DELAY_MS`: added to every encode, to drive the ladder where there is no GPU worth measuring.
-fn test_delay() -> Option<Duration> {
-    std::env::var("KELPIE_SCREEN_TEST_ENCODE_DELAY_MS").ok()?.parse::<u64>().ok().filter(|ms| *ms > 0 && *ms <= 2000).map(Duration::from_millis)
 }
 
 /// The device, the capture, where the target is, its title (shown on the desktop and the phone) and, for a window, its program's file name (all
@@ -346,13 +253,196 @@ fn open_source(opts: &Opts) -> Result<(Device, Source, Rect, String, String), St
     }
 }
 
+/// The machine of one stream. Its fields drop in this order: on a panic the input thread is stopped and joined before the border and its
+/// hotkey go, and the device goes last.
+struct WinBackend {
+    input_guard: Option<InputGuard>,
+    border: Option<Border>,
+    shared: Option<Arc<Mutex<Shared>>>,
+    hk_rx: Receiver<()>,
+    outcome_rx: Receiver<Outcome>,
+    stopping: Arc<AtomicBool>,
+    readback: Readback,
+    looker: Looker,
+    /// The window target and its process.
+    window_handle: Option<(HWND, u32)>,
+    desktop: Rect,
+    /// The picture's size: a monitor's never changes, a window's follows `resize`.
+    src: (u32, u32),
+    conv: Converter,
+    encoder: Encoder,
+    source: Source,
+    d: Device,
+}
+
+impl WinBackend {
+    fn device_removed(&self) -> bool {
+        unsafe { self.d.device.GetDeviceRemovedReason() }.is_err()
+    }
+}
+
+impl Backend for WinBackend {
+    type Picture = ID3D11Texture2D;
+    type Input = ID3D11Texture2D;
+
+    fn hotkey_pressed(&mut self) -> bool {
+        self.hk_rx.try_recv().is_ok()
+    }
+
+    fn input_signal(&mut self) -> Option<InputSignal> {
+        while let Ok(o) = self.outcome_rx.try_recv() {
+            match o {
+                Outcome::Covered => return Some(InputSignal::Covered),
+                Outcome::ForeignDialog => return Some(InputSignal::ForeignDialog),
+                Outcome::NotFront => return Some(InputSignal::NotFront),
+                Outcome::Blocked => return Some(InputSignal::Blocked),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn healthy(&self) -> bool {
+        !self.device_removed()
+    }
+
+    fn look(&mut self) -> Observed {
+        self.looker.look(self.window_handle)
+    }
+
+    fn window_rect(&mut self) -> Option<Rect> {
+        let (h, _) = self.window_handle?;
+        let r = targets_win::window_rect(h)?;
+        if let Some(border) = &self.border {
+            border.place(r);
+        }
+        Some(r)
+    }
+
+    fn publish(&mut self, rect: Rect, src: (u32, u32), policy: InputPolicy, refresh_desktop: bool) {
+        if refresh_desktop {
+            let monitors = d3d::monitors();
+            if !monitors.is_empty() {
+                self.desktop = geom::virtual_desktop(&monitors);
+            }
+        }
+        if let Some(shared) = &self.shared {
+            if let Ok(mut s) = shared.lock() {
+                s.geometry.rect = rect;
+                s.geometry.src = src;
+                s.geometry.desktop = self.desktop;
+                s.policy = policy;
+            }
+        }
+    }
+
+    fn grab(&mut self, wait_ms: u64) -> Grab<ID3D11Texture2D> {
+        match &mut self.source {
+            Source::Monitor(dxgi, tex) => match dxgi.grab(&self.d, wait_ms as u32, tex) {
+                capture_dxgi::Grab::Frame { dirty } => Grab::Frame { picture: tex.clone(), size: self.src, dirty, first_full: dxgi.first_full.take() },
+                capture_dxgi::Grab::Changed => Grab::End("display_changed"),
+                capture_dxgi::Grab::Unavailable => Grab::Failed,
+                _ => Grab::Idle,
+            },
+            Source::Window(wgc, ..) => match wgc.grab(Duration::from_millis(wait_ms)) {
+                (capture_wgc::Grab::Frame { w, h }, Some(t)) => Grab::Frame { picture: t, size: (w, h), dirty: None, first_full: None },
+                (capture_wgc::Grab::Failed, _) => Grab::Failed,
+                _ => {
+                    if wgc.closed.load(Ordering::SeqCst) {
+                        Grab::End("closed")
+                    } else {
+                        Grab::Idle
+                    }
+                }
+            },
+        }
+    }
+
+    fn resize(&mut self, src: (u32, u32), params: &Params, hardware: bool) -> Result<(), String> {
+        let fps = u32::from(params.fps);
+        match (Converter::new(&self.d, src, (params.w, params.h), fps), Encoder::open(&self.d, params.w, params.h, fps, params.kbps, hardware)) {
+            (Ok(c), Ok(e)) => {
+                self.conv = c;
+                self.encoder = e;
+                self.src = src;
+                Ok(())
+            }
+            (Err(e), _) => Err(e.to_string()),
+            (_, Err(e)) => Err(e.to_string()),
+        }
+    }
+
+    fn software_encoder(&mut self, params: &Params) -> Result<(), String> {
+        self.encoder = Encoder::open(&self.d, params.w, params.h, u32::from(params.fps), params.kbps, false).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn encoder_info(&self) -> EncoderInfo {
+        EncoderInfo { hardware: self.encoder.hardware, name: self.encoder.name.clone(), refused: self.encoder.refused.clone(), first_output_ms: self.encoder.first_output_ms, sequence_header: self.encoder.sequence_header.clone() }
+    }
+
+    fn hardware(&self) -> bool {
+        self.encoder.hardware
+    }
+
+    fn held(&self) -> u64 {
+        self.encoder.held()
+    }
+
+    fn first_output_ms(&self) -> Option<f64> {
+        self.encoder.first_output_ms
+    }
+
+    fn asks_for_input(&self) -> bool {
+        self.encoder.asks_for_input()
+    }
+
+    fn set_bitrate(&mut self, kbps: u32) {
+        self.encoder.set_bitrate(kbps);
+    }
+
+    fn convert(&mut self, picture: &ID3D11Texture2D) -> Result<ID3D11Texture2D, String> {
+        self.conv.convert(picture).map_err(|e| e.to_string())
+    }
+
+    fn encode(&mut self, input: &ID3D11Texture2D, time: i64, key: bool) -> Result<bool, String> {
+        self.encoder.encode(&self.d, input, time, key).map_err(|e| e.to_string())
+    }
+
+    fn poll(&mut self) -> Result<Vec<Encoded>, String> {
+        let done = self.encoder.poll().map_err(|e| e.to_string())?;
+        Ok(done.into_iter().map(|e| Encoded { data: e.data, key: e.key, time: e.time, qp: e.qp }).collect())
+    }
+
+    fn readback(&mut self, picture: &ID3D11Texture2D, src: (u32, u32), dirty: Option<&[Rect]>) -> bool {
+        self.readback.read_regions(&self.d, picture, src.0, src.1, dirty).is_ok()
+    }
+
+    fn pixels(&self) -> (&[u8], usize) {
+        (&self.readback.buf, self.readback.stride)
+    }
+
+    fn cursor(&mut self) -> (Shape, bool, i32, i32) {
+        targets_win::cursor()
+    }
+
+    fn finish(&mut self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        drop(self.border.take());
+        // The input thread ends once it sees it holds the last reference to what it reads.
+        drop(self.shared.take());
+        drop(self.input_guard.take());
+        system::streaming(false);
+    }
+}
+
 fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncSender<Vec<u8>>, started: Sender<Result<Value, String>>, stopping: Arc<AtomicBool>) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
     let _ = encode_mf::startup();
     let _mmcss = system::Mmcss::capture();
-    let (d, mut source, mut rect, title, exe) = match open_source(&opts) {
+    let (d, source, rect, title, exe) = match open_source(&opts) {
         Ok(v) => v,
         Err(e) => {
             let _ = started.send(Err(e));
@@ -364,23 +454,11 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         Source::Window(_, h, pid) => Some((hwnd(*h), *pid)),
         _ => None,
     };
-    let mut src = (rect.w.max(2) as u32 & !1, rect.h.max(2) as u32 & !1);
-    let started_at = Instant::now();
-    // The wall clock at the start, from which each frame's capture time is counted: the phone tells how old a picture is with it.
-    let t0 = wall_ms();
-    let now_ms = || started_at.elapsed().as_millis() as u64;
-    let mut ctl = Controller::new(src, window, false, 0);
-    ctl.set_level(opts.level, 0);
-    // Started on a loaded machine (L2 for the CPU, lag or heat; the daemon tells the helper the level without memory): the cheapest picture first.
-    if opts.level >= 2 {
-        ctl.start_low();
-    }
-    if let Some(cap) = opts.max_kbps {
-        ctl.bandwidth.set_cap(cap);
-    }
-    let mut params: Params = ctl.params();
-    let delay = test_delay();
-    let mut encoder = match Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, true).or_else(|_| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false)) {
+    let src = (rect.w.max(2) as u32 & !1, rect.h.max(2) as u32 & !1);
+    let cfg = Config { sc: opts.sc.clone(), window, src, rect, level: opts.level, tiles: opts.tiles, max_kbps: opts.max_kbps, title, exe };
+    let mut ctl = stream_core::controller(&cfg);
+    let mut params = ctl.params();
+    let encoder = match Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, true).or_else(|_| Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false)) {
         Ok(e) => e,
         Err(e) => {
             let _ = started.send(Err(format!("no H.264 encoder works on this computer: {e}")));
@@ -391,17 +469,13 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
         ctl.set_software(true);
         params = ctl.params();
     }
-    let mut conv = match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps)) {
+    let conv = match Converter::new(&d, src, (params.w, params.h), u32::from(params.fps)) {
         Ok(c) => c,
         Err(e) => {
             let _ = started.send(Err(format!("the picture cannot be converted for the encoder: {e}")));
             return;
         }
     };
-    let mut ps = sps::Params::default();
-    if let Some(h) = &encoder.sequence_header {
-        ps.seed(h);
-    }
     // The border and the hotkey first: without them nothing is shared, and the phone is told why.
     let (hk_tx, hk_rx) = channel();
     let label = format!("Shared with {} · {} stops it", opts.device, opts.hotkey_text);
@@ -414,532 +488,15 @@ fn run(opts: Opts, cmds: Receiver<Cmd>, input_rx: Receiver<InputCmd>, out: SyncS
     };
     system::streaming(true);
     // Input: its own thread, with the place and the policy the stream thread keeps up to date.
-    let mut desktop = geom::virtual_desktop(&d3d::monitors());
+    let desktop = geom::virtual_desktop(&d3d::monitors());
     let shared = Arc::new(Mutex::new(Shared { geometry: Geometry { window: window_handle.map(|(h, _)| h), rect, src, desktop }, policy: input_policy(State::Live, window) }));
     let (outcome_tx, outcome_rx) = channel::<Outcome>();
-
-    // Declared after the border: on the way out, normal or a panic, the input thread is stopped and joined before the border and its hotkey go.
     let input_guard = {
         let (shared, out, stopping) = (shared.clone(), out.clone(), stopping.clone());
         InputGuard { stopping: stopping.clone(), thread: Some(std::thread::spawn(move || input_loop(input_rx, shared, outcome_tx, out, stopping))) }
     };
-    let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": title, "exe": exe, "w": src.0, "h": src.1, "encoder": if encoder.hardware { "hw" } else { "sw" }, "encoder_name": encoder.name, "refused": encoder.refused, "t0": t0})));
-    emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": if encoder.hardware { "hw" } else { "sw" }, "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms}));
-
-    let mut tracker = Tracker::default();
-    let looker = Looker::new();
-    let mut stats = Stats::new(0);
-    let mut grid = opts.tiles.then(|| Grid::new(src.0, src.1, 0));
-    let mut readback = Readback::new();
-    let mut flight = Flight::default();
-    let mut pacer = Pacer::default();
-    let mut top_off = TopOff::default();
-    let mut big = BigFrame::default();
-    let mut sharpen = Sharpen::default();
-    // The window last told to the app (frames, bytes), once the daemon takes one.
-    let mut window_told: Option<(u32, usize)> = None;
-    let mut rate = EncoderRate::new(params.kbps);
-    // A big frame's bitrate dip, undone however that frame leaves the encoder.
-    let mut dip = Dip::default();
-    let mut in_encoder: VecDeque<InEncoder> = VecDeque::new();
-    let mut link_paused = false;
-    let (mut unpaint, mut unpaint_all) = (Vec::<Rect>::new(), false);
-    let (mut tile_id, mut tile_tokens, mut tile_at) = (0u32, TILE_BURST, now_ms());
-    let (mut last_look, mut last_desktop, mut last_cursor) = (Instant::now() - LOOK_EVERY, Instant::now(), Instant::now());
-    let mut cursor_told: Option<(u8, bool, i32, i32)> = None;
-    // The last picture taken: encoded again when a keyframe is owed and nothing new came (a still window sends no frames by itself), and for
-    // the top-off passes of a still one.
-    let mut last_picture: Option<ID3D11Texture2D> = None;
-    let mut reencode = ReencodeGate::default();
-    // Captures and conversions failed in a row (`DEVICE_CHECK_AFTER`).
-    let mut failures = 0u32;
-    let reason: String = 'stream: loop {
-        let now = now_ms();
-        // What the app said.
-        loop {
-            match cmds.try_recv() {
-                Ok(Cmd::Stop(r)) => break 'stream r,
-                Ok(Cmd::Flow { acked, rtt_ms, level, lost_tiles, dropped_through, raw, wire, link_full_ms, win }) => {
-                    ctl.set_win(win);
-                    flight.acked(acked);
-                    ctl.bandwidth.on_link_window(link_full_ms);
-                    // Frames the daemon dropped will never be acknowledged: they no longer count as in flight.
-                    flight.dropped_through(dropped_through);
-                    if rtt_ms > 0 {
-                        ctl.bandwidth.on_ack(rtt_ms, now);
-                        stats.ack(rtt_ms);
-                    }
-                    ctl.bandwidth.on_wire(raw, wire);
-                    ctl.set_level(level, now);
-                    if lost_tiles {
-                        if let Some(g) = &mut grid {
-                            g.forget_painted();
-                        }
-                        unpaint_all = true;
-                    }
-                }
-                Ok(Cmd::Keyframe) => flight.ask_key(now),
-                // Only with crisp tiles on in Settings, only while they are off for the link (else they go anyway), and not on a machine at L3,
-                // which has no CPU for them.
-                Ok(Cmd::Sharpen(r)) => {
-                    if grid.is_some() && ctl.level() < 3 && sharpen.ask(r, ctl.crisp_ok(flight.inflight(), now), now) {
-                        top_off.again(now);
-                        // Paced as tiles are, at their share of the video's rate: no burst ahead of the video on the slow link it is for.
-                        tile_tokens = tile_tokens.min(f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE);
-                    }
-                }
-                Ok(Cmd::Pause(p)) => {
-                    link_paused = p;
-                    top_off.stop();
-                    if !p {
-                        // A new connection: a fresh keyframe, and every tile painted again on it.
-                        flight.restart();
-                        if let Some(g) = &mut grid {
-                            g.forget_painted();
-                        }
-                        unpaint_all = true;
-                    }
-                }
-                Ok(Cmd::Cap(kbps)) => ctl.bandwidth.set_cap(kbps.unwrap_or(crate::control::MAX_KBPS)),
-                Ok(Cmd::ResumeLoad) => {
-                    ctl.resume(now);
-                    flight.restart();
-                    emit(&out, json!({"event": "state", "sc": opts.sc, "state": tracker.state().name()}));
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break 'stream "app_closed".to_string(),
-            }
-        }
-        if hk_rx.try_recv().is_ok() {
-            break 'stream "hotkey".to_string();
-        }
-        while let Ok(o) = outcome_rx.try_recv() {
-            match o {
-                Outcome::Covered => {
-                    if let Some(s) = tracker.covered() {
-                        emit(&out, json!({"event": "state", "sc": opts.sc, "state": s.name()}));
-                    }
-                }
-                Outcome::ForeignDialog => {
-                    if let Some(s) = tracker.covered_by_dialog() {
-                        emit(&out, json!({"event": "state", "sc": opts.sc, "state": s.name()}));
-                    }
-                }
-                Outcome::NotFront => emit(&out, json!({"event": "input_refused", "sc": opts.sc, "why": "not_front"})),
-                Outcome::Blocked => emit(&out, json!({"event": "input_blocked", "sc": opts.sc})),
-                _ => {}
-            }
-        }
-        // Four times a second: the states, the window's place; every two seconds, the monitors.
-        if last_look.elapsed() >= LOOK_EVERY {
-            last_look = Instant::now();
-            // A graphics driver that restarted took the device: found within a look, even when no frame comes to fail.
-            if unsafe { d.device.GetDeviceRemovedReason() }.is_err() {
-                break 'stream "device_lost".to_string();
-            }
-            if let Some(s) = tracker.look(&looker.look(window_handle), window) {
-                emit(&out, json!({"event": "state", "sc": opts.sc, "state": s.name()}));
-                if s.ends() {
-                    break 'stream "closed".to_string();
-                }
-                if s == State::Live {
-                    flight.restart();
-                }
-            }
-            if let Some((h, _)) = window_handle {
-                if let Some(r) = targets_win::window_rect(h) {
-                    rect = r;
-                    border.place(r);
-                }
-            }
-            if last_desktop.elapsed() >= DESKTOP_EVERY {
-                last_desktop = Instant::now();
-                let monitors = d3d::monitors();
-                if !monitors.is_empty() {
-                    desktop = geom::virtual_desktop(&monitors);
-                }
-            }
-            if let Ok(mut s) = shared.lock() {
-                s.geometry.rect = rect;
-                s.geometry.src = src;
-                s.geometry.desktop = desktop;
-                s.policy = input_policy(tracker.state(), window);
-            }
-        }
-        flight.tick(now);
-        if let Some(Event::PausedForLoad) = ctl.tick(flight.inflight(), now) {
-            emit(&out, json!({"event": "paused", "sc": opts.sc, "reason": "load"}));
-        }
-        // The window sized to the link, said to the daemon when it changes (only to one that takes it).
-        let window = ctl.window();
-        if ctl.win() && window_told != Some(window) {
-            window_told = Some(window);
-            emit(&out, json!({"event": "window", "sc": opts.sc, "frames": window.0, "bytes": window.1}));
-        }
-        // What the ladder says now: a new size is a new converter and encoder; a new bitrate is set live, when it is worth a reconfiguration
-        // (`pace::EncoderRate`), and not while a big frame's dip holds.
-        let next = ctl.params();
-        if (next.w, next.h) != (params.w, params.h) {
-            match (Converter::new(&d, src, (next.w, next.h), u32::from(next.fps)), Encoder::open(&d, next.w, next.h, u32::from(next.fps), next.kbps, !ctl.software())) {
-                (Ok(c), Ok(e)) => {
-                    conv = c;
-                    encoder = e;
-                    if let Some(h) = &encoder.sequence_header {
-                        ps.seed(h);
-                    }
-                    in_encoder.clear();
-                    pacer.clear();
-                    top_off.stop();
-                    rate = EncoderRate::new(next.kbps);
-                    dip.clear();
-                    flight.restart();
-                }
-                _ => break 'stream "encoder_failed".to_string(),
-            }
-        } else if !dip.active() {
-            if let Some(k) = rate.next(next.kbps) {
-                encoder.set_bitrate(k);
-            }
-        }
-        params = next;
-
-        // A frame the encoder never gave back (it may drop one) is not waited for after a second, and counts as a second's encode: an encoder
-        // stalled behind a game on the GPU is slow, not instant, and may give way to the software one.
-        let mut stalled = false;
-        while in_encoder.front().is_some_and(|f| f.began.elapsed() > Duration::from_secs(1)) {
-            if let Some(gone) = in_encoder.pop_front() {
-                if let Some(back) = dip.left(gone.time) {
-                    encoder.set_bitrate(back);
-                }
-            }
-            pacer.done();
-            stalled |= ctl.on_encoded(1000.0, now) == Some(Event::UseSoftware);
-        }
-        if stalled {
-            if let Ok(sw) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
-                encoder = sw;
-                ctl.set_software(true);
-                in_encoder.clear();
-                pacer.clear();
-                rate = EncoderRate::new(params.kbps);
-                dip.clear();
-                flight.restart();
-                emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "slow"}));
-            }
-        }
-        let interval = ctl.interval_ms();
-        let due = pacer.due_in(interval, now, encoder.asks_for_input());
-        // Room for a frame on the link, nothing gating a keyframe, a picture that may move: then the pacer says when.
-        let ready = !link_paused && !flight.gated() && tracker.state().picture_moves() && ctl.may_encode(flight.inflight(), flight.inflight_bytes(), None);
-        let may = ready && due == Some(0);
-        let top_off_due = may && top_off.due(now) && (ctl.crisp_ok(flight.inflight(), now) || sharpen.rect.is_some()) && last_picture.is_some();
-        // A keyframe owed on a still window: the last picture again, at most once a second (`pace::ReencodeGate`).
-        let reencode_due = may && flight.wants_key() && last_picture.is_some() && reencode.ready(now);
-        // While a frame is in the encoder the loop comes back within a few milliseconds to take it, so that its time is the encoder's own;
-        // once due it waits for the next change (a still picture gives nothing until then), but not past a top-off pass that is due.
-        let wait_ms = if pacer.pending() {
-            ENCODER_POLL_MS
-        } else if may {
-            // Something to encode again at once (a keyframe owed, a top-off pass): no waiting for a change first.
-            if top_off_due || reencode_due { 0 } else { CAPTURE_WAIT_MS }
-        } else if ready {
-            due.unwrap_or(ENCODER_POLL_MS).clamp(1, CAPTURE_WAIT_MS)
-        } else {
-            50
-        };
-        let grabbed: Option<(ID3D11Texture2D, Option<Vec<Rect>>)> = if !may {
-            std::thread::sleep(Duration::from_millis(wait_ms));
-            None
-        } else {
-            match &mut source {
-                Source::Monitor(dxgi, tex) => match dxgi.grab(&d, wait_ms as u32, tex) {
-                    capture_dxgi::Grab::Frame { dirty } => {
-                        if let Some(full) = dxgi.first_full.take() {
-                            stats.dxgi_first_full = Some(u8::from(full));
-                        }
-                        Some((tex.clone(), dirty))
-                    }
-                    capture_dxgi::Grab::Changed => break 'stream "display_changed".to_string(),
-                    capture_dxgi::Grab::Unavailable => {
-                        failures += 1;
-                        None
-                    }
-                    _ => None,
-                },
-                Source::Window(wgc, ..) => match wgc.grab(Duration::from_millis(wait_ms)) {
-                    (capture_wgc::Grab::Frame { w, h }, Some(t)) => {
-                        if (w, h) != src {
-                            // Resized: everything that depends on the size again.
-                            src = (w, h);
-                            ctl.set_source(src);
-                            grid = opts.tiles.then(|| Grid::new(w, h, now));
-                            unpaint_all = true;
-                            params = ctl.params();
-                            match (Converter::new(&d, src, (params.w, params.h), u32::from(params.fps)), Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, !ctl.software())) {
-                                (Ok(c), Ok(e)) => {
-                                    conv = c;
-                                    encoder = e;
-                                    in_encoder.clear();
-                                    pacer.clear();
-                                    top_off.stop();
-                                    rate = EncoderRate::new(params.kbps);
-                                    dip.clear();
-                                    flight.restart();
-                                }
-                                _ => break 'stream "encoder_failed".to_string(),
-                            }
-                        }
-                        Some((t, None))
-                    }
-                    (capture_wgc::Grab::Failed, _) => {
-                        failures += 1;
-                        None
-                    }
-                    _ => {
-                        if wgc.closed.load(Ordering::SeqCst) {
-                            break 'stream "closed".to_string();
-                        }
-                        None
-                    }
-                },
-            }
-        };
-        // Captures or conversions that keep failing: a graphics driver that restarted (or was updated) took the device with it, and nothing
-        // will reach the encoder again. Said and ended, never a silent freeze.
-        if failures >= DEVICE_CHECK_AFTER {
-            failures = 0;
-            if unsafe { d.device.GetDeviceRemovedReason() }.is_err() {
-                break 'stream "device_lost".to_string();
-            }
-        }
-        // A new picture; else, with a keyframe owed and allowed, the last one again (the phone, and the daemon, which holds input back while
-        // one is owed, would wait for the window to change); else a top-off pass of the still one.
-        let (picture, dirty, pass) = match grabbed {
-            Some((tex, dirty)) => {
-                last_picture = Some(tex.clone());
-                (Some(tex), dirty, false)
-            }
-            None if reencode_due => {
-                reencode.used(now);
-                (last_picture.clone(), None, false)
-            }
-            None if top_off_due => (last_picture.clone(), None, true),
-            None => (None, None, false),
-        };
-        if let Some(tex) = picture {
-            let mut area = u64::from(src.0) * u64::from(src.1);
-            if !pass {
-                if let Some(g) = &mut grid {
-                    if readback.read_regions(&d, &tex, src.0, src.1, dirty.as_deref()).is_ok() {
-                        unpaint.extend(g.update(&readback.buf, readback.stride, now, dirty.as_deref()));
-                        area = g.last_changed_area();
-                    }
-                } else if let Some(rects) = &dirty {
-                    area = pace::area(rects);
-                }
-            }
-            let converting = Instant::now();
-            let converted = conv.convert(&tex);
-            if converted.is_err() {
-                failures += 1;
-            }
-            if let Ok(nv12) = converted {
-                failures = 0;
-                let convert_ms = converting.elapsed().as_secs_f64() * 1000.0;
-                let time = (started_at.elapsed().as_nanos() / 100) as i64;
-                let key = flight.wants_key();
-                // Too large to arrive in time at this bitrate: a coarser frame now, not a late one (CRD's guard), with the bitrate back once
-                // it is out. A keyframe and a top-off pass are what they are.
-                // A keyframe is the whole picture: guarded too, so that no media message takes most of the link for long (a reply waits for at
-                // most the one being written).
-                let area = if key { u64::from(src.0) * u64::from(src.1) } else { area };
-                // On a slow link (the lowest rungs) a keyframe always takes the dip, so that it stays small.
-                if !pass && !dip.active() && (big.check(area, params.kbps, interval) || ctl.key_dip(key)) {
-                    encoder.set_bitrate((params.kbps * BIG_FRAME_PERCENT / 100).max(MIN_KBPS));
-                    dip.start(time, rate.applied);
-                    stats.big_frames += 1;
-                }
-                let began = Instant::now();
-                match encoder.encode(&d, &nv12, time, key) {
-                    Ok(true) => {
-                        if let Some(extra) = delay {
-                            std::thread::sleep(extra);
-                        }
-                        pacer.started(now);
-                        flight.encoded(key, now);
-                        in_encoder.push_back(InEncoder { time, began, captured: now, convert_ms, pass, area });
-                        while in_encoder.len() > 8 {
-                            if let Some(gone) = in_encoder.pop_front() {
-                                if let Some(back) = dip.left(gone.time) {
-                                    encoder.set_bitrate(back);
-                                }
-                            }
-                        }
-                    }
-                    Ok(false) => {
-                        // No room in the encoder now: a moment for it, not a spin.
-                        stats.dropped_encoder += 1;
-                        std::thread::sleep(Duration::from_millis(ENCODER_POLL_MS));
-                        if let Some(back) = dip.left(time) {
-                            encoder.set_bitrate(back);
-                        }
-                        // A top-off pass the encoder had no room for counts as one, so a pass is never tried again on every turn.
-                        if pass {
-                            top_off.passed(now, interval, usize::MAX, None);
-                        }
-                    }
-                    Err(_) => {
-                        // The hardware encoder failed: the software one from now on, and said so.
-                        if encoder.hardware {
-                            if let Ok(e) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
-                                encoder = e;
-                                ctl.set_software(true);
-                                in_encoder.clear();
-                                pacer.clear();
-                                rate = EncoderRate::new(params.kbps);
-                                dip.clear();
-                                flight.restart();
-                                emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "failed"}));
-                                continue;
-                            }
-                        }
-                        break 'stream "encoder_failed".to_string();
-                    }
-                }
-            }
-        }
-        // What the encoder finished.
-        match encoder.poll() {
-            Ok(done) => {
-                for e in done {
-                    let entry = in_encoder.iter().position(|f| f.time == e.time).and_then(|i| in_encoder.remove(i));
-                    // One frame in the encoder at a time: the next capture may be scheduled.
-                    pacer.done();
-                    // Output that matches no frame given (one already counted as a second's stall) is not timed: it would read as instant.
-                    let measured = entry.as_ref().map(|f| f.began.elapsed().as_secs_f64() * 1000.0 + delay.map_or(0.0, |d| d.as_secs_f64() * 1000.0));
-                    let encode_ms = measured.unwrap_or(0.0);
-                    if let Some(back) = dip.left(e.time) {
-                        encoder.set_bitrate(back);
-                    }
-                    if let Some(Event::UseSoftware) = measured.and_then(|ms| ctl.on_encoded(ms, now)) {
-                        if let Ok(sw) = Encoder::open(&d, params.w, params.h, u32::from(params.fps), params.kbps, false) {
-                            encoder = sw;
-                            ctl.set_software(true);
-                            in_encoder.clear();
-                            pacer.clear();
-                            rate = EncoderRate::new(params.kbps);
-                            dip.clear();
-                            flight.restart();
-                            emit(&out, json!({"event": "encoder", "sc": opts.sc, "encoder": "sw", "name": encoder.name, "refused": encoder.refused, "first_output_ms": encoder.first_output_ms, "why": "slow"}));
-                            break;
-                        }
-                    }
-                    let Some(au) = ps.fix(&e.data) else {
-                        // Not sendable: what follows would refer to it. A keyframe, through the gate (at most one a second).
-                        flight.ask_key(now);
-                        continue;
-                    };
-                    let key = e.key || sps::is_keyframe(&au);
-                    let captured = entry.as_ref().map_or(now, |f| f.captured);
-                    let v = Video { key, seq: flight.seq() + 1, capture_ms: captured as u32, src: (src.0 as u16, src.1 as u16), coded: (params.w as u16, params.h as u16), unpaint: std::mem::take(&mut unpaint), unpaint_all: std::mem::take(&mut unpaint_all) };
-                    let msg = wire::video(&v, &au);
-                    if msg.len() > wire::MAX_MEDIA {
-                        // Too large for one message: not sent. Its unpaint goes with the next frame, less bitrate, and a keyframe.
-                        unpaint = v.unpaint;
-                        unpaint_all = v.unpaint_all;
-                        ctl.bandwidth.cut_for_size(flight.inflight());
-                        flight.ask_key(now);
-                        stats.dropped_link += 1;
-                        continue;
-                    }
-                    flight.sent(msg.len());
-                    ctl.bandwidth.on_sent(now);
-                    stats.frame(msg.len(), key, encode_ms);
-                    let _ = out.send(wire::out_media(&opts.sc, &msg));
-                    let sent_at = now_ms();
-                    stats.timing(sent_at, sent_at.saturating_sub(captured) as f64, entry.as_ref().map_or(0.0, |f| f.convert_ms));
-                    // A new picture starts the top-off of what follows it; a pass says how far it got.
-                    if entry.as_ref().is_some_and(|f| f.pass) {
-                        stats.top_off += 1;
-                        top_off.passed(sent_at, interval, msg.len(), e.qp);
-                    } else {
-                        top_off.changed(sent_at, interval, e.qp, entry.as_ref().map_or(u64::MAX, |f| f.area));
-                    }
-                }
-            }
-            Err(_) => break 'stream "encoder_failed".to_string(),
-        }
-        // Paint-over: still regions as crisp tiles, from the last picture read, within a share of the video's rate, once the top-off has
-        // refined the video itself (tiles then cover what the codec cannot: text at the source's own resolution and colour).
-        if let Some(g) = &mut grid {
-            let rate_bytes = f64::from(params.kbps) * 1000.0 / 8.0 * TILE_SHARE;
-            tile_tokens = (tile_tokens + rate_bytes * now.saturating_sub(tile_at) as f64 / 1000.0).min(TILE_BURST);
-            tile_at = now;
-            let tiles_may = flight.seq() > 0 && !flight.wants_key() && !top_off.active() && !link_paused && readback.stride > 0 && g.size() == src;
-            // Sharpen: the part the phone shows, once its top-off is done, within its own budget whatever the link says of crisp tiles, and
-            // at the tiles' share of the rate.
-            if tiles_may && sharpen.rect.is_some() {
-                let parts = if tile_tokens > 32_768.0 { g.due_within(now, TILE_CELLS_AT_ONCE, sharpen.rect) } else { Vec::new() };
-                if parts.is_empty() && tile_tokens > 32_768.0 {
-                    sharpen.done();
-                }
-                for r in parts {
-                    match tile_image::encode(&readback.buf, readback.stride, r) {
-                        Some((format, image)) if (image.len() as f64) <= tile_tokens && sharpen.spend(image.len()) => {
-                            tile_id = tile_id.wrapping_add(1);
-                            tile_tokens -= image.len() as f64;
-                            let _ = out.send(wire::out_media(&opts.sc, &wire::tile(flight.seq(), tile_id, r, format, &image)));
-                        }
-                        _ => g.unmark(r),
-                    }
-                }
-            }
-            // Off by itself while the link is slow or was just cut (`Controller::crisp_ok`): the video needs the room.
-            else if tiles_may && ctl.crisp_ok(flight.inflight(), now) && tile_tokens > 32_768.0 && g.any_due(now) {
-                for r in g.due(now, TILE_CELLS_AT_ONCE) {
-                    match tile_image::encode(&readback.buf, readback.stride, r) {
-                        Some((format, image)) if (image.len() as f64) <= tile_tokens => {
-                            tile_id = tile_id.wrapping_add(1);
-                            tile_tokens -= image.len() as f64;
-                            let _ = out.send(wire::out_media(&opts.sc, &wire::tile(flight.seq(), tile_id, r, format, &image)));
-                        }
-                        _ => g.unmark(r),
-                    }
-                }
-            }
-        }
-        // The cursor, where it is in the picture.
-        if last_cursor.elapsed() >= CURSOR_EVERY {
-            last_cursor = Instant::now();
-            let (shape, shows, x, y) = targets_win::cursor();
-            let at = geom::screen_to_source(x, y, rect, src.0, src.1);
-            let now_c = (shape as u8, shows && at.is_some(), at.map_or(0, |p| p.0), at.map_or(0, |p| p.1));
-            if cursor_told != Some(now_c) {
-                cursor_told = Some(now_c);
-                let _ = out.send(wire::out_media(&opts.sc, &wire::cursor(shape, now_c.1, now_c.2, now_c.3)));
-            }
-        }
-        let crisp = opts.tiles.then(|| ctl.crisp_ok(flight.inflight(), now));
-        for c in ctl.bandwidth.take_cuts() {
-            stats.cut(c);
-        }
-        stats.link_cuts = ctl.bandwidth.cut_counts;
-        stats.inflight_limit = window.0;
-        if let Some(r) = stats.report_with(now, &params, ctl.level(), ctl.software(), crisp, encoder.held(), encoder.first_output_ms) {
-            let mut v = serde_json::to_value(&r).unwrap_or_default();
-            v["event"] = json!("stats");
-            v["sc"] = json!(opts.sc);
-            emit(&out, v);
-        }
-    };
-    stopping.store(true, Ordering::SeqCst);
-    drop(border);
-    drop(cmds);
-    // The input thread ends once it sees it holds the last reference to what it reads.
-    drop(shared);
-    drop(input_guard);
-    system::streaming(false);
-    emit(&out, json!({"event": "ended", "sc": opts.sc, "reason": reason}));
+    let mut backend = WinBackend { input_guard: Some(input_guard), border: Some(border), shared: Some(shared), hk_rx, outcome_rx, stopping, readback: Readback::new(), looker: Looker::new(), window_handle, desktop, src, conv, encoder, source, d };
+    stream_core::run(cfg, ctl, &mut backend, cmds, out, started);
 }
 
 /// The phone's input, in the order it came, as long as it is fresh, the stream is not stopping and the state allows it. A button a `down` left
