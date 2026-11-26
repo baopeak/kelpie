@@ -83,7 +83,6 @@ MEDIA = bool(ARGS.shots or ARGS.video)
 # as they are.
 DOC = os.path.join(WORK, "release-notes.txt" if MEDIA else f"kelpie-mac-e2e-{os.getpid()}.txt")
 TYPED = "Release notes checked from my phone" if MEDIA else "KELPIE 4711 MAC TEXT"
-VIDEO_RAW = os.path.join(WORK, "video")
 clip = {}
 results = []
 procs = {}
@@ -101,7 +100,7 @@ def until(fn, timeout=30, step=0.2):
         v = fn()
         if v:
             return v
-        time.sleep(step)
+        rest(step)
     return None
 
 
@@ -195,13 +194,9 @@ def close_document():
 class Phone:
     def __init__(self, pw):
         self.browser = pw.chromium.launch() if ARGS.chromium else pw.chromium.launch(channel="chrome")
-        video = {"record_video_dir": VIDEO_RAW} if ARGS.video else {}
         self.ctx = self.browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=3, is_mobile=True, has_touch=True, ignore_https_errors=True,
-                                           user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-                                           **video)
+                                           user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1")
         self.page = self.ctx.new_page()
-        # The page's video starts with the page: clip times are measured from here.
-        self.started = time.time()
         self.errors = []
         self.page.on("pageerror", lambda e: self.errors.append(str(e)))
         self.cdp = self.ctx.new_cdp_session(self.page)
@@ -218,7 +213,6 @@ class Phone:
         return self.page.locator(selector).count() > 0
 
     def close(self):
-        self.ctx.close()  # writes the page's video, if one is recorded
         self.browser.close()
 
 
@@ -325,7 +319,7 @@ def type_on_phone(phone, text):
 def pause(seconds=1.8):
     """A beat between steps, only while the clip is recorded, so a viewer can follow."""
     if ARGS.video:
-        time.sleep(seconds)
+        rest(seconds)
 
 
 def close_notifications():
@@ -344,22 +338,45 @@ def take_shots(phone):
     print("        pictures in " + ARGS.shots, flush=True)
 
 
+def rest(seconds):
+    """A wait that lets the page's events in while the clip is recorded (the phone's frames arrive as events); a plain sleep otherwise."""
+    if clip.get("page") is not None:
+        clip["page"].wait_for_timeout(seconds * 1000)
+    else:
+        time.sleep(seconds)
+
+
 def start_clip(phone):
-    """The Mac's screen recorded from now (ffmpeg's AVFoundation input: `screencapture -v` does not record when started without a
-    terminal); the phone page's video has run since the page opened."""
+    """Both sides recorded from now: the Mac's screen with ffmpeg's AVFoundation input (`screencapture -v` does not record when started
+    without a terminal), the phone page as Chrome's own screencast of it, frame by frame with their times (Playwright's video of an
+    emulated phone draws the page shrunk and cut off)."""
     clip["mac"] = os.path.join(WORK, "mac-screen.mkv")
+    clip["frames"] = []
     launched = time.time()
     procs["screen_video"] = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation", "-capture_cursor", "1", "-framerate", "30",
                                               "-pixel_format", "uyvy422", "-i", "Capture screen 0:none", "-t", "60", "-c:v", "libx264", "-preset", "ultrafast",
                                               "-crf", "18", clip["mac"]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2.5)  # the capture takes a moment to start
-    clip["start"] = time.time() - phone.started
+
+    def frame(p):
+        clip["frames"].append((p["metadata"].get("timestamp") or time.time(), p["data"]))
+        try:
+            phone.cdp.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]})
+        except Exception:  # noqa: BLE001 - the screencast may just have stopped
+            pass
+
+    phone.cdp.on("Page.screencastFrame", frame)
+    phone.cdp.send("Page.startScreencast", {"format": "jpeg", "quality": 90, "maxWidth": 1170, "maxHeight": 2532, "everyNthFrame": 1})
+    clip["page"] = phone.page
+    rest(2.5)  # the Mac's capture takes a moment to start
+    clip["start"] = time.time()
     # Where this moment is in the Mac's recording: its first frame comes about a second after ffmpeg starts.
-    clip["mac_start"] = max(0.0, time.time() - launched - 1.0)
+    clip["mac_start"] = max(0.0, clip["start"] - launched - 1.0)
 
 
 def stop_clip(phone):
-    clip["end"] = time.time() - phone.started
+    clip["end"] = time.time()
+    phone.cdp.send("Page.stopScreencast")
+    clip["page"] = None
     p = procs.pop("screen_video")
     p.send_signal(signal.SIGINT)
     try:
@@ -368,16 +385,40 @@ def stop_clip(phone):
         p.kill()
 
 
-def make_clip(phone_video):
+def phone_frames():
+    """The phone's frames as an ffmpeg concat list, each shown until the next, from the clip's start to its end."""
+    import base64
+
+    folder = os.path.join(WORK, "phone-frames")
+    os.makedirs(folder, exist_ok=True)
+    frames = sorted(clip["frames"])
+    # The frame on screen when the clip starts, then the ones after it.
+    first = max([i for i, (t, _) in enumerate(frames) if t <= clip["start"]] or [0])
+    frames = frames[first:]
+    listing = os.path.join(folder, "frames.txt")
+    with open(listing, "w", encoding="utf-8") as f:
+        for i, (t, data) in enumerate(frames):
+            path = os.path.join(folder, f"{i:05d}.jpg")
+            with open(path, "wb") as img:
+                img.write(base64.b64decode(data))
+            start = max(t, clip["start"])
+            until_next = (frames[i + 1][0] if i + 1 < len(frames) else clip["end"]) - start
+            f.write(f"file '{path}'\nduration {max(until_next, 0.001):.3f}\n")
+        f.write(f"file '{path}'\n")  # the concat demuxer takes the last duration only with the file named again
+    return listing
+
+
+def make_clip():
     """The phone page beside the Mac's screen scaled to the same height: H.264, no sound, small enough for a README."""
     os.makedirs(ARGS.video, exist_ok=True)
     out = os.path.join(ARGS.video, "mac-phone-control.mp4")
     length = clip["end"] - clip["start"]
-    graph = ("[0:v]trim=start={s:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844[p];"
-             "[1:v]trim=start={m:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844[m];"
-             "[p][m]hstack=inputs=2,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(s=clip["start"], m=clip["mac_start"], n=length)
+    graph = ("[0:v]fps=30,scale=-2:844,setsar=1[p];"
+             "[1:v]trim=start={m:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844,setsar=1[m];"
+             "[p][m]hstack=inputs=2:shortest=1,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(m=clip["mac_start"], n=length)
+    listing = phone_frames()
     for crf in (26, 30, 34):
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", phone_video, "-i", clip["mac"], "-filter_complex", graph, "-map", "[v]",
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", listing, "-i", clip["mac"], "-filter_complex", graph, "-map", "[v]",
                         "-an", "-c:v", "libx264", "-preset", "slow", "-crf", str(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart", out], check=True)
         if os.path.getsize(out) <= 3 * 1024 * 1024:
             break
@@ -479,10 +520,9 @@ def scenario(d, pw):
                 check("…and no picture starts", page.locator(".screen-live").count() == 0)
     finally:
         check("no error on the page", not phone.errors, phone.errors[:3])
-        video = phone.page.video.path() if ARGS.video and phone.page.video else None
         phone.close()
-        if video and "end" in clip:
-            make_clip(video)
+        if ARGS.video and "end" in clip:
+            make_clip()
 
 
 def main():
