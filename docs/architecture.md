@@ -660,7 +660,9 @@ record (another tab) is told to forget a pairing that stands. A close frame that
   why, and a merge is refused). Text from `git`, `gh` or GitHub is one line without control or direction-changing characters, and the folder is taken out
   of it whatever the slashes (and, on Windows, the case). `GH_REPO`, `GH_HOST`, `GH_ENTERPRISE_TOKEN`, `GH_DEBUG` and `DEBUG` (and the `GIT_*` variables that
   point git elsewhere) are not passed on to either program. `pr.status {project}` (the user and the app; a session may not
-  call it) answers `{repo, number, title, url, base, head, line}` or `{none: true}`, from a thread of its own. The phone's `pr_get {project}` (read)
+  call it) answers `{repo, number, title, url, base, head, line}` or `{none: true}`, from a thread of its own; a project with no `origin` remote, or one
+  not on github.com, answers `{none: true, github: false}` and `gh` is not asked (a phone shows no pull request line for it; an older phone reads it as
+  no pull request). The phone's `pr_get {project}` (read)
   calls the same code, at most 4 at once and then one every 5 s per device, and answers `ack {pr}`; the reply never holds the project's folder. The
   phone asks when a session's view opens and when the person asks again, never on a timer. `pr_get`, `pr_challenge` and `pr_merge` wait for `git` and `gh`
   off the phone's connection loop (`Conn::pr_verb`): what costs nothing is checked there, and the answer comes later on the connection's control queue

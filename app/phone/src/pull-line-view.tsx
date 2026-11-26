@@ -6,10 +6,14 @@ import { Icon } from "./icons";
 import { t } from "./i18n";
 import { mergeOffered } from "./merge";
 import { canMerge, canReadPulls, connected, loadPull, mergeBlock, openMerge, pullStates } from "./phone-state";
-import { pullHeadline, pullOf, pullSubline, pullViewWords } from "./pull-line";
+import { pullHeadline, pullLineShown, pullOf, pullSubline, pullViewWords } from "./pull-line";
 
 export function PullLine(props: { project: string | null }) {
-  const state = () => (props.project && canReadPulls() ? pullStates()[props.project] : undefined);
+  // A project that is not on GitHub has no line: no error, no "no pull request".
+  const state = () => {
+    const s = props.project && canReadPulls() ? pullStates()[props.project] : undefined;
+    return s && pullLineShown(s.view) ? s : undefined;
+  };
   createEffect(
     on(
       () => [props.project, connected(), canReadPulls()] as const,

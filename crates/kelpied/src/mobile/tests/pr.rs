@@ -151,6 +151,7 @@ impl Github {
     fn answer(&self, program: &str, args: &[String]) -> Answer {
         let at = |i: usize| args.get(i).map(String::as_str).unwrap_or_default();
         match (program, at(0), at(1)) {
+            ("git", _, _) if args.last().is_some_and(|a| a == "remote") => Answer::out("upstream\norigin\n"),
             ("git", _, _) if args.iter().any(|a| a == "get-url") => Answer::out("https://github.com/o/n.git\n"),
             ("git", _, _) if args.iter().any(|a| a == "--abbrev-ref") => Answer::out("feature\n"),
             ("gh", "pr", "view") => {
@@ -360,5 +361,66 @@ async fn the_connection_goes_on_while_gh_is_asked_and_a_repeated_merge_waits_for
     assert_eq!((after["result"].as_str(), after["dup"].clone(), after["req"].clone()), (Some("merged"), json!(true), json!(9)), "{after}");
     assert_eq!(github.merges(), 1);
     assert_eq!(merged_lines(&r).len(), 1);
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// Answers `git` in the project's folder with `remotes` for `git remote` and `url` for `origin`'s, and counts every `gh` run in the daemon's data folder.
+fn not_on_github(r: &Rig, project: &str, remotes: &'static str, url: &'static str) -> Arc<AtomicUsize> {
+    fake::answer_in(std::path::Path::new(project), move |program, args| match program {
+        "git" if args.last().is_some_and(|a| a == "remote") => Answer::out(remotes),
+        "git" if args.iter().any(|a| a == "get-url") => Answer::out(url),
+        "git" if args.iter().any(|a| a == "--abbrev-ref") => Answer::out("feature\n"),
+        _ => Answer::failed(format!("unexpected {program} {args:?}")),
+    });
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    fake::answer_in(&r.daemon.data_dir, move |_, _| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Answer::failed("gh is not asked about a project that is not on GitHub")
+    });
+    asked
+}
+
+#[tokio::test]
+async fn a_project_without_an_origin_has_no_pull_request_to_read_and_is_not_an_error() {
+    let mut r = rig();
+    let path = folder("no-origin");
+    set_launch(&r.daemon, json!({"projects": [{"id": "p1", "name": "Shop", "path": path}], "agents": []}));
+    // No remote at all, then remotes of which none is `origin`.
+    for remotes in ["", "upstream\nbackup\n"] {
+        let gh = not_on_github(&r, &path, remotes, "");
+        let reply = r.ask(Permission::Read, json!({"type": "pr_get", "project": "p1"})).await;
+        assert_eq!((reply["type"].as_str(), reply["result"].as_str()), (Some("ack"), Some("ok")), "{remotes:?}: {reply}");
+        assert_eq!(reply["pr"], json!({"none": true, "github": false}), "{remotes:?}: {reply}");
+        assert_eq!(gh.load(Ordering::SeqCst), 0, "gh is never asked");
+    }
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn a_project_whose_origin_is_not_on_github_has_no_pull_request_to_read_and_cannot_be_merged() {
+    let path = folder("elsewhere");
+    let (mut r, _a) = merging_phone(&path).await;
+    let gh = not_on_github(&r, &path, "origin\n", "https://gitlab.com/o/n.git\n");
+    let reply = r.ask(Permission::Read, json!({"type": "pr_get", "project": "p1"})).await;
+    assert_eq!((reply["type"].as_str(), reply["result"].as_str()), (Some("ack"), Some("ok")), "{reply}");
+    assert_eq!(reply["pr"], json!({"none": true, "github": false}), "{reply}");
+    // A merge still needs a repository on github.com, and says so.
+    let challenge = r.ask(Permission::Control, challenge_request("squash")).await;
+    assert_eq!(code(&challenge), Some("pr_unavailable"), "{challenge}");
+    assert!(challenge["message"].as_str().unwrap().contains("not a repository on github.com"), "{challenge}");
+    assert_eq!((gh.load(Ordering::SeqCst), r.daemon.mobile.pr.kept()), (0, 0));
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn a_project_whose_origin_is_on_github_still_reads_its_pull_request() {
+    let mut r = rig();
+    let path = folder("github");
+    set_launch(&r.daemon, json!({"projects": [{"id": "p1", "name": "Shop", "path": path}], "agents": []}));
+    Github::new().install(&r, &path);
+    let reply = r.ask(Permission::Read, json!({"type": "pr_get", "project": "p1"})).await;
+    assert_eq!((reply["pr"]["repo"].as_str(), reply["pr"]["number"].as_u64(), reply["pr"]["line"]["can"].as_bool()), (Some("o/n"), Some(12), Some(true)), "{reply}");
+    assert!(reply["pr"].get("none").is_none() && reply["pr"].get("github").is_none(), "{reply}");
     let _ = std::fs::remove_dir_all(path);
 }

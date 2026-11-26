@@ -228,14 +228,25 @@ fn repo_arg(repo: &str) -> String {
     format!("{HOST}/{repo}")
 }
 
-/// The repository a project's `origin` names, read now from its folder.
-pub fn repo_of(folder: &str) -> Result<String, String> {
+/// The github.com repository a project's `origin` names, read now from its folder; `None` when it has no `origin` or one elsewhere (a project
+/// kept on this computer only, or on another host), which has no pull request on GitHub to read.
+fn github_origin(folder: &str) -> Result<Option<String>, String> {
     let dir = Path::new(folder);
     if !dir.is_dir() {
         return Err("The project's folder is not on this computer any more.".to_string());
     }
+    // The remotes' names first: a missing `origin` is told apart by what git lists, not by the words of its error.
+    let names = git(dir, &["remote"]).map_err(|why| without_folder(&why, folder))?;
+    if !names.lines().any(|name| name.trim() == "origin") {
+        return Ok(None);
+    }
     let remote = git(dir, &["remote", "get-url", "origin"]).map_err(|why| without_folder(&why, folder))?;
-    parse_github_remote(remote.lines().next().unwrap_or_default()).ok_or_else(|| "This project's `origin` is not a repository on github.com.".to_string())
+    Ok(parse_github_remote(remote.lines().next().unwrap_or_default()))
+}
+
+/// The repository a project's `origin` names, read now from its folder.
+pub fn repo_of(folder: &str) -> Result<String, String> {
+    github_origin(folder)?.ok_or_else(|| "This project's `origin` is not a repository on github.com.".to_string())
 }
 
 /// The branch the project's folder is on, `None` when it is detached or has no commit.
@@ -500,11 +511,12 @@ fn read_pull(repo: &str, selector: &str, neutral: &Path) -> Result<Option<(Pull,
     Ok(Some((pull, required)))
 }
 
-/// `pr.status` for the project in `folder`: the pull request of the branch it is on, with the line; `{none: true}` when the branch has none.
+/// `pr.status` for the project in `folder`: the pull request of the branch it is on, with the line; `{none: true}` when the branch has none, and
+/// `{none: true, github: false}` when the project has no `origin` on github.com, so there is no pull request to look for (a phone shows no line).
 /// An error is a plain message, with no folder in it.
 pub fn status(folder: &str, neutral: &Path) -> Result<Value, String> {
     let read = || -> Result<Value, String> {
-        let repo = repo_of(folder)?;
+        let Some(repo) = github_origin(folder)? else { return Ok(json!({"none": true, "github": false})) };
         let branch = branch_of(folder)?;
         Ok(match read_pull(&repo, &branch, neutral)? {
             Some((pull, required)) => status_json(&repo, &pull, &merge_line(&pull, &required)),
