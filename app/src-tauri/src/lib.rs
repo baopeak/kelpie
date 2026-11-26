@@ -562,6 +562,39 @@ fn move_legacy_webview_profile() {
     }
 }
 
+/// A debug build hands `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` to its windows' WebView2 itself, after Tauri's own arguments. WebDriver
+/// reaches the app through WebView2's remote debugging, which msedgedriver asks for through that variable; where the runtime keeps only
+/// the arguments wry sets (GitHub's hosted Windows runners), no session ever opens. A release build never reads the variable: through it
+/// a program of the same user could drive the window.
+#[cfg(all(windows, debug_assertions))]
+fn with_test_browser_args<R: tauri::Runtime>(mut context: tauri::Context<R>) -> tauri::Context<R> {
+    for window in &mut context.config_mut().app.windows {
+        if let Some(args) = test_browser_args(window.additional_browser_args.as_deref()) {
+            window.additional_browser_args = Some(args);
+        }
+    }
+    context
+}
+
+#[cfg(not(all(windows, debug_assertions)))]
+fn with_test_browser_args<R: tauri::Runtime>(context: tauri::Context<R>) -> tauri::Context<R> {
+    context
+}
+
+/// The arguments a debug build's webview gets for a test run: `base` (Tauri's own when `None`) and the variable's. `None` outside a
+/// debug Windows build or when the variable is empty. Every webview of the app must get the same ones: WebView2 refuses a second
+/// environment on one profile with other options, so a browser pane would not open.
+#[cfg(all(windows, debug_assertions))]
+pub(crate) fn test_browser_args(base: Option<&str>) -> Option<String> {
+    let extra = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    if extra.trim().is_empty() {
+        return None;
+    }
+    // Tauri's arguments when a webview names none.
+    let base = base.unwrap_or("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
+    Some(format!("{base} {}", extra.trim()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before anything reads app-state.json, starts the daemon or opens a webview.
@@ -790,7 +823,7 @@ pub fn run() {
             ssh_hosts::ssh_forward_status,
             sys_stats::memory_stats,
         ])
-        .build(tauri::generate_context!())
+        .build(with_test_browser_args(tauri::generate_context!()))
         .expect("error while running Kelpie")
         .run(|app, event| {
             quit::on_run_event(app, &event);
