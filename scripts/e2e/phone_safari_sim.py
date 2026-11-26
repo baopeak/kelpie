@@ -341,7 +341,8 @@ def demo_sessions(d, folder):
     repo = os.path.join(folder, "demo-repo")
     os.makedirs(repo, exist_ok=True)
     for args in (["init", "-q", "-b", "main"], ["-c", "user.name=Kelpie Demo", "-c", "user.email=demo@kelpie.invalid", "commit", "-q", "--allow-empty", "-m", "demo"],
-                 ["remote", "add", "origin", "https://github.com/kelpie-demo/atlas-commerce.git"]):
+                 # The SSH form: a git `insteadOf` rule for https://github.com/ (a proxy on a test machine) would hide that it is GitHub.
+                 ["remote", "add", "origin", "git@github.com:kelpie-demo/atlas-commerce.git"]):
         subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True)
     programs = write_programs(os.path.join(folder, "agents"))
     projects = {"p-atlas": "atlas-commerce", "p-beacon": "beacon-api", "p-relay": "relay-workers", PROJECT: "field-notes"}
