@@ -1122,8 +1122,9 @@ mod tests {
         let Some(key) = seen.iter().find(|s| is_key(s)) else { panic!("no keyframe came after the request") };
         assert!(at_of(key) >= Duration::from_millis(900), "not within a second of the first keyframe: {:?}", at_of(key));
         // While the keyframe waits for its second, no other frame is encoded (it would only be dropped): what came before it was already on
-        // its way when it was asked for.
-        for v in videos(&seen).into_iter().filter(|s| !is_key(s)) {
+        // its way when it was asked for. Only what came before the keyframe: frames read in the same batch after it are the stream going on.
+        let before_key = &seen[..seen.iter().position(is_key).unwrap_or(seen.len())];
+        for v in videos(before_key).into_iter().filter(|s| !is_key(s)) {
             assert!(at_of(v) < asked + Duration::from_millis(250), "a frame at {:?} while the keyframe waited", at_of(v));
         }
         let after = run.pump(400);
