@@ -246,9 +246,9 @@ def capture_mac(run, projects, out, programs, port):
             subprocess.run(["defaults", "write", "com.apple.dock", "autohide", "-bool", "true"], check=True)
             subprocess.run(["killall", "Dock"])
         subprocess.run([d.helper, "--close-notifications"], capture_output=True, timeout=30)
-        time.sleep(2)  # the Dock gives its room back
-        d.window((0, 0, 1600, 1200))
-        d.window((0, 0, 1600, 1200))
+        # The Dock gives its room back only once it has started again: until then the window is kept above it.
+        filled = readme_shots_wait(lambda: d.window((0, 0, 1600, 1200))[4] >= 1150, 20, 1.0)
+        run.check("the hero window fills the screen", bool(filled), d.window())
         time.sleep(2.5)
         subprocess.run(["screencapture", "-x", str(out / "hero.png")], check=True, timeout=30)
         shots["hero"] = {"how": "whole 1600x1200 screen: two shells and a chat fed by a simulated agent", "agent": "simulated"}
