@@ -3,7 +3,7 @@
 
 use windows::core::{Interface, Result};
 use windows::Win32::Foundation::{HMODULE, RECT};
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_FLAG, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
@@ -20,25 +20,51 @@ pub struct Device {
     pub device: ID3D11Device,
     pub ctx: ID3D11DeviceContext,
     pub adapter: IDXGIAdapter1,
+    /// Whether the device has the video processor and can feed a hardware encoder. Without it (a virtual machine's display adapter, a cloud
+    /// desktop) the picture is converted on the CPU for the software encoder.
+    pub video: bool,
+    /// Whether it is WARP (the CPU's renderer), not the adapter's own: a window can be captured on it, a monitor cannot (Desktop Duplication
+    /// needs the device of the monitor's adapter).
+    pub warp: bool,
+    /// Why the device has no video support, when the first attempt failed (`no_video_device: …`): said with the first encoder event.
+    pub fallback: Option<String>,
 }
 
+/// What a device is asked for, in order: video support on the monitor's adapter (conversion and encoding on the GPU), then capture alone
+/// on that adapter, then capture alone on WARP (for a window only).
+const ATTEMPTS: [(bool, bool); 3] = [(true, false), (false, false), (false, true)];
+
 impl Device {
-    /// A device on `adapter`, safe to use from the capture callback's thread and the stream's (multithread protection on).
+    /// A device on `adapter`, safe to use from the capture callback's thread and the stream's (multithread protection on): one with video
+    /// support where the graphics have it, else one that can only capture (`video` false). The error is the first attempt's.
     pub fn on(adapter: &IDXGIAdapter1) -> Result<Device> {
+        let mut first: Option<windows::core::Error> = None;
+        for (video, warp) in ATTEMPTS {
+            match Device::make(adapter, video, warp) {
+                Ok(mut d) => {
+                    d.fallback = first.as_ref().map(|e| format!("no_video_device: {e}"));
+                    return Ok(d);
+                }
+                Err(e) => {
+                    first.get_or_insert(e);
+                }
+            }
+        }
+        Err(first.unwrap_or_else(windows::core::Error::empty))
+    }
+
+    fn make(adapter: &IDXGIAdapter1, video: bool, warp: bool) -> Result<Device> {
         let mut device = None;
         let mut ctx = None;
+        let flags = if video { D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT } else { D3D11_CREATE_DEVICE_BGRA_SUPPORT };
+        // Capture and copies need no more than 10.0; the video path keeps what it always asked for.
+        let levels: &[D3D_FEATURE_LEVEL] = if video { &[D3D_FEATURE_LEVEL_11_0] } else { &[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0] };
         unsafe {
-            D3D11CreateDevice(
-                &adapter.cast::<IDXGIAdapter>()?,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut ctx),
-            )?;
+            if warp {
+                D3D11CreateDevice(None::<&IDXGIAdapter>, D3D_DRIVER_TYPE_WARP, HMODULE::default(), flags, Some(levels), D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut ctx))?;
+            } else {
+                D3D11CreateDevice(&adapter.cast::<IDXGIAdapter>()?, D3D_DRIVER_TYPE_UNKNOWN, HMODULE::default(), flags, Some(levels), D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut ctx))?;
+            }
         }
         let device: ID3D11Device = device.ok_or_else(windows::core::Error::empty)?;
         let ctx: ID3D11DeviceContext = ctx.ok_or_else(windows::core::Error::empty)?;
@@ -47,7 +73,7 @@ impl Device {
                 let _ = mt.SetMultithreadProtected(true);
             }
         }
-        Ok(Device { device, ctx, adapter: adapter.clone() })
+        Ok(Device { device, ctx, adapter: adapter.clone(), video, warp, fallback: None })
     }
 
     pub fn texture(&self, w: u32, h: u32, format: DXGI_FORMAT, bind: D3D11_BIND_FLAG) -> Result<ID3D11Texture2D> {

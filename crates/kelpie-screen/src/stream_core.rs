@@ -155,6 +155,8 @@ pub struct EncoderInfo {
     pub first_output_ms: Option<f64>,
     /// SPS and PPS in Annex B, when the encoder has them before its first output.
     pub sequence_header: Option<Vec<u8>>,
+    /// Why the stream is on the software path from its start when it did not choose to be (said with the first encoder event).
+    pub fallback: Option<String>,
 }
 
 /// One frame out of the encoder.
@@ -280,7 +282,12 @@ pub fn run<B: Backend>(cfg: Config, mut ctl: Controller, backend: &mut B, cmds: 
         ps.seed(h);
     }
     let _ = started.send(Ok(json!({"kind": if window { "window" } else { "monitor" }, "title": cfg.title, "exe": cfg.exe, "w": src.0, "h": src.1, "encoder": if info.hardware { "hw" } else { "sw" }, "encoder_name": info.name, "refused": info.refused, "t0": t0})));
-    emit(&out, json!({"event": "encoder", "sc": sc, "encoder": if info.hardware { "hw" } else { "sw" }, "name": info.name, "refused": info.refused, "first_output_ms": info.first_output_ms}));
+    let mut told = json!({"event": "encoder", "sc": sc, "encoder": if info.hardware { "hw" } else { "sw" }, "name": info.name, "refused": info.refused, "first_output_ms": info.first_output_ms});
+    // Why the machine started on the software path, when it did not by choice (no video device, no video processor).
+    if let Some(why) = &info.fallback {
+        told["why"] = json!(why);
+    }
+    emit(&out, told);
 
     let mut tracker = Tracker::default();
     let mut stats = Stats::new(0);
@@ -1122,8 +1129,9 @@ mod tests {
         let Some(key) = seen.iter().find(|s| is_key(s)) else { panic!("no keyframe came after the request") };
         assert!(at_of(key) >= Duration::from_millis(900), "not within a second of the first keyframe: {:?}", at_of(key));
         // While the keyframe waits for its second, no other frame is encoded (it would only be dropped): what came before it was already on
-        // its way when it was asked for.
-        for v in videos(&seen).into_iter().filter(|s| !is_key(s)) {
+        // its way when it was asked for. Only what came before the keyframe: frames read in the same batch after it are the stream going on.
+        let before_key = &seen[..seen.iter().position(is_key).unwrap_or(seen.len())];
+        for v in videos(before_key).into_iter().filter(|s| !is_key(s)) {
             assert!(at_of(v) < asked + Duration::from_millis(250), "a frame at {:?} while the keyframe waited", at_of(v));
         }
         let after = run.pump(400);

@@ -43,7 +43,7 @@ Starting one coding agent is easy. Once four agents work across three Git branch
 | **Plans in your repository** | The Plan tab reads Markdown checklists from `plans/`, `specs/`, `.kiro/specs/` and `docs/plans/`, lets you tick them, and starts an agent on any task. |
 | **Files, browser and processes** | An editor with Markdown, Mermaid, CSV, PDF and notebook viewers, a browser pane with a design mode, and a Processes panel that shows each session's programs and ports. |
 | **Remote work** | SSH projects, a Termius-style hosts page with keys, port forwarding and file transfer, and agent panes on any server, kept alive with `tmux`. |
-| **Your phone** | An optional, end-to-end encrypted phone app lists your sessions, buzzes when one needs you and lets you answer it. |
+| **Your phone** | An optional, end-to-end encrypted phone app lists your sessions, buzzes when one needs you and lets you answer it. If you allow it, it also shows and controls the screen of your Windows PC or Mac. |
 | **Make it yours** | Agent setup for MCP servers and instruction files, plugins, quick commands, automations, shortcuts, themes, offline voice dictation, settings export, and English or Vietnamese. |
 
 ## See it in action
@@ -134,7 +134,7 @@ The automation examples below are disabled, so they cannot start paid model call
 
 ![Three disabled sample automations with their agents and schedules](docs/screenshots/automations.png)
 
-You can also [pair a phone](docs/user-guide.md#phone-access). The phone lists your sessions, buzzes when one needs you, shows its screen and, if you allow it, sends replies.
+You can also [pair a phone](docs/user-guide.md#phone-access). The phone lists your sessions, buzzes when one needs you, shows each session's screen and, if you allow it, sends replies. When an agent waits on something outside its terminal, the phone can also show the computer's own screen and click and type there, on Windows and on macOS 12.3 or later.
 
 </details>
 
@@ -271,7 +271,7 @@ Because you will spend hours in Kelpie, you can choose a dark or light interface
 **Remote and mobile**
 - [Remote projects](docs/user-guide.md#remote-projects-ssh), the [SSH hosts page](docs/user-guide.md#ssh-hosts) and [SSH panes in any project](docs/user-guide.md#ssh-panes-in-any-project) bring servers into the same workspace.
 - [Keeping sessions running on a server](docs/user-guide.md#keeping-sessions-running-on-a-server) explains the `tmux` setup.
-- [Phone access](docs/user-guide.md#phone-access) pairs a phone through Kelpie's relay, Tailscale or your local network.
+- [Phone access](docs/user-guide.md#phone-access) pairs a phone through Kelpie's relay, Tailscale or your local network, and explains seeing and controlling the computer's screen from it, with the two permissions a Mac asks for.
 
 **Personal setup**
 - [Agent setup](docs/user-guide.md#agent-setup) manages MCP servers, instruction files and skills for every agent in one place.
@@ -288,7 +288,7 @@ Because you will spend hours in Kelpie, you can choose a dark or light interface
 2. **Install and sign in to the agent CLIs you want to use.** Kelpie finds them on your `PATH` or through your login shell. Settings → Agents shows which agents it found.
 3. **Add a project folder and start a session.** Put a shell beside the agent, give the agent a task, and keep the result in view.
 
-Kelpie supports Windows 10 1809+ and Windows 11, macOS 12+, and Linux x86-64 with glibc 2.35 or newer. Windows receives the most hands-on testing. The GitHub CLI (`gh`) is optional and enables pull-request features. Remote sessions use your own OpenSSH setup and, for persistence on the server, `tmux`.
+Kelpie supports Windows 10 1809+ and Windows 11, macOS 12+, and Linux x86-64 with glibc 2.35 or newer. Windows receives the most hands-on testing. Controlling the computer's screen from the phone works on Windows and on macOS 12.3 or later. The GitHub CLI (`gh`) is optional and enables pull-request features. Remote sessions use your own OpenSSH setup and, for persistence on the server, `tmux`.
 
 ## Try the demo kit
 
@@ -387,6 +387,8 @@ pnpm i18n:check
 ```
 
 CI runs the Rust suite on Windows and macOS. A local pass on one platform does not replace the other platform's checks. `cargo test --workspace` also includes the optional native speech helper. Real-app scenarios live in [scripts/e2e](scripts/e2e); read their prerequisites first, because some use signed-in agents, remote fixtures or paid model calls. Keep test daemons isolated from your own sessions.
+
+The phone page has scenarios of its own. The `mobile*.py`, `phone_*.py`, `takeover.py` and `screen*.py` scripts drive it in a phone-sized Chromium with a virtual passkey. [phone_safari_sim.py](scripts/e2e/phone_safari_sim.py) drives it in Mobile Safari on the iOS Simulator, with the passkey behind the simulator's Face ID. [screen_mac.py](scripts/e2e/screen_mac.py) checks a Mac's screen seen and controlled from a phone page.
 
 ### Scripting the workbench
 

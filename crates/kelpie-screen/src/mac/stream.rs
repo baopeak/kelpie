@@ -373,7 +373,7 @@ impl Backend for MacBackend {
     }
 
     fn encoder_info(&self) -> EncoderInfo {
-        EncoderInfo { hardware: self.encoder.hardware, name: self.encoder.name.clone(), refused: self.encoder.refused.clone(), first_output_ms: self.encoder.first_output_ms(), sequence_header: None }
+        EncoderInfo { hardware: self.encoder.hardware, name: self.encoder.name.clone(), refused: self.encoder.refused.clone(), first_output_ms: self.encoder.first_output_ms(), sequence_header: None, fallback: None }
     }
 
     fn hardware(&self) -> bool {

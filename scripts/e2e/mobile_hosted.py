@@ -89,6 +89,7 @@ parser.add_argument("kelpied", help="a debug build of kelpied")
 parser.add_argument("--edgedriver", default=os.environ.get("KELPIE_EDGEDRIVER") or shutil.which("msedgedriver"))
 parser.add_argument("--gui", metavar="APP", help="also the desktop part, with this debug app (pnpm tauri build --debug --no-bundle)")
 parser.add_argument("--tauri-driver", default=shutil.which("tauri-driver"))
+parser.add_argument("--native-driver", help="the msedgedriver tauri-driver hands the app to, when WebView2 and Edge differ in version (default: --edgedriver)")
 parser.add_argument("--real-agent", action="store_true", help="also start a real Claude Code session from the hosted page (one tiny prompt: model calls, on this machine's Claude sign-in)")
 args = parser.parse_args()
 if args.real_agent:
@@ -1295,7 +1296,7 @@ def gui():
                 "KELPIE_RELAY_TEST_URL": RELAY_URL, "KELPIE_RELAY_TEST_CA": CA_FILE, "KELPIE_DAEMON_PATH": exe,
                 # Its own WebView2 profile: the installed app's (by the same identifier) is never shared.
                 "WEBVIEW2_USER_DATA_FOLDER": webview})
-    driver_proc = start("tauri-driver", [args.tauri_driver, "--port", str(TAURI_PORT), "--native-port", str(NATIVE_PORT), "--native-driver", args.edgedriver], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    driver_proc = start("tauri-driver", [args.tauri_driver, "--port", str(TAURI_PORT), "--native-port", str(NATIVE_PORT), "--native-driver", args.native_driver or args.edgedriver], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     wait_for(lambda: not port_free(TAURI_PORT), 20)
     d = None
     phone = None
@@ -1318,8 +1319,18 @@ def gui():
         d.js("window.confirm = () => true")
         d.js("window.__kelpie.store.openSettings('mobile')")
         d.wait("return !!document.querySelector('[data-setting=\"mobile-access\"] .switch')", 30)
+        # The other rows come once the page has the daemon's status; the switch is there before it (and turning it on then is not a new setup).
+        try:
+            d.wait("return !!document.querySelector('[data-setting=\"mobile-hosted\"]')", 30)
+        except TimeoutError:
+            pass
         no_relay = d.js("return document.querySelector('[data-setting=\"mobile-hosted\"]')?.textContent ?? ''")
-        check("before: the hosted row says what comes first, and offers no pairing", ("Turn on the relay first" in no_relay or "Turn on phone access first" in no_relay) and not d.js("return !!document.querySelector('[data-hosted-pair]')"), no_relay[:200])
+        if not check("before: the hosted row says what comes first, and offers no pairing", ("Turn on the relay first" in no_relay or "Turn on phone access first" in no_relay) and not d.js("return !!document.querySelector('[data-hosted-pair]')"), no_relay[:200]):
+            # What the page showed instead: the rows of Settings → Mobile, and a screenshot where the caller keeps results (KELPIE_E2E_SHOTS).
+            print("  rows:", d.js("return [...document.querySelectorAll('[data-setting]')].map((r) => r.dataset.setting).join(' ')"), flush=True)
+            if os.environ.get("KELPIE_E2E_SHOTS"):
+                os.makedirs(os.environ["KELPIE_E2E_SHOTS"], exist_ok=True)
+                d.screenshot(os.path.join(os.environ["KELPIE_E2E_SHOTS"], "hosted-before.png"))
         d.js("document.querySelector('[data-setting=\"mobile-access\"] .switch').click()")
         # A new setup lands on Pair a phone with the relay first; the relay's way is offered once Kelpie has found the app served.
         try:

@@ -560,7 +560,9 @@ impl Broker {
                 // Which encoder, and which low-latency settings it refused or did not keep: in the daemon's log, for the per-vendor table.
                 let name = short(params.get("name"), 80);
                 let refused: Vec<String> = params["refused"].as_array().map(|a| a.iter().take(16).filter_map(|s| s.as_str()).map(|s| s.chars().filter(|c| !c.is_control()).take(60).collect()).collect()).unwrap_or_default();
-                tracing::info!(encoder = %name, kind = encoder, refused = ?refused, first_output_ms = ?params["first_output_ms"].as_f64(), "screen encoder");
+                // `why`: what made it the software encoder (a slow or failed hardware one, or graphics without video support).
+                let why = short(params.get("why"), 160);
+                tracing::info!(encoder = %name, kind = encoder, refused = ?refused, first_output_ms = ?params["first_output_ms"].as_f64(), why = %why, "screen encoder");
                 self.tell(&hold, json!({"type": "sc_state", "sc": sc, "encoder": encoder, "state": "encoder"}));
             }
             Some("ended") => {

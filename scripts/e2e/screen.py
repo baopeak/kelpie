@@ -240,7 +240,7 @@ async def scenario(run, d):
     listed = await phone.ask(type="screens", timeout=20)
     rows = (listed or {}).get("targets", [])
     target = next((r for r in rows if r["kind"] == "window" and r["title"] == TITLE), None)
-    check("the phone lists the screens and the test window", target is not None and any(r["kind"] == "monitor" for r in rows), [r.get("title") for r in rows][:10])
+    check("the phone lists the screens and the test window", target is not None and any(r["kind"] == "monitor" for r in rows), [r.get("title") for r in rows][:10] or listed)
     hwnd = int(target["id"].split(":")[1]) if target else 0
 
     async def see(p=None):

@@ -15,6 +15,9 @@ use windows::Win32::Graphics::Dxgi::{IDXGIOutput1, IDXGIOutputDuplication, IDXGI
 use super::d3d::Device;
 use crate::geom::Rect;
 
+/// How long a grab waits when the duplication cannot be made for another reason than the secure desktop.
+const UNAVAILABLE_PAUSE_MS: u64 = 50;
+
 pub enum Grab {
     /// A new picture is in the texture; what changed, when DXGI says.
     Frame { dirty: Option<Vec<Rect>> },
@@ -44,7 +47,13 @@ impl Dxgi {
             return Err("a rotated screen cannot be shown yet: pick one of its windows instead".into());
         }
         let mut me = Dxgi { output, dup: None, rect, fresh: true, first_full: None };
-        let _ = me.reopen(d);
+        // Refused while the secure desktop is up, which passes (the states say so); any other refusal will not, and is said now rather
+        // than leaving a stream without a picture.
+        if let Err(e) = me.reopen(d) {
+            if e.code() != E_ACCESSDENIED {
+                return Err(format!("this screen cannot be captured: {e}"));
+            }
+        }
         Ok(me)
     }
 
@@ -67,9 +76,9 @@ impl Dxgi {
     pub fn grab(&mut self, d: &Device, timeout_ms: u32, into: &ID3D11Texture2D) -> Grab {
         if self.dup.is_none() {
             if let Err(e) = self.reopen(d) {
-                if e.code() == E_ACCESSDENIED {
-                    std::thread::sleep(std::time::Duration::from_millis(u64::from(timeout_ms)));
-                }
+                // Never a spin: the secure desktop is waited out for the whole wait, any other refusal for a moment.
+                let ms = if e.code() == E_ACCESSDENIED { u64::from(timeout_ms) } else { u64::from(timeout_ms).min(UNAVAILABLE_PAUSE_MS) };
+                std::thread::sleep(std::time::Duration::from_millis(ms));
                 return Grab::Unavailable;
             }
         }

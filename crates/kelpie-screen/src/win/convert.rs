@@ -1,5 +1,6 @@
 //! BGRA → NV12 at the encoder's size, on the GPU (D3D11 video processor), into a small ring of output textures so that a hardware encoder
-//! that still holds one is never written over. BT.709 limited range out, as H.264 decoders expect by default.
+//! that still holds one is never written over. BT.709 limited range out, as H.264 decoders expect by default. Where the graphics have no
+//! video processor, on the CPU instead (`crate::cpu_convert`, the same colours) from the picture read back, for the software encoder.
 
 use windows::core::{Interface, Result, BOOL};
 use windows::Win32::Foundation::RECT;
@@ -10,13 +11,57 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL};
+use windows::Win32::Media::MediaFoundation::IMFMediaBuffer;
 
-use super::d3d::Device;
+use super::d3d::{Device, Readback};
+use super::encode_mf::memory_buffer;
+use crate::cpu_convert::Scaler;
 
 /// Outputs in the ring: the hardware encoder holds at most two frames (`encode_mf`).
 const RING: usize = 3;
 
-pub struct Converter {
+pub enum Converter {
+    Gpu(Gpu),
+    Cpu(Scaler),
+}
+
+impl Converter {
+    /// On the GPU, or on the CPU when `cpu` (a device without video support, or a video processor that could not be made).
+    pub fn new(d: &Device, src: (u32, u32), out: (u32, u32), fps: u32, cpu: bool) -> Result<Converter> {
+        if cpu {
+            Ok(Converter::Cpu(Scaler::new(src, out)))
+        } else {
+            Gpu::new(d, src, out, fps).map(Converter::Gpu)
+        }
+    }
+
+    pub fn cpu(&self) -> bool {
+        matches!(self, Converter::Cpu(_))
+    }
+
+    /// `input` (BGRA, `src`) for the encoder. On the CPU the picture comes through `readback` (the tiles' staging texture), read here unless
+    /// `read_whole` says the tiles' readback of this frame already brought all of it.
+    pub fn convert(&mut self, d: &Device, readback: &mut Readback, read_whole: bool, input: &ID3D11Texture2D) -> Result<Frame> {
+        match self {
+            Converter::Gpu(c) => c.convert(input).map(Frame::Texture),
+            Converter::Cpu(scaler) => {
+                if !read_whole {
+                    readback.read(d, input, scaler.src.0, scaler.src.1)?;
+                }
+                let (px, stride) = (&readback.buf, readback.stride);
+                memory_buffer(scaler.out_len(), |nv12| scaler.convert(px, stride, nv12)).map(Frame::Memory)
+            }
+        }
+    }
+}
+
+/// A picture converted for the encoder: an NV12 texture (GPU), or NV12 in memory (CPU).
+pub enum Frame {
+    Texture(ID3D11Texture2D),
+    Memory(IMFMediaBuffer),
+}
+
+pub struct Gpu {
     vdev: ID3D11VideoDevice,
     vctx: ID3D11VideoContext,
     enumerator: ID3D11VideoProcessorEnumerator,
@@ -28,8 +73,8 @@ pub struct Converter {
     pub out: (u32, u32),
 }
 
-impl Converter {
-    pub fn new(d: &Device, src: (u32, u32), out: (u32, u32), fps: u32) -> Result<Converter> {
+impl Gpu {
+    pub fn new(d: &Device, src: (u32, u32), out: (u32, u32), fps: u32) -> Result<Gpu> {
         let vdev: ID3D11VideoDevice = d.device.cast()?;
         let vctx: ID3D11VideoContext = d.ctx.cast()?;
         let rate = DXGI_RATIONAL { Numerator: fps.max(1), Denominator: 1 };
@@ -64,7 +109,7 @@ impl Converter {
             unsafe { vdev.CreateVideoProcessorOutputView(&tex, &enumerator, &view_desc, Some(&mut view))? };
             outputs.push((tex, view.ok_or_else(windows::core::Error::empty)?));
         }
-        Ok(Converter { vdev, vctx, enumerator, processor, outputs, inputs: Vec::new(), next: 0, src, out })
+        Ok(Gpu { vdev, vctx, enumerator, processor, outputs, inputs: Vec::new(), next: 0, src, out })
     }
 
     fn input_view(&mut self, tex: &ID3D11Texture2D) -> Result<ID3D11VideoProcessorInputView> {

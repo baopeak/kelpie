@@ -20,6 +20,7 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Variant::VARIANT;
 
+use super::convert::Frame;
 use super::d3d::Device;
 
 const MF_VERSION_LITE: u32 = 0x0002_0070;
@@ -275,7 +276,7 @@ impl Encoder {
     }
 
     /// Feeds one NV12 picture. False when the encoder has no room for it now (the frame is dropped and counted).
-    pub fn encode(&mut self, d: &Device, nv12: &ID3D11Texture2D, time: i64, key: bool) -> Result<bool> {
+    pub fn encode(&mut self, d: &Device, frame: &Frame, time: i64, key: bool) -> Result<bool> {
         if self.hardware {
             let mut done = std::mem::take(&mut self.pending);
             let pumped = self.pump(&mut done);
@@ -292,7 +293,12 @@ impl Encoder {
                 }
             }
         }
-        let buffer = if self.hardware { unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, nv12, 0, false)? } } else { self.cpu_buffer(d, nv12)? };
+        let buffer = match frame {
+            Frame::Texture(nv12) if self.hardware => unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, nv12, 0, false)? },
+            Frame::Texture(nv12) => self.cpu_buffer(d, nv12)?,
+            Frame::Memory(_) if self.hardware => return Err(windows::core::Error::new(windows::Win32::Foundation::E_INVALIDARG, "the hardware encoder takes only GPU pictures")),
+            Frame::Memory(b) => b.clone(),
+        };
         unsafe {
             let sample = MFCreateSample()?;
             sample.AddBuffer(&buffer)?;
@@ -334,26 +340,20 @@ impl Encoder {
         }
         let staging = self.staging.as_ref().ok_or_else(windows::core::Error::empty)?;
         let (w, h) = (self.w as usize, self.h as usize);
-        let len = w * h * 3 / 2;
         unsafe {
             d.ctx.CopyResource(staging, nv12);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             d.ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
             // Whatever happens below, the staging texture is unmapped again.
-            let copied = (|| -> Result<IMFMediaBuffer> {
-                let buffer = MFCreateMemoryBuffer(len as u32)?;
-                let mut dst: *mut u8 = std::ptr::null_mut();
-                buffer.Lock(&mut dst, None, None)?;
+            let copied = memory_buffer(w * h * 3 / 2, |dst| {
                 let pitch = mapped.RowPitch as usize;
                 let src = mapped.pData as *const u8;
                 // Y: h rows; UV: h/2 rows, each w bytes, right below the Y plane in the mapping.
                 for row in 0..h + h / 2 {
-                    std::ptr::copy_nonoverlapping(src.add(row * pitch), dst.add(row * w), w);
+                    std::ptr::copy_nonoverlapping(src.add(row * pitch), dst.as_mut_ptr().add(row * w), w);
                 }
-                buffer.Unlock()?;
-                buffer.SetCurrentLength(len as u32)?;
-                Ok(buffer)
-            })();
+                Ok(())
+            });
             d.ctx.Unmap(staging, 0);
             copied
         }
@@ -443,6 +443,20 @@ impl Encoder {
             buffer.Unlock()?;
             Ok(Some(Encoded { data, key, time, qp }))
         }
+    }
+}
+
+/// A buffer of `len` bytes in CPU memory for the software encoder, written by `fill`.
+pub fn memory_buffer(len: usize, fill: impl FnOnce(&mut [u8]) -> std::result::Result<(), &'static str>) -> Result<IMFMediaBuffer> {
+    unsafe {
+        let buffer = MFCreateMemoryBuffer(len as u32)?;
+        let mut dst: *mut u8 = std::ptr::null_mut();
+        buffer.Lock(&mut dst, None, None)?;
+        let filled = fill(std::slice::from_raw_parts_mut(dst, len));
+        buffer.Unlock()?;
+        filled.map_err(|e| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e))?;
+        buffer.SetCurrentLength(len as u32)?;
+        Ok(buffer)
     }
 }
 
