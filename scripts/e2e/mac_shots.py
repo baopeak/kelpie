@@ -20,7 +20,8 @@ What it captures, into <out-dir> as mac-<name>.png:
 - chat view with tool activity, a chat waiting for an approval and the dashboard with agents waiting, from the simulated agents of
   demo_agents.py (never a real agent; marked "simulated" in media.json);
 - Settings → Mobile with the Mac's Screen Recording and Accessibility rows, and other settings pages;
-- `mac-hero`: the whole 1600x1200 screen with the app filling it (the Dock is hidden while it is taken, then restored).
+- `mac-hero`: the screen with the app filling it, from the menu bar to the window's bottom edge (the notifications on screen are
+  closed first).
 <out-dir>/media.json lists each picture with what made it.
 
 Isolation: this process's own daemon endpoint and data folder (phone_support.isolate) and an empty SSH folder, before anything
@@ -240,30 +241,16 @@ def capture_mac(run, projects, out, programs, port):
     d.js(f"{S}.selectTab(arguments[0], arguments[1]); {S}.showRightPanel('files')", atlas, first)
     hero_chat = chat(atlas, "Coupon fix (simulated)", "chat_work", "right")
     readme_shots_wait(lambda: any("Fixed." in i for i in items_of(hero_chat["id"])), 30)
-    dock = subprocess.run(["defaults", "read", "com.apple.dock", "autohide"], capture_output=True, text=True).stdout.strip()
-    try:
-        if dock != "1":
-            subprocess.run(["defaults", "write", "com.apple.dock", "autohide", "-bool", "true"], check=True)
-            subprocess.run(["killall", "Dock"])
-        subprocess.run([d.helper, "--close-notifications"], capture_output=True, timeout=30)
-        # The Dock gives its room back only once it has started again: until then the window is kept above it.
-        # Accessibility keeps this window above where the Dock was; the app's own resize (the e2e command) does not.
-        def fill():
-            top = d.window((0, 0, 1600, 1200))[2]
-            d.invoke("test_window_size", {"width": 1600, "height": 1200 - top})
-            return d.window()[4] >= 1150
-
-        filled = readme_shots_wait(fill, 20, 1.0)
-        run.check("the hero window fills the screen", bool(filled), d.window())
-        time.sleep(2.5)
-        subprocess.run(["screencapture", "-x", str(out / "hero.png")], check=True, timeout=30)
-        shots["hero"] = {"how": "whole 1600x1200 screen: two shells and a chat fed by a simulated agent", "agent": "simulated"}
-        print("SHOT hero", flush=True)
-    finally:
-        if dock != "1":
-            subprocess.run(["defaults", "write", "com.apple.dock", "autohide", "-bool", "false"])
-            subprocess.run(["killall", "Dock"])
-        d.window(FRAME)
+    # macOS keeps the window above the Dock: the picture is the screen from the menu bar down to the window's bottom edge.
+    subprocess.run([d.helper, "--close-notifications"], capture_output=True, timeout=30)
+    _, _, top, width, height = d.window((0, 0, 1600, 1200))
+    time.sleep(2.5)
+    hero = str(out / "hero.png")
+    subprocess.run(["screencapture", "-x", hero], check=True, timeout=30)
+    subprocess.run(["sips", "-c", str(top + height), str(width), "--cropOffset", "0", "0", hero], check=True, capture_output=True, timeout=30)
+    shots["hero"] = {"how": "the whole screen from the menu bar down: two shells and a chat fed by a simulated agent", "agent": "simulated"}
+    print("SHOT hero", flush=True)
+    d.window(FRAME)
     return shots, simulated
 
 
