@@ -88,7 +88,8 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
    *  chip when the pane is alone. */
   const target = () => (session() ? sessionTarget(session()!) : undefined);
   const elsewhere = () => !!target() && target()!.dest !== projectTarget(props.project)?.dest;
-  const hostColor = () => (target() ? hostOf(target())?.color || "var(--accent)" : undefined);
+  // Only a colour the person chose for the host: a default in the accent would read as the focus mark on every remote pane.
+  const hostColor = () => (target() ? hostOf(target())?.color || undefined : undefined);
   // A header only where it tells something the tab does not: which pane is which in a split
   // (or a maximized one), and a bar for file/diff viewers so their own top bar never sits under
   // the floating toolbar. A lone pane is named by its tab (glyph, title, host chip) and keeps its

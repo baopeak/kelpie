@@ -78,11 +78,12 @@ export function OsBadge(props: { os: string; size?: number }) {
   );
 }
 
-/** "● prod-api · /srv/app" on a pane or tab whose session runs on a host. */
+/** "● prod-api · /srv/app" on a pane or tab whose session runs on a host. A host without a chosen colour is tinted neutrally:
+ *  in the accent, every remote pane's chip would look like the focused one. */
 export function HostChip(props: { target: SessionTarget; path?: boolean }) {
   const host = () => hostOf(props.target);
   return (
-    <span class="host-chip" title={`${t("Runs on {host} over SSH", { host: host()?.label ?? props.target.dest })}${props.target.path ? ` · ${props.target.path}` : ""}`} style={{ "--host-color": host()?.color || "var(--accent)" }}>
+    <span class="host-chip" title={`${t("Runs on {host} over SSH", { host: host()?.label ?? props.target.dest })}${props.target.path ? ` · ${props.target.path}` : ""}`} style={{ "--host-color": host()?.color || "var(--text-dim)" }}>
       <span class="host-dot" />
       <span class="host-chip-name">{host()?.label ?? props.target.dest}</span>
       <Show when={props.path}><span class="host-chip-path">{props.target.path}</span></Show>
