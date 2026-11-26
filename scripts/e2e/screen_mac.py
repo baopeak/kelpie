@@ -345,12 +345,17 @@ def take_shots(phone):
 
 
 def start_clip(phone):
-    """The Mac's screen recorded from now (`screencapture -v`); the phone page's video has run since the page opened."""
-    clip["mac"] = os.path.join(WORK, "mac-screen.mov")
-    procs["screen_video"] = subprocess.Popen(["screencapture", "-x", "-v", "-V", "40", clip["mac"]], stdin=subprocess.DEVNULL,
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1.5)  # screencapture takes a moment to start recording
+    """The Mac's screen recorded from now (ffmpeg's AVFoundation input: `screencapture -v` does not record when started without a
+    terminal); the phone page's video has run since the page opened."""
+    clip["mac"] = os.path.join(WORK, "mac-screen.mkv")
+    launched = time.time()
+    procs["screen_video"] = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "avfoundation", "-capture_cursor", "1", "-framerate", "30",
+                                              "-pixel_format", "uyvy422", "-i", "Capture screen 0:none", "-t", "60", "-c:v", "libx264", "-preset", "ultrafast",
+                                              "-crf", "18", clip["mac"]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2.5)  # the capture takes a moment to start
     clip["start"] = time.time() - phone.started
+    # Where this moment is in the Mac's recording: its first frame comes about a second after ffmpeg starts.
+    clip["mac_start"] = max(0.0, time.time() - launched - 1.0)
 
 
 def stop_clip(phone):
@@ -369,8 +374,8 @@ def make_clip(phone_video):
     out = os.path.join(ARGS.video, "mac-phone-control.mp4")
     length = clip["end"] - clip["start"]
     graph = ("[0:v]trim=start={s:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=390:844[p];"
-             "[1:v]trim=duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844[m];"
-             "[p][m]hstack=inputs=2,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(s=clip["start"], n=length)
+             "[1:v]trim=start={m:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844[m];"
+             "[p][m]hstack=inputs=2,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(s=clip["start"], m=clip["mac_start"], n=length)
     for crf in (26, 30, 34):
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", phone_video, "-i", clip["mac"], "-filter_complex", graph, "-map", "[v]",
                         "-an", "-c:v", "libx264", "-preset", "slow", "-crf", str(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart", out], check=True)
