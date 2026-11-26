@@ -317,6 +317,15 @@ describe("turning phone access on", () => {
     }
   });
 
+  it("asks the daemon whether the setup is new when Settings has not read its status yet", async () => {
+    const d = daemon({ after: { enabled: false, new_store: true, lan: true } });
+    expect(await turnOnAccess(fresh({ status: null }), d.call)).toBe("hosted");
+    expect(d.calls).toEqual([["mobile.enable", { lan: false }], ["mobile.set_relay", { on: true }]]);
+    const old = daemon({ after: { enabled: false, new_store: false } });
+    expect(await turnOnAccess(fresh({ status: null }), old.call)).toBe("plain");
+    expect(old.calls).toEqual([["mobile.enable", {}]]);
+  });
+
   it("says why when the relay makes no room, after phone access is on", async () => {
     const d = daemon({ enable: new Error(NOTHING_ELSE), relay: new Error("This network made too many rooms today: try again tomorrow, or use Tailscale") });
     await expect(turnOnAccess(fresh(), d.call)).rejects.toThrow("too many rooms");
