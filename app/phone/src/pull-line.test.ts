@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Outcome, PullStatus } from "./link";
-import { pullHeadline, pullOf, pullSubline, pullView, pullViewWords, reasonWords, type PullInfo } from "./pull-line";
+import { pullHeadline, pullLineShown, pullOf, pullSubline, pullView, pullViewWords, reasonWords, type PullInfo } from "./pull-line";
 
 vi.mock("./i18n", () => ({ t: (s: string, vars?: Record<string, string | number>) => (vars ? s.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m)) : s) }));
 
@@ -70,6 +70,29 @@ describe("a project's pull request on the phone", () => {
     expect(said({ t: "error", code: "pr_unavailable", message: "`gh` is not signed in to GitHub: run `gh auth login` on the computer." })).toContain("gh auth login");
     expect(pullViewWords(pullView({ t: "error", code: "pr_unavailable", message: "gh is missing" }))).toBe("Could not read the pull request: gh is missing");
     expect(pullViewWords({ kind: "pr", pr: info(status({ can: true, reason: null, detail: "" })) })).toBeNull();
+  });
+
+  it("shows no line at all for a project that is not on GitHub, and still says what failed for one that is", () => {
+    // The computer's word for a project with no `origin`, or one on another host: no line, no words.
+    const local = pullView({ t: "ack", pr: { none: true, github: false } });
+    expect(local).toEqual({ kind: "hidden" });
+    expect(pullLineShown(local)).toBe(false);
+    expect(pullViewWords(local)).toBeNull();
+    // A branch on GitHub without a pull request still says so; an older computer that never says `github` is read as before.
+    for (const pr of [{ none: true }, { none: true, github: true }]) {
+      const v = pullView({ t: "ack", pr });
+      expect(v, JSON.stringify(pr)).toEqual({ kind: "none" });
+      expect(pullLineShown(v)).toBe(true);
+    }
+    // A real failure is still an error the person sees.
+    for (const message of ["`gh` is not installed here, or not on the computer's PATH.", "`gh` is not signed in to GitHub: run `gh auth login` on the computer.", "HTTP 502: Bad Gateway"]) {
+      const v = pullView({ t: "error", code: "pr_unavailable", message });
+      expect(pullLineShown(v)).toBe(true);
+      expect(pullViewWords(v)).toBe(`Could not read the pull request: ${message}`);
+    }
+    expect(pullLineShown(pullView({ t: "offline" }))).toBe(true);
+    expect(pullLineShown({ kind: "loading" })).toBe(true);
+    expect(pullLineShown(pullView(status({ can: true, reason: null, detail: "" })))).toBe(true);
   });
 
   it("words a reason for a pull request as read", () => {
