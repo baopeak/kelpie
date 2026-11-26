@@ -144,13 +144,13 @@ export function disposeController(sessionId: string) {
 
 /** Starts a conversation directly in chat mode: a new one, or `resume` (an agent conversation
  *  id) in that conversation's own folder `cwd`. `prompt`: its first message, sent as the person's own once the view is attached. */
-export async function newChat(projectId: string, kind: SessionKind, where: "tab" | "right" | "down" = "tab", opts: { resume?: string; cwd?: string; account?: string; home?: string | null; into?: PaneTarget; prompt?: string } = {}) {
+export async function newChat(projectId: string, kind: SessionKind, where: "tab" | "right" | "down" = "tab", opts: { resume?: string; cwd?: string; account?: string; home?: string | null; into?: PaneTarget; prompt?: string; name?: string } = {}) {
   const project = store.state.projects.find((p) => p.id === projectId);
   if (!project) return;
   try {
     const resume = opts.resume ?? null;
     const info = await createSession({
-      kind, cwd: opts.cwd ?? project.path, project_id: projectId,
+      kind, cwd: opts.cwd ?? project.path, project_id: projectId, name: opts.name,
       agent_session_id: resume ?? undefined,
       chat_argv: chatArgv(kind, kind === "claude" ? resume : null),
       env: chatEnv(kind, opts),
@@ -219,7 +219,8 @@ async function doSwitchToChat(project: Project, pane: Pane) {
     const loc = store.paneLocation(s.id);
     if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "chat", sessionId: info.id });
     disposeView(s.id);
-    await daemon("session.close", { handle: s.handle }).catch(() => {});
+    // Not closed, it stays listed as a stopped session: it no longer shares the new one's place.
+    await daemon("session.close", { handle: s.handle }).catch(() => store.endTakeover(s.id));
   } catch (e) {
     store.forgetPlace(id);
     await markSwitching(s, false);
@@ -277,7 +278,8 @@ async function doSwitchToTerminal(project: Project, pane: Pane, command?: string
     const loc = store.paneLocation(c.id);
     if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "terminal", sessionId: info.id });
     disposeController(c.id);
-    await daemon("session.close", { handle: c.handle }).catch(() => {});
+    // Not closed, it stays listed as a stopped session: it no longer shares the new one's place.
+    await daemon("session.close", { handle: c.handle }).catch(() => store.endTakeover(c.id));
   } catch (e) {
     store.forgetPlace(id);
     await markSwitching(c, false);
@@ -321,7 +323,8 @@ async function replaceChat(s: SessionInfo, conv: string | null, settings: AgentS
   const loc = store.paneLocation(s.id);
   if (loc) store.replacePaneIn(loc.projectId, loc.tabId, loc.paneId, { id: loc.paneId, kind: "chat", sessionId: info.id });
   disposeController(s.id);
-  await daemon("session.close", { handle: s.handle }).catch(() => {});
+  // Not closed, it stays listed as a stopped session: it no longer shares the new one's place.
+  await daemon("session.close", { handle: s.handle }).catch(() => store.endTakeover(s.id));
 }
 
 /** Conversations already started again for bypass: one that is refused again (a host where the flag is left out) is not

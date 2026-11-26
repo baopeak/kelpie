@@ -101,8 +101,9 @@ export function NewSessionMenu() {
     }
     // "This pane" falls back to a new tab if the empty pane was closed meanwhile (and a new project has no such pane).
     place = w === "pane" ? { where: "tab" as const, into: projectId === project.id ? into ?? undefined : undefined } : { where: w, into: undefined };
-    if (chat) return void newChat(projectId, kind(), place.where, { account: chosenAccount(), into: place.into, prompt: firstPrompt });
-    void store.newSession(projectId, kind(), { ...place, args: argv, account: chosenAccount(), target, name: name().trim() || undefined, prompt: firstPrompt });
+    const typedName = name().trim() || undefined;
+    if (chat) return void newChat(projectId, kind(), place.where, { account: chosenAccount(), into: place.into, prompt: firstPrompt, name: typedName });
+    void store.newSession(projectId, kind(), { ...place, args: argv, account: chosenAccount(), target, name: typedName, prompt: firstPrompt });
   };
 
   return (
