@@ -413,7 +413,8 @@ def make_clip():
     os.makedirs(ARGS.video, exist_ok=True)
     out = os.path.join(ARGS.video, "mac-phone-control.mp4")
     length = clip["end"] - clip["start"]
-    graph = ("[0:v]fps=30,scale=-2:844,setsar=1[p];"
+    # The screencast's frames can be wider than the emulated phone: cut to its 390x844 shape, from the left.
+    graph = ("[0:v]fps=30,crop=trunc(ih*390/844/2)*2:ih:0:0,scale=-2:844,setsar=1[p];"
              "[1:v]trim=start={m:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844,setsar=1[m];"
              "[p][m]hstack=inputs=2:shortest=1,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(m=clip["mac_start"], n=length)
     listing = phone_frames()
