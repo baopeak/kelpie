@@ -150,6 +150,13 @@ class Phone:
         self.name = f"{device}-{locale}"
 
     def shot(self, state, themes=THEMES):
+        if ARGS.readme:
+            # News about another phone (its permission changed, a device was paired) shows for 8 s and then goes on its own: README
+            # pictures wait for that, as a person looking a moment later would see the page.
+            try:
+                self.page.wait_for_selector("[data-banner=device-news]", state="detached", timeout=12000)
+            except Exception:  # noqa: BLE001 - noted in the measures, the picture is still taken
+                MISSED.append(f"{self.name} {state}: device news still shown")
         for theme in themes:
             self.page.emulate_media(color_scheme=theme)
             time.sleep(0.25)
