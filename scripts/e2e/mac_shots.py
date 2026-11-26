@@ -247,7 +247,13 @@ def capture_mac(run, projects, out, programs, port):
             subprocess.run(["killall", "Dock"])
         subprocess.run([d.helper, "--close-notifications"], capture_output=True, timeout=30)
         # The Dock gives its room back only once it has started again: until then the window is kept above it.
-        filled = readme_shots_wait(lambda: d.window((0, 0, 1600, 1200))[4] >= 1150, 20, 1.0)
+        # Accessibility keeps this window above where the Dock was; the app's own resize (the e2e command) does not.
+        def fill():
+            top = d.window((0, 0, 1600, 1200))[2]
+            d.invoke("test_window_size", {"width": 1600, "height": 1200 - top})
+            return d.window()[4] >= 1150
+
+        filled = readme_shots_wait(fill, 20, 1.0)
         run.check("the hero window fills the screen", bool(filled), d.window())
         time.sleep(2.5)
         subprocess.run(["screencapture", "-x", str(out / "hero.png")], check=True, timeout=30)
