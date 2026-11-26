@@ -195,7 +195,7 @@ def close_document():
 class Phone:
     def __init__(self, pw):
         self.browser = pw.chromium.launch() if ARGS.chromium else pw.chromium.launch(channel="chrome")
-        video = {"record_video_dir": VIDEO_RAW, "record_video_size": {"width": 390, "height": 844}} if ARGS.video else {}
+        video = {"record_video_dir": VIDEO_RAW} if ARGS.video else {}
         self.ctx = self.browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=3, is_mobile=True, has_touch=True, ignore_https_errors=True,
                                            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
                                            **video)
@@ -322,7 +322,7 @@ def type_on_phone(phone, text):
 # ---------- README pictures and the clip ----------
 
 
-def pause(seconds=1.2):
+def pause(seconds=1.8):
     """A beat between steps, only while the clip is recorded, so a viewer can follow."""
     if ARGS.video:
         time.sleep(seconds)
@@ -369,11 +369,11 @@ def stop_clip(phone):
 
 
 def make_clip(phone_video):
-    """The phone page (390×844) beside the Mac's screen scaled to the same height: H.264, no sound, small enough for a README."""
+    """The phone page beside the Mac's screen scaled to the same height: H.264, no sound, small enough for a README."""
     os.makedirs(ARGS.video, exist_ok=True)
     out = os.path.join(ARGS.video, "mac-phone-control.mp4")
     length = clip["end"] - clip["start"]
-    graph = ("[0:v]trim=start={s:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=390:844[p];"
+    graph = ("[0:v]trim=start={s:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844[p];"
              "[1:v]trim=start={m:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844[m];"
              "[p][m]hstack=inputs=2,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(s=clip["start"], m=clip["mac_start"], n=length)
     for crf in (26, 30, 34):
@@ -441,7 +441,7 @@ def scenario(d, pw):
 
         check("…and ⌘ then S saves it: the file holds the text", bool(until(saved, 10)), open(DOC, encoding="utf-8").read()[:80])
         if ARGS.video:
-            pause(2.5)
+            pause(3)
             stop_clip(phone)
         stats = phone.js("() => window.__kelpieScreenTimes?.()")
         print("        phone: " + json.dumps({"frames_drawn": (stats or {}).get("presentInterval", {}).get("n")}))
