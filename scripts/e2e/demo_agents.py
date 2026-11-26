@@ -3,7 +3,7 @@ prompt, about the demo projects of readme_demo.py. Never a real agent and never 
 "simulated", and every picture made with them is marked so in the media list.
 
     from demo_agents import write_programs
-    programs = write_programs(folder)   # {"chat_work": path, "chat_approval": path, "chat_done": path, "ticker": path, "menu": path}
+    programs = write_programs(folder)   # {"chat_work": path, ..., "ticker": path, "menu": path, "lead": path, "helper": path}
 
 A chat session runs `[python, "-u", programs["chat_work"]]` as its `chat_argv` (kind "claude").
 """
@@ -80,7 +80,43 @@ print("   3. No, and say what to do differently (esc)")
 sys.stdin.read(1)
 '''
 
-PROGRAMS = {"chat_work": CHAT_WORK, "chat_approval": CHAT_APPROVAL, "chat_done": CHAT_DONE, "ticker": TICKER, "menu": MENU}
+# A terminal agent that splits a task into two sub-sessions through Kelpie's CLI, as a real agent would use it.
+LEAD = r'''
+import os, subprocess, sys
+cli = os.environ.get("KELPIE_CLI", "kelpied")
+print("Demo agent (simulated, no model)  -  release prep for atlas-commerce\n", flush=True)
+print("> Prepare the 0.9 release: check the coupon tests and draft the release notes.\n", flush=True)
+print("* Two independent parts: opening a helper for each.", flush=True)
+for name, task in (("coupon-tests", "Check the coupon boundary tests in smoke.py"), ("release-notes", "Draft release notes from the commits since 0.8")):
+    print(f"  $ kelpie sub spawn --name {name} demo-helper \"{task}\"", flush=True)
+    r = subprocess.run([cli, "sub", "spawn", "--name", name, "demo-helper", task], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    print("    " + ("opened " + name if r.returncode == 0 else (r.stderr or r.stdout).strip()[:160]), flush=True)
+print("\n* Waiting for their reports...", flush=True)
+for line in sys.stdin:
+    pass
+'''
+
+# A sub-session (its task arrives typed, as Kelpie types it into an agent): prints its work; the release-notes one reports
+# done with a check it owes, since it cannot open a phone.
+HELPER = r'''
+import os, subprocess, sys, time
+print("Demo helper (simulated, no model)\n", flush=True)
+task = sys.stdin.readline().strip() or "demo task"
+print("> " + task + "\n", flush=True)
+steps = ["Read smoke.py", "Read src/checkout.py", "python smoke.py  ->  PASS atlas-commerce"] if "coupon" in task else ["git log --oneline v0.8..HEAD  ->  6 commits", "Write docs/release-notes.md"]
+for s in steps:
+    time.sleep(1.2)
+    print("  * " + s, flush=True)
+if "notes" in task:
+    time.sleep(1)
+    cli = os.environ.get("KELPIE_CLI", "kelpied")
+    subprocess.run([cli, "sub", "report", "--owes", "phone:open the release notes on a phone:a photo of the page", "done", "Release notes drafted in docs/release-notes.md (demo)"], capture_output=True)
+    print("\n  Reported: done (one check owed: look at it on a phone)", flush=True)
+for line in sys.stdin:
+    pass
+'''
+
+PROGRAMS = {"chat_work": CHAT_WORK, "chat_approval": CHAT_APPROVAL, "chat_done": CHAT_DONE, "ticker": TICKER, "menu": MENU, "lead": LEAD, "helper": HELPER}
 
 
 def write_programs(folder):
