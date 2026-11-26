@@ -14,6 +14,7 @@ import { Icon, KindGlyph } from "./icons";
 import { ContextRing } from "./context-ring";
 import { BrandMark, BrandWordmark, KipCompanion, kipShown } from "./brand";
 import { findPane } from "../lib/layout";
+import { orderByScreen, screenPlaces, shareTakeoverPlaces } from "../lib/session-order";
 import { sessionAccount } from "../lib/accounts";
 import { isAgentKind } from "../lib/agents";
 import { hostLabel } from "../lib/remote";
@@ -26,7 +27,7 @@ import { openFinish, overlapsOf } from "../lib/review-queue";
 import { openContextMenu, type MenuItem } from "./context-menu";
 import type { Project, SessionInfo } from "../lib/types";
 import { t, msg } from "../lib/i18n";
-import { continueAt, continueTime } from "../lib/continue-timers";
+import { continueAt, continueTime, continueTimeShort } from "../lib/continue-timers";
 import { openHosts } from "./hosts-page";
 import { confirmDialog } from "../lib/confirm-dialog";
 import { ancestorsOf, childrenOfSession, foldedParents, subtreeSummary, toggleParentFold } from "../lib/sub-sessions";
@@ -42,9 +43,11 @@ export { sessionState, reportedState, type SessionState } from "../lib/session-s
 const GLYPH: Partial<Record<SessionState, string>> = { waiting: "alert", error: "close", done: "check" };
 const LABEL: Partial<Record<SessionState, string>> = { waiting: msg("needs you"), error: msg("error") };
 
+const continueTitle = (at: number, now?: number) => t("Stopped by the usage limit: continues by itself at {time}", { time: continueTime(at, now) });
+
 function stateTitle(s: SessionInfo) {
   const at = continueAt(s);
-  if (at) return t("Stopped by the usage limit: continues by itself at {time}", { time: continueTime(at) });
+  if (at) return continueTitle(at);
   switch (sessionState(s)) {
     case "waiting": return t("Needs you");
     case "error": return s.alive ? t("Last turn failed") : t("Exited with code {code}", { code: s.exit_code ?? "" });
@@ -109,9 +112,8 @@ export const shortModel = (m: string | null | undefined) =>
   m ? m.replace(/^(claude|anthropic)[-/]/i, "").replace(/^openai[-/]/i, "").replace(/\[.*\]$/, "") : "";
 
 /** A project's sessions in a stable order: oldest first, a session switched between terminal and chat (a new session that took
- *  over the conversation) in the place of the one it replaced (`store.sessionSince`). Nothing a person does elsewhere moves a
- *  row: not activity or status, not opening, showing or closing a pane, not a family's pane switching between parent and child
- *  (rows used to follow pane order, so each of those reshuffled the list). */
+ *  over the conversation) in the place of the one it replaced (`store.sessionSince`). The rows follow the screen on top of it
+ *  (`projectRows`); this order breaks their ties and orders the sessions on screen nowhere. */
 function projectSessions(projectId: string): SessionInfo[] {
   return Object.values(store.sessions)
     .filter((s) => s.project_id === projectId)
@@ -127,9 +129,27 @@ const isNested = (s: SessionInfo) => {
   return (store.sessions[parent]?.project_id ?? null) === (s.project_id ?? null);
 };
 
-/** The sessions listed directly under a project: its own, less the sub-sessions shown under their parents. (Counts, filters and
- *  the "recent" order look at all of them: a sub-session that needs you still lights its project.) */
-const projectRows = (projectId: string) => projectSessions(projectId).filter((s) => !isNested(s));
+/** The row a session is listed under: its own, or for a sub-session the top of its family. */
+const rowOf = (id: string) => {
+  let s: SessionInfo | undefined = store.sessions[id];
+  for (let guard = 0; s && isNested(s) && guard < 10_000; guard++) s = store.sessions[store.sessionTree().nested.get(s.id)!];
+  return s?.id;
+};
+
+/** The sessions listed directly under a project: its own, less the sub-sessions shown under their parents, in the order they are
+ *  on screen: tabs left to right, each tab's panes in layout order (a side-by-side split left before right, a stacked one top
+ *  before bottom, each half whole before the next; pane sizes play no part). A family (a parent and its sub-sessions)
+ *  is one block at the place of its first member on screen, so a child shown in its parent's pane moves nothing. Sessions on
+ *  screen nowhere follow, oldest first. A conversation switched between terminal and chat keeps its row's place throughout (the
+ *  new session and the one it replaces share a place while the pane passes from one to the other). Only the layout moves a row:
+ *  never activity, status, focus or a click on a row on screen. (Counts, filters and the "recent" order look at all of them: a
+ *  sub-session that needs you still lights its project.) */
+const projectRows = (projectId: string) =>
+  orderByScreen(
+    projectSessions(projectId).filter((s) => !isNested(s)),
+    shareTakeoverPlaces(screenPlaces(store.workspace(projectId).tabs), store.takeovers()),
+    rowOf,
+  );
 
 const lastActivity = (projectId: string) =>
   projectSessions(projectId).reduce((m, s) => Math.max(m, s.last_activity || s.created_at), 0);
@@ -389,7 +409,12 @@ function SessionRow(props: { s: SessionInfo; kids: number }) {
           {(label) => <span class={`age state-label ${state()}`}>{t(label())}</span>}
         </Show>
       }>
-        {(at) => <span class="age state-label limit-wait" data-continue-at={at()}>{t("continues {time}", { time: continueTime(at()) })}</span>}
+        {/* A clock and the short time, so that the name keeps its room; the full sentence is in the tooltip. */}
+        {(at) => (
+          <span class="age state-label limit-wait" data-continue-at={at()} role="img" title={continueTitle(at(), now())} aria-label={continueTitle(at(), now())}>
+            <Icon name="clock" size={10} />{continueTimeShort(at(), now())}
+          </span>
+        )}
       </Show>
     </div>
   );
