@@ -994,7 +994,7 @@
         "en": "Pairing starts by scanning the code the computer shows, or pasting its link.",
         "vi": "Việc ghép đôi bắt đầu bằng cách quét mã mà máy tính hiện ra, hoặc dán đường liên kết của nó."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/02-pair-scan.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/02-pair-scan.png"
     },
     "phone-pair-name.png": {
       "platform": "iPhone-sized phone (Chromium)",
@@ -1003,7 +1003,7 @@
         "en": "The phone names itself before the computer approves it.",
         "vi": "Điện thoại tự đặt tên trước khi máy tính chấp thuận nó."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/04-pair-name.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/04-pair-name.png"
     },
     "phone-inbox-control.png": {
       "platform": "iPhone-sized phone (Chromium)",
@@ -1012,7 +1012,7 @@
         "en": "The inbox of a phone allowed to take control, with See the screen at the top.",
         "vi": "Hộp phiên của một điện thoại được phép điều khiển, nút xem màn hình nằm ở trên cùng."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/23-inbox-control.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/23-inbox-control.png",
       "agent": "simulated"
     },
     "phone-terminal-keys.png": {
@@ -1022,7 +1022,7 @@
         "en": "Typing into a terminal session, with the key bar above the keyboard.",
         "vi": "Gõ vào một phiên terminal, thanh phím nằm ngay trên bàn phím."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/12-terminal-keyboard.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/12-terminal-keyboard.png"
     },
     "phone-chat-tools.png": {
       "platform": "iPhone-sized phone (Chromium)",
@@ -1031,7 +1031,7 @@
         "en": "A chat on the phone lists each tool the agent ran and what it changed.",
         "vi": "Cuộc chat trên điện thoại liệt kê từng công cụ mà agent đã chạy và những gì nó đã sửa."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/15-chat-top.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/15-chat-top.png",
       "agent": "simulated"
     },
     "phone-chat-approval.png": {
@@ -1041,7 +1041,7 @@
         "en": "An agent asks to tag a release and push the tag: allow or deny it from the phone.",
         "vi": "Agent xin gắn thẻ bản phát hành rồi đẩy thẻ lên, bạn cho phép hoặc từ chối ngay từ điện thoại."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/14-chat-approval.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/14-chat-approval.png",
       "agent": "simulated"
     },
     "phone-chat-keyboard.png": {
@@ -1051,7 +1051,7 @@
         "en": "Writing back to an agent while it waits for approval.",
         "vi": "Nhắn lại cho agent trong lúc nó đang chờ duyệt."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/17-chat-keyboard.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/17-chat-keyboard.png",
       "agent": "simulated"
     },
     "phone-connection.png": {
@@ -1061,7 +1061,7 @@
         "en": "The connection sheet: how the phone reaches the computer and how fresh the link is.",
         "vi": "Bảng kết nối cho biết điện thoại đến máy tính bằng đường nào và đường liên kết còn mới tới đâu."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/20-connection-sheet.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/20-connection-sheet.png"
     },
     "phone-settings-2.png": {
       "platform": "iPhone-sized phone (Chromium)",
@@ -1070,7 +1070,7 @@
         "en": "Phone settings: theme, language, text size and how the inbox sorts.",
         "vi": "Cài đặt trên điện thoại gồm giao diện, ngôn ngữ, cỡ chữ và cách hộp phiên sắp xếp."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-2.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-2.png"
     },
     "phone-settings-3.png": {
       "platform": "iPhone-sized phone (Chromium)",
@@ -1079,7 +1079,7 @@
         "en": "Choosing and ordering the keys of the key bar.",
         "vi": "Chọn và sắp xếp các phím trên thanh phím."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-3.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-3.png"
     },
     "phone-offline.png": {
       "platform": "iPhone-sized phone (Chromium)",
@@ -1088,7 +1088,7 @@
         "en": "With the computer gone, the phone says so and keeps what it last saw.",
         "vi": "Khi máy tính không còn kết nối, điện thoại báo điều đó và giữ lại những gì nó thấy lần cuối."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/25-offline-inbox.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/25-offline-inbox.png",
       "agent": "simulated"
     },
     "phone-chat-approval-vi.png": {
@@ -1098,7 +1098,7 @@
         "en": "An approval on the Vietnamese page.",
         "vi": "Một yêu cầu duyệt trên trang tiếng Việt."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/14-chat-approval.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/14-chat-approval.png",
       "agent": "simulated"
     },
     "phone-chat-tools-vi-light.png": {
@@ -1108,7 +1108,7 @@
         "en": "A chat on the Vietnamese page, light theme.",
         "vi": "Một cuộc chat trên trang tiếng Việt ở chế độ sáng."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-light/15-chat-top.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-light/15-chat-top.png",
       "agent": "simulated"
     },
     "phone-connection-vi.png": {
@@ -1118,7 +1118,7 @@
         "en": "The connection sheet in Vietnamese.",
         "vi": "Bảng kết nối bằng tiếng Việt."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/20-connection-sheet.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/20-connection-sheet.png"
     },
     "phone-offline-vi.png": {
       "platform": "iPhone-sized phone (Chromium)",
@@ -1127,7 +1127,7 @@
         "en": "The offline inbox in Vietnamese.",
         "vi": "Hộp phiên khi mất kết nối, bằng tiếng Việt."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/25-offline-inbox.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/25-offline-inbox.png",
       "agent": "simulated"
     },
     "phone-android-inbox.png": {
@@ -1137,7 +1137,7 @@
         "en": "The inbox in Chrome on an Android-sized phone (Pixel 7).",
         "vi": "Hộp phiên trong Chrome trên một điện thoại cỡ Android (Pixel 7)."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/08-inbox-status.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/08-inbox-status.png",
       "agent": "simulated"
     },
     "phone-android-terminal.png": {
@@ -1147,7 +1147,7 @@
         "en": "A terminal session on an Android-sized phone.",
         "vi": "Một phiên terminal trên điện thoại cỡ Android."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/11-terminal.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/11-terminal.png"
     },
     "phone-android-approval.png": {
       "platform": "Android-sized phone (Chromium as a Pixel 7)",
@@ -1156,7 +1156,7 @@
         "en": "Answering a menu prompt on an Android-sized phone.",
         "vi": "Trả lời một câu hỏi dạng menu trên điện thoại cỡ Android."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/13-terminal-prompt.png"
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/13-terminal-prompt.png"
     },
     "phone-android-inbox-vi-light.png": {
       "platform": "Android-sized phone (Chromium as a Pixel 7)",
@@ -1165,7 +1165,7 @@
         "en": "The inbox in Vietnamese, light theme, on an Android-sized phone.",
         "vi": "Hộp phiên bằng tiếng Việt ở chế độ sáng, trên điện thoại cỡ Android."
       },
-      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-vi-light/08-inbox-status.png",
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45803847397): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-vi-light/08-inbox-status.png",
       "agent": "simulated"
     }
   }
