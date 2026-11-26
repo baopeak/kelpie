@@ -54,7 +54,7 @@ ap.add_argument("--json", default=None)
 ap.add_argument("--chromium", action="store_true", help="Playwright's Chromium instead of the installed Google Chrome")
 ap.add_argument("--no-refusal", action="store_true", help="skip the check without Screen Recording (it opens the app through LaunchServices)")
 ap.add_argument("--shots", default=None, help="a folder for README pictures: the phone page seeing the Mac (mac-screen-from-phone.png) and the "
-                "Mac's whole screen while it is shared (mac-sharing-border.png)")
+                "Mac's whole screen while it is shared (mac-screen-shared.png)")
 ap.add_argument("--video", default=None, help="a folder for the README clip mac-phone-control.mp4 (the phone page beside the Mac's screen while "
                 "the phone taps into TextEdit, types and presses ⌘S; needs ffmpeg) and its poster still")
 ARGS = ap.parse_args()
@@ -322,19 +322,32 @@ def pause(seconds=1.8):
         rest(seconds)
 
 
+def window_helper():
+    """mac_window.swift, built once for this run."""
+    if "window_helper" not in procs:
+        procs["window_helper"] = os.path.join(WORK, "mac_window")
+        subprocess.run(["xcrun", "swiftc", "-O", os.path.join(HERE, "mac_window.swift"), "-o", procs["window_helper"]], check=True, capture_output=True, timeout=300)
+    return procs["window_helper"]
+
+
 def close_notifications():
-    """The notifications on the Mac's screen closed (mac_window.swift), so the pictures and the clip show none of the Mac's own alerts."""
-    helper = os.path.join(WORK, "mac_window")
-    subprocess.run(["xcrun", "swiftc", "-O", os.path.join(HERE, "mac_window.swift"), "-o", helper], check=True, capture_output=True, timeout=300)
-    subprocess.run([helper, "--close-notifications"], capture_output=True, timeout=30)
+    """The notifications on the Mac's screen closed, so the pictures and the clip show none of the Mac's own alerts."""
+    subprocess.run([window_helper(), "--close-notifications"], capture_output=True, timeout=30)
+
+
+def app_in_front():
+    """For the README: the app's window in front, large, over whatever else is open, instead of Finder's windows."""
+    subprocess.run([window_helper(), str(procs["app"].pid), "60", "60", "1480", "980"], capture_output=True, timeout=30)
+    return until(lambda: "TextEdit" not in front_app(), 5)
 
 
 def take_shots(phone):
     os.makedirs(ARGS.shots, exist_ok=True)
     time.sleep(1.5)
     phone.page.screenshot(path=os.path.join(ARGS.shots, "mac-screen-from-phone.png"))
-    # The Mac's whole screen while it is shared: the orange border and its badge.
-    subprocess.run(["screencapture", "-x", os.path.join(ARGS.shots, "mac-sharing-border.png")], check=True, timeout=30)
+    # The Mac's whole screen while it is shared: the app's notice and its status bar's Stop. The orange border is left out of every
+    # screen capture (so the phone does not see it), this picture's too.
+    subprocess.run(["screencapture", "-x", os.path.join(ARGS.shots, "mac-screen-shared.png")], check=True, timeout=30)
     print("        pictures in " + ARGS.shots, flush=True)
 
 
@@ -413,8 +426,7 @@ def make_clip():
     os.makedirs(ARGS.video, exist_ok=True)
     out = os.path.join(ARGS.video, "mac-phone-control.mp4")
     length = clip["end"] - clip["start"]
-    # The screencast's frames can be wider than the emulated phone: cut to its 390x844 shape, from the left.
-    graph = ("[0:v]fps=30,crop=trunc(ih*390/844/2)*2:ih:0:0,scale=-2:844,setsar=1[p];"
+    graph = ("[0:v]fps=30,scale=-2:844,setsar=1[p];"
              "[1:v]trim=start={m:.2f}:duration={n:.2f},setpts=PTS-STARTPTS,fps=30,scale=-2:844,setsar=1[m];"
              "[p][m]hstack=inputs=2:shortest=1,pad=ceil(iw/2)*2:ceil(ih/2)*2[v]").format(m=clip["mac_start"], n=length)
     listing = phone_frames()
@@ -454,9 +466,13 @@ def scenario(d, pw):
         if ARGS.shots:
             take_shots(phone)
 
-        # 4. A tap on the window, with Finder in front, brings TextEdit to the front.
-        subprocess.run(["open", "-a", "Finder"])
-        until(lambda: "Finder" in front_app(), 5)
+        # 4. A tap on the window, with another app in front (Finder; for the README the app, whose window hides the rest), brings TextEdit
+        # to the front.
+        if MEDIA:
+            app_in_front()
+        else:
+            subprocess.run(["open", "-a", "Finder"])
+            until(lambda: "Finder" in front_app(), 5)
         before = front_app()
         if ARGS.video:
             start_clip(phone)
