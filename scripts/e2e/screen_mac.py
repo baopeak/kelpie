@@ -328,6 +328,13 @@ def pause(seconds=1.2):
         time.sleep(seconds)
 
 
+def close_notifications():
+    """The notifications on the Mac's screen closed (mac_window.swift), so the pictures and the clip show none of the Mac's own alerts."""
+    helper = os.path.join(WORK, "mac_window")
+    subprocess.run(["xcrun", "swiftc", "-O", os.path.join(HERE, "mac_window.swift"), "-o", helper], check=True, capture_output=True, timeout=300)
+    subprocess.run([helper, "--close-notifications"], capture_output=True, timeout=30)
+
+
 def take_shots(phone):
     os.makedirs(ARGS.shots, exist_ok=True)
     time.sleep(1.5)
@@ -380,6 +387,8 @@ def make_clip(phone_video):
 def scenario(d, pw):
     cert, key = ps.certificate_for_loopback(WORK)
     d.call("mobile.enable", {"ip": "127.0.0.1", "port": PORT, "cert": cert, "key": key})
+    if MEDIA:
+        close_notifications()
     start_app()
     check("the TextEdit document is open, in front", open_document())
     phone = Phone(pw)

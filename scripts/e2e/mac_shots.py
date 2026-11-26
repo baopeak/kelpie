@@ -20,8 +20,7 @@ What it captures, into <out-dir> as mac-<name>.png:
 - chat view with tool activity, a chat waiting for an approval and the dashboard with agents waiting, from the simulated agents of
   demo_agents.py (never a real agent; marked "simulated" in media.json);
 - Settings → Mobile with the Mac's Screen Recording and Accessibility rows, and other settings pages;
-- `mac-hero`: the screen with the app filling it, from the menu bar to the window's bottom edge (the notifications on screen are
-  closed first).
+- `mac-hero`: the window as large as the screen allows, busy with demo work.
 <out-dir>/media.json lists each picture with what made it.
 
 Isolation: this process's own daemon endpoint and data folder (phone_support.isolate) and an empty SSH folder, before anything
@@ -241,14 +240,11 @@ def capture_mac(run, projects, out, programs, port):
     d.js(f"{S}.selectTab(arguments[0], arguments[1]); {S}.showRightPanel('files')", atlas, first)
     hero_chat = chat(atlas, "Coupon fix (simulated)", "chat_work", "right")
     readme_shots_wait(lambda: any("Fixed." in i for i in items_of(hero_chat["id"])), 30)
-    # macOS keeps the window above the Dock: the picture is the screen from the menu bar down to the window's bottom edge.
-    subprocess.run([d.helper, "--close-notifications"], capture_output=True, timeout=30)
-    _, _, top, width, height = d.window((0, 0, 1600, 1200))
+    # The window as large as the screen lets it be (macOS keeps it above the Dock), pictured on its own.
+    d.window((0, 0, 1600, 1200))
     time.sleep(2.5)
-    hero = str(out / "hero.png")
-    subprocess.run(["screencapture", "-x", hero], check=True, timeout=30)
-    subprocess.run(["sips", "-c", str(top + height), str(width), "--cropOffset", "0", "0", hero], check=True, capture_output=True, timeout=30)
-    shots["hero"] = {"how": "the whole screen from the menu bar down: two shells and a chat fed by a simulated agent", "agent": "simulated"}
+    d.screenshot(str(out / "hero.png"))
+    shots["hero"] = {"how": "the window as large as the 1600x1200 screen allows: two shells and a chat fed by a simulated agent", "agent": "simulated"}
     print("SHOT hero", flush=True)
     d.window(FRAME)
     return shots, simulated
