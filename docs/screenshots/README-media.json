@@ -1,5 +1,5 @@
 {
-  "about": "Pictures captured on the macOS test machine for the README: platform, feature, captions and how each was made. \"agent\": \"simulated\" marks a picture whose agent sessions are small local programs speaking Claude Code's stream format (scripts/e2e/demo_agents.py), never a real agent or a model call; their model shows as \"simulated\".",
+  "about": "Pictures for the README (macOS test machine, hosted Linux runner, phone page in Chromium): platform, feature, captions and how each was made. \"agent\": \"simulated\" marks a picture whose agent sessions are small local programs speaking Claude Code's stream format (scripts/e2e/demo_agents.py), never a real agent or a model call; their model shows as \"simulated\".",
   "clips": {
     "mac-phone-control.mp4": {
       "platform": "macOS + phone",
@@ -613,6 +613,560 @@
         "vi": "Phần cài đặt trên điện thoại bằng tiếng Việt."
       },
       "how": "scripts/e2e/phone_safari_sim.py --tour (Mobile Safari in the iOS Simulator, isolated daemon, passkey with simulated Face ID)"
+    },
+    "linux-hero.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Workspace",
+      "caption": {
+        "en": "The Linux app at work: two shells and a chat side by side, with the demo projects in the sidebar.",
+        "vi": "Ứng dụng trên Linux đang làm việc: hai shell và một cuộc chat đặt cạnh nhau, các dự án mẫu nằm ở thanh bên."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-workspace.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Workspace",
+      "caption": {
+        "en": "One tab with two shell sessions and the Files panel.",
+        "vi": "Một tab có hai phiên shell và bảng Files."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-welcome.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "First start",
+      "caption": {
+        "en": "The welcome screen before any project is added.",
+        "vi": "Màn hình chào khi chưa thêm dự án nào."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-chat.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Chat view",
+      "caption": {
+        "en": "Chat view with the agent's tool calls, its edits and the files it changed.",
+        "vi": "Chế độ chat hiện các lệnh công cụ của agent, các chỗ sửa và những tệp đã đổi."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-chat-approval.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Chat approval",
+      "caption": {
+        "en": "A chat waiting for approval of a risky command: Allow, Allow for session or Deny.",
+        "vi": "Một cuộc chat đang chờ duyệt một lệnh có rủi ro: Allow, Allow for session hoặc Deny."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-dashboard-agents.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "The Agent Dashboard: sessions that need you, those working, and the idle ones.",
+        "vi": "Bảng điều khiển agent cho thấy phiên nào cần bạn, phiên nào đang chạy và phiên nào đang rảnh."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells",
+      "agent": "simulated"
+    },
+    "linux-search.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Search everything",
+      "caption": {
+        "en": "Search everything: sessions, projects, files and settings from one box.",
+        "vi": "Ô tìm kiếm chung tìm được phiên, dự án, tệp và cài đặt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-new-session.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "New session",
+      "caption": {
+        "en": "The new-session dialog with agents, quick commands and where to open it.",
+        "vi": "Hộp thoại phiên mới với danh sách agent, lệnh nhanh và nơi mở phiên."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-changes.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Source control",
+      "caption": {
+        "en": "The Changes panel: branch, commit message and changed files.",
+        "vi": "Bảng Changes hiện nhánh, ô thông điệp commit và các tệp đã đổi."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-editor.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "The built-in editor on a demo source file.",
+        "vi": "Trình soạn thảo có sẵn mở một tệp mã nguồn mẫu."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-review-notes.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Review notes",
+      "caption": {
+        "en": "A review note on a line of the diff, ready to send to an agent.",
+        "vi": "Một ghi chú review gắn vào một dòng của diff, sẵn sàng gửi cho agent."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-markdown.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "Markdown with a Mermaid diagram, rendered.",
+        "vi": "Tệp Markdown có sơ đồ Mermaid được hiển thị."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-notebook.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "A Jupyter notebook with its outputs.",
+        "vi": "Một notebook Jupyter cùng kết quả của nó."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-plan.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Specs and tasks",
+      "caption": {
+        "en": "The Plan tab with the project's specs and their tasks.",
+        "vi": "Tab Plan với các spec của dự án và danh sách việc."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-board.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Workspace board",
+      "caption": {
+        "en": "The workspace board: projects and worktrees by stage.",
+        "vi": "Bảng workspace xếp dự án và worktree theo từng giai đoạn."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-layouts.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Layouts",
+      "caption": {
+        "en": "The layout menu: grid presets, Tile all and Broadcast input.",
+        "vi": "Menu bố cục với các lưới dựng sẵn, Tile all và Broadcast input."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-floating.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Floating terminal",
+      "caption": {
+        "en": "The floating terminal over the workspace.",
+        "vi": "Terminal nổi phía trên workspace."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-inbox.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Activity",
+      "caption": {
+        "en": "The activity inbox (labelled demo samples).",
+        "vi": "Hộp hoạt động với các mẫu được ghi rõ là demo."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-worktree-dialog.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Worktrees",
+      "caption": {
+        "en": "The new-worktree dialog with the project's .kelpie.yaml.",
+        "vi": "Hộp thoại tạo worktree cùng tệp .kelpie.yaml của dự án."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-finish.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Review and Finish",
+      "caption": {
+        "en": "The Finish dialog: how to merge and the checks it runs.",
+        "vi": "Hộp thoại Finish cho chọn cách merge và các bước kiểm tra sẽ chạy."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-try.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Try with several agents",
+      "caption": {
+        "en": "Try with several agents: one task, one worktree per agent.",
+        "vi": "Try with several agents giao một việc cho nhiều agent, mỗi agent một worktree."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-runs.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Orchestration runs",
+      "caption": {
+        "en": "A run waiting for approval of its first tasks.",
+        "vi": "Một lượt chạy đang chờ duyệt các việc đầu tiên."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-processes.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Processes and ports",
+      "caption": {
+        "en": "The Processes panel showing the demo server's port.",
+        "vi": "Bảng Processes hiện cổng của máy chủ mẫu."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-hosts.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "SSH hosts",
+      "caption": {
+        "en": "SSH hosts (documentation addresses, never connected).",
+        "vi": "Danh sách máy SSH dùng địa chỉ tài liệu và không hề kết nối."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-automations.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Automations",
+      "caption": {
+        "en": "Scheduled automations (disabled samples).",
+        "vi": "Các tự động hóa theo lịch, là mẫu đang tắt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-plugins.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Plugins",
+      "caption": {
+        "en": "Plugins: the demo plugin waiting for review.",
+        "vi": "Trang Plugins với plugin mẫu đang chờ duyệt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Appearance.",
+        "vi": "Cài đặt → Giao diện."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-mobile.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Phone access",
+      "caption": {
+        "en": "Settings → Mobile with phone access on (no pairing code shown).",
+        "vi": "Cài đặt → Di động khi bật truy cập từ điện thoại, không hiện mã ghép đôi."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-notifications.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Notifications",
+      "caption": {
+        "en": "Settings → Notifications: desktop alerts and channels to the phone.",
+        "vi": "Cài đặt → Thông báo gồm thông báo trên máy và các kênh gửi tới điện thoại."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-daemon.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Session daemon",
+      "caption": {
+        "en": "Settings → Session Daemon: what happens when Kelpie closes, export and import.",
+        "vi": "Cài đặt → Session Daemon cho biết điều gì xảy ra khi đóng Kelpie, cùng chức năng xuất và nhập."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-light.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Themes",
+      "caption": {
+        "en": "The light theme.",
+        "vi": "Giao diện sáng."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-vietnamese.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Language",
+      "caption": {
+        "en": "The app in Vietnamese.",
+        "vi": "Ứng dụng hiển thị bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-agents.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Agents",
+      "caption": {
+        "en": "Settings → Agents: the agent CLIs Kelpie knows and how each one starts.",
+        "vi": "Cài đặt → Agent: các CLI agent mà Kelpie biết và cách khởi động từng cái."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-about.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "About",
+      "caption": {
+        "en": "Settings → About on Linux.",
+        "vi": "Cài đặt → Giới thiệu trên Linux."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-terminal-settings.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Settings",
+      "caption": {
+        "en": "Settings → Terminal.",
+        "vi": "Cài đặt → Terminal."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-settings-commands.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Quick commands",
+      "caption": {
+        "en": "Settings → Quick Commands.",
+        "vi": "Cài đặt → Lệnh nhanh."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-composer.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Composer",
+      "caption": {
+        "en": "The floating composer for a longer prompt.",
+        "vi": "Khung soạn nổi để viết prompt dài."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-csv.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Files",
+      "caption": {
+        "en": "A CSV file as a sortable table.",
+        "vi": "Tệp CSV hiện thành bảng có thể sắp xếp."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-terminal-menu.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Terminals",
+      "caption": {
+        "en": "A terminal's context menu.",
+        "vi": "Menu ngữ cảnh của một terminal."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-shortcuts.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Keyboard shortcuts",
+      "caption": {
+        "en": "Settings → Shortcuts with the Linux keys.",
+        "vi": "Cài đặt → Phím tắt với các phím trên Linux."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "linux-dashboard.png": {
+      "platform": "Linux (Ubuntu 22.04, Xvfb)",
+      "feature": "Agent Dashboard",
+      "caption": {
+        "en": "The Agent Dashboard with a shell waiting for an answer and Answer at hand.",
+        "vi": "Bảng điều khiển agent có một shell đang chờ trả lời, nút Answer nằm sẵn bên cạnh."
+      },
+      "how": "scripts/e2e/linux_shots.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): debug app driven through tauri-driver and WebKitWebDriver, demo projects of readme_demo.py, bash shells"
+    },
+    "phone-pair-scan.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "Pairing starts by scanning the code the computer shows, or pasting its link.",
+        "vi": "Việc ghép đôi bắt đầu bằng cách quét mã mà máy tính hiện ra, hoặc dán đường liên kết của nó."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/02-pair-scan.png"
+    },
+    "phone-pair-name.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone pairing",
+      "caption": {
+        "en": "The phone names itself before the computer approves it.",
+        "vi": "Điện thoại tự đặt tên trước khi máy tính chấp thuận nó."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/04-pair-name.png"
+    },
+    "phone-inbox-control.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox of a phone allowed to take control, with See the screen at the top.",
+        "vi": "Hộp phiên của một điện thoại được phép điều khiển, nút xem màn hình nằm ở trên cùng."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/23-inbox-control.png",
+      "agent": "simulated"
+    },
+    "phone-terminal-keys.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone session",
+      "caption": {
+        "en": "Typing into a terminal session, with the key bar above the keyboard.",
+        "vi": "Gõ vào một phiên terminal, thanh phím nằm ngay trên bàn phím."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/12-terminal-keyboard.png"
+    },
+    "phone-chat-tools.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone chat",
+      "caption": {
+        "en": "A chat on the phone lists each tool the agent ran and what it changed.",
+        "vi": "Cuộc chat trên điện thoại liệt kê từng công cụ mà agent đã chạy và những gì nó đã sửa."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/15-chat-top.png",
+      "agent": "simulated"
+    },
+    "phone-chat-approval.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "An agent asks to tag a release and push the tag: allow or deny it from the phone.",
+        "vi": "Agent xin gắn thẻ bản phát hành rồi đẩy thẻ lên, bạn cho phép hoặc từ chối ngay từ điện thoại."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/14-chat-approval.png",
+      "agent": "simulated"
+    },
+    "phone-chat-keyboard.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone chat",
+      "caption": {
+        "en": "Writing back to an agent while it waits for approval.",
+        "vi": "Nhắn lại cho agent trong lúc nó đang chờ duyệt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/17-chat-keyboard.png",
+      "agent": "simulated"
+    },
+    "phone-connection.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone connection",
+      "caption": {
+        "en": "The connection sheet: how the phone reaches the computer and how fresh the link is.",
+        "vi": "Bảng kết nối cho biết điện thoại đến máy tính bằng đường nào và đường liên kết còn mới tới đâu."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/20-connection-sheet.png"
+    },
+    "phone-settings-2.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone settings",
+      "caption": {
+        "en": "Phone settings: theme, language, text size and how the inbox sorts.",
+        "vi": "Cài đặt trên điện thoại gồm giao diện, ngôn ngữ, cỡ chữ và cách hộp phiên sắp xếp."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-2.png"
+    },
+    "phone-settings-3.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone settings",
+      "caption": {
+        "en": "Choosing and ordering the keys of the key bar.",
+        "vi": "Chọn và sắp xếp các phím trên thanh phím."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/21-settings-3.png"
+    },
+    "phone-offline.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "With the computer gone, the phone says so and keeps what it last saw.",
+        "vi": "Khi máy tính không còn kết nối, điện thoại báo điều đó và giữ lại những gì nó thấy lần cuối."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-en-dark/25-offline-inbox.png",
+      "agent": "simulated"
+    },
+    "phone-chat-approval-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "An approval on the Vietnamese page.",
+        "vi": "Một yêu cầu duyệt trên trang tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/14-chat-approval.png",
+      "agent": "simulated"
+    },
+    "phone-chat-tools-vi-light.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone chat",
+      "caption": {
+        "en": "A chat on the Vietnamese page, light theme.",
+        "vi": "Một cuộc chat trên trang tiếng Việt ở chế độ sáng."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-light/15-chat-top.png",
+      "agent": "simulated"
+    },
+    "phone-connection-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone connection",
+      "caption": {
+        "en": "The connection sheet in Vietnamese.",
+        "vi": "Bảng kết nối bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/20-connection-sheet.png"
+    },
+    "phone-offline-vi.png": {
+      "platform": "iPhone-sized phone (Chromium)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The offline inbox in Vietnamese.",
+        "vi": "Hộp phiên khi mất kết nối, bằng tiếng Việt."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; iphone-vi-dark/25-offline-inbox.png",
+      "agent": "simulated"
+    },
+    "phone-android-inbox.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox in Chrome on an Android-sized phone (Pixel 7).",
+        "vi": "Hộp phiên trong Chrome trên một điện thoại cỡ Android (Pixel 7)."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/08-inbox-status.png",
+      "agent": "simulated"
+    },
+    "phone-android-terminal.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone session",
+      "caption": {
+        "en": "A terminal session on an Android-sized phone.",
+        "vi": "Một phiên terminal trên điện thoại cỡ Android."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/11-terminal.png"
+    },
+    "phone-android-approval.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone approval",
+      "caption": {
+        "en": "Answering a menu prompt on an Android-sized phone.",
+        "vi": "Trả lời một câu hỏi dạng menu trên điện thoại cỡ Android."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-en-dark/13-terminal-prompt.png"
+    },
+    "phone-android-inbox-vi-light.png": {
+      "platform": "Android-sized phone (Chromium as a Pixel 7)",
+      "feature": "Phone inbox",
+      "caption": {
+        "en": "The inbox in Vietnamese, light theme, on an Android-sized phone.",
+        "vi": "Hộp phiên bằng tiếng Việt ở chế độ sáng, trên điện thoại cỡ Android."
+      },
+      "how": "scripts/e2e/phone_tour.py on a hosted ubuntu-22.04 runner (workflow readme-media.yml, run 45801367330): Playwright's Chromium as an iPhone 15 (390x844 at 3x) or a Pixel 7 (412x915 at 2.625x), isolated daemon, passkey with Chromium's virtual authenticator; pixel-vi-light/08-inbox-status.png",
+      "agent": "simulated"
     }
   }
 }
