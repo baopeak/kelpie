@@ -783,6 +783,8 @@ async def main(d):
     mark = phone.mark()
     stop = await phone.ask(type="chat_stop", id=ca["id"])
     check("a stop cancels it, and every card closes (chat_resolved by the phone)", stop["result"] == "ok" and await phone.wait(lambda m: m["type"] == "chat_resolved" and m["id"] == ca["id"] and m["by"] == "phone" and m["answered_by"] == "Writer", 10, mark) is not None)
+    # The cancel and the permission's cancelled outcome are separate writes to the agent: wait for both instead of reading once.
+    ps.wait_for(lambda: all(w in open(ACP_LOG, encoding="utf-8").read() for w in ("session/cancel", "cancelled")), 5)
     log = open(ACP_LOG, encoding="utf-8").read()
     check("…the agent was sent session/cancel and a cancelled outcome", "session/cancel" in log and "cancelled" in log, log[-300:])
     check("…and its turn ended", ps.wait_for(lambda: info(d, ca["id"]).get("status") == "idle", 15) is not None)
