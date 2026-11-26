@@ -339,8 +339,9 @@ def demo_sessions(d, folder):
     # A Git repository whose `origin` names a demo repository on GitHub, never reached: `gh` is the stand-in main() puts on PATH, which
     # finds no pull request, so a session's pull-request line says so instead of an error about the folder.
     repo = os.path.join(folder, "demo-repo")
+    made = os.path.isdir(os.path.join(repo, ".git"))  # from an earlier run into the same --out
     os.makedirs(repo, exist_ok=True)
-    for args in (["init", "-q", "-b", "main"], ["-c", "user.name=Kelpie Demo", "-c", "user.email=demo@kelpie.invalid", "commit", "-q", "--allow-empty", "-m", "demo"],
+    for args in () if made else (["init", "-q", "-b", "main"], ["-c", "user.name=Kelpie Demo", "-c", "user.email=demo@kelpie.invalid", "commit", "-q", "--allow-empty", "-m", "demo"],
                  ["remote", "add", "origin", "git@github.com:kelpie-demo/atlas-commerce.git"],
                  # A test machine may rewrite github.com addresses to a proxy (`insteadOf`), which would hide that it is GitHub: the longest
                  # rule wins, and this one keeps the demo's address as it is.
