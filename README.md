@@ -122,8 +122,8 @@ Phone access is optional and off by default. Once you pair a phone, it lists you
 
 <table>
 <tr>
-<td align="center" valign="top" width="50%"><!-- clip: mac-phone-control.mp4 --><a href="#watch-it-work"><img src="docs/screenshots/mac-phone-control-poster.png" alt="Clip poster: on the left the phone sees the Mac's screen, on the right the Mac with the line typed from the phone in TextEdit" width="420"></a><br><strong>The phone drives a Mac</strong><br><sub>From the phone: tap into TextEdit on the Mac, type a line, then ⌘S saves it.</sub></td>
-<td align="center" valign="top" width="50%"><!-- clip: clip-worktree-finish.mp4 --><a href="#watch-it-work"><img src="docs/screenshots/clip-worktree-finish-poster.png" alt="Clip poster: Finish merged the worktree into main and removed it" width="420"></a><br><strong>From a worktree to main</strong><br><sub>New worktree, a shell commits a check in it, then Finish merges it into main and the worktree is gone.</sub></td>
+<td align="center" valign="top" width="50%"><a href="docs/media/mac-phone-control.gif"><img src="docs/media/mac-phone-control.gif" alt="Clip: on the left the phone sees the Mac's screen, on the right the Mac with the line typed from the phone in TextEdit" width="420"></a><br><strong>The phone drives a Mac</strong><br><sub>From the phone: tap into TextEdit on the Mac, type a line, then ⌘S saves it.</sub></td>
+<td align="center" valign="top" width="50%"><a href="docs/media/clip-worktree-finish.gif"><img src="docs/media/clip-worktree-finish.gif" alt="Clip: Finish merged the worktree into main and removed it" width="420"></a><br><strong>From a worktree to main</strong><br><sub>New worktree, a shell commits a check in it, then Finish merges it into main and the worktree is gone.</sub></td>
 </tr>
 </table>
 
@@ -196,7 +196,7 @@ Every picture below comes from the real app with demo projects. A picture marked
 <td align="center" valign="top" width="33%"><a href="docs/screenshots/past-conversations.png"><img src="docs/screenshots/past-conversations.png" alt="The Sessions tab: past Claude Code and Codex conversations of this project (simulated agent)." width="260"></a><br><sub>The Sessions tab: past Claude Code and Codex conversations of this project (simulated agent).</sub></td>
 </tr>
 <tr>
-<td align="center" valign="top" width="33%"><!-- clip: clip-phone-answer.mp4 --><a href="#watch-it-work"><img src="docs/screenshots/clip-phone-answer-poster.png" alt="Clip poster: a demo menu (not an agent) waits, the phone answers it with one tap, and the desktop pane carries on." width="260"></a><br><sub>Clip poster: a demo menu (not an agent) waits, the phone answers it with one tap, and the desktop pane carries on.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/media/clip-phone-answer.gif"><img src="docs/media/clip-phone-answer.gif" alt="Clip: a demo menu (not an agent) waits, the phone answers it with one tap, and the desktop pane carries on." width="260"></a><br><sub>Clip: a demo menu (not an agent) waits, the phone answers it with one tap, and the desktop pane carries on.</sub></td>
 <td align="center" valign="top" width="33%"><a href="docs/screenshots/light.png"><img src="docs/screenshots/light.png" alt="The multi-pane workspace in the light theme." width="260"></a><br><sub>The multi-pane workspace in the light theme.</sub></td>
 <td align="center" valign="top" width="33%"><a href="docs/screenshots/vietnamese.png"><img src="docs/screenshots/vietnamese.png" alt="The multi-pane workspace with the Vietnamese interface." width="260"></a><br><sub>The multi-pane workspace with the Vietnamese interface.</sub></td>
 </tr>
