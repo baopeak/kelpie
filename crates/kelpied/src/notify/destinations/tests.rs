@@ -759,18 +759,22 @@ fn clearing_the_channels_clears_what_was_moved_aside() {
 /// A toggle while a request is under way: the thread from before leaves the file to the one after.
 #[test]
 fn a_channel_switched_off_and_on_during_a_request_has_one_writer() {
-    let (r, service) = (rig(), PushService::start(&[Answer::After(800, 503)]));
+    // The answer is held long enough that both switches land while the request is under way, even on a loaded runner: with a short
+    // hold, a test thread that stalled past it let the 503's own retry (100 ms to 1 s later) go out before the switch, a second request.
+    const HOLD_MS: u64 = 5000;
+    let (r, service) = (rig(), PushService::start(&[Answer::After(HOLD_MS, 503)]));
     let mut c = r.notifier.config();
     c.ntfy.enabled = true;
     c.ntfy.server = service.base.clone();
     r.notifier.update(Some(c.clone()), &Value::Null).unwrap();
     r.notifier.send(&waiting("old"), &Context::default());
-    service.wait_for(1, FIRST);
+    let first = service.wait_for(1, FIRST)[0].at;
     let mut off = c.clone();
     off.ntfy.enabled = false;
     r.notifier.update(Some(off), &Value::Null).unwrap();
     r.notifier.update(Some(c), &Value::Null).unwrap();
-    std::thread::sleep(Duration::from_millis(2500));
+    assert!(first.elapsed() < Duration::from_millis(HOLD_MS), "the switches came after the answer: this run proves nothing");
+    std::thread::sleep(Duration::from_millis(HOLD_MS + 1700));
     assert_eq!(service.count(), 1, "what it had went with the first switch");
     assert!(!r.outbox(&Dest::Channel(Channel::Ntfy)).exists(), "and the late answer wrote nothing");
     r.notifier.send(&waiting("new"), &Context::default());
