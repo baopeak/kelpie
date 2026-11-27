@@ -894,7 +894,7 @@ session at the top: under its header a strip of sub-tabs lists that session firs
 session below it (a grandchild marked `›`) with their last report. Clicking a chip, or a child's
 row in the sidebar, shows that session in the same pane, and the tab reads *parent › child*; the
 strip then starts with *parent › child · sub-session*, where the parent's name leads back to it.
-`+N` shows the rest. Where a click lands, the pane and the row glow for a moment (a steady mark with
+`+N` shows the rest. Where a click lands, a ring flashes once around the pane and the row (a steady mark with
 reduced motion) and the keyboard goes to that session's terminal or message field. No tab opens per
 child. The pane's close button on a child stops it and shows the session above it again; closing
 the tab closes the tab. Tabs of children opened by an older version are folded into the parent's
