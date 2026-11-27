@@ -62,8 +62,21 @@ static BRACKET_KEYS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([A-Za-z?
 static KEY_LIST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[((?:[a-z?],)+[a-z?])\]\?\s*$").unwrap());
 /// A line where the user types: a shell prompt (PowerShell, cmd, sh), or an agent's input box.
 static INPUT_LINE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:PS [^>]*>.*|[A-Za-z]:\\[^>]*>.*|[\w@.~:/\\\-\[\]() ]*[$#%]\s.*|[\w@.~:/\\\-\[\]() ]*[$#%]|\s*[>❯›▌]\s*(?:[^0-9\s].*)?)$").unwrap()
+    Regex::new(r"^(?:PS [^>]*>.*|[A-Za-z]:\\[^>]*>.*|[\w@.~:/\\\-\[\]() ]*[$#%]\s.*|[\w@.~:/\\\-\[\]() ]*[$#%]|\s*[>❯›▌❭]\s*(?:[^0-9\s].*)?)$").unwrap()
 });
+/// An agent's input box under its reply (`❭ Ask Devin…`, `❯ `, `› `, Aider's `> `).
+static AGENT_BOX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[>❯›▌❭](?:\s.*)?$").unwrap());
+/// What a person typed before the reply: an agent's own echo of the prompt (not `>`, which in a reply is a quote).
+static AGENT_TYPED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*[❯›▌❭]").unwrap());
+/// A shell prompt, told apart from a reply's prose: PowerShell, cmd with a path without spaces (`D:\a.md -> b` is prose), and a
+/// `user@host` prompt, with a virtualenv before it or zsh's directory (a line that starts `100% ` or `C# ` is prose).
+static SHELL_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:PS [^>]*>.*|[A-Za-z]:\\[^>\s]*>.*|(?:\(\S+\) )?[\w.\-]+@[\w.\-]+(?::\S*| \S+)?\s?[$#%](?:\s.*)?)$").unwrap()
+});
+/// How far above the input box a reply is read for a question, in non-empty lines.
+const REPLY_LINES: usize = 20;
+/// Without an input box on screen, the reply is this many non-empty lines at the bottom.
+const REPLY_FALLBACK_LINES: usize = 12;
 
 /// The prompt at the bottom of `screen` (plain text, as `text_tail` returns it), if any.
 #[cfg(test)]
@@ -452,6 +465,36 @@ fn yes_no(lines: &[&str]) -> Option<Prompt> {
         return Some(Prompt { keys: dedup(keys), question, line: false, lasting: Vec::new(), selected: None });
     }
     None
+}
+
+/// Whether the agent's last reply on `screen` (plain text, as `text_tail` returns it) asks the person something: one of its lines
+/// ends with a question mark. Agents without hooks ring the bell when a turn ends as well as when they ask (Devin's `notify`),
+/// and only what they wrote tells the two apart. The reply is what sits above the input box, up to a line typed before or a
+/// rule that starts the screen's chrome; the box, its placeholder and the status bar below it are not part of it. Without an
+/// input box, the last lines of the screen are read.
+pub fn reply_asks(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let typed = |l: &str| AGENT_TYPED.is_match(l) || SHELL_PROMPT.is_match(l);
+    let reply: Vec<&str> = match lines.iter().rposition(|l| AGENT_BOX.is_match(l) || SHELL_PROMPT.is_match(l)) {
+        Some(input) => lines[..input].iter().rev().skip_while(|l| is_rule(l)).take_while(|l| !is_rule(l) && !typed(l)).take(REPLY_LINES).copied().collect(),
+        None => lines[lines.len().saturating_sub(REPLY_FALLBACK_LINES)..].to_vec(),
+    };
+    reply.iter().any(|l| asks(l))
+}
+
+/// A line that ends with a question mark, past trailing quotes, closing brackets and `*`/`_` emphasis.
+fn asks(line: &str) -> bool {
+    line.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’' | ')' | ']' | '}' | '»' | '*' | '_')).ends_with(['?', '？'])
+}
+
+/// A rule of box-drawing characters (`────`, `╭── Title ──╮`), possibly with a title in it: the edge of an input box or of the
+/// screen's chrome. A file tree (`├── src`, `│   └── main.rs`) and a table's borders and rows (`┌──┬──┐`, `│ a │ b │`) are a
+/// reply's own lines: they have a junction or a vertical line in them.
+fn is_rule(line: &str) -> bool {
+    let line = line.trim();
+    let starts_boxy = line.chars().next().is_some_and(|c| ('\u{2500}'..='\u{257F}').contains(&c));
+    let joins = line.contains(['│', '┃', '║', '├', '┤', '┬', '┴', '┼', '┣', '┫', '┳', '┻', '╋', '╠', '╣', '╦', '╩', '╬']);
+    starts_boxy && !joins && ["───", "━━━", "═══"].iter().any(|run| line.contains(run))
 }
 
 fn clean(line: &str) -> String {
@@ -1028,5 +1071,76 @@ mod tests {
         }
         // Generous for debug builds and loaded CI machines; release is far below 0.2 ms.
         assert!(t.elapsed().as_secs_f64() / 200.0 < 0.005, "{:?} per check", t.elapsed() / 200);
+    }
+
+    /// Devin's screen at the end of a turn: the reply, a rule with the conversation's title, its input box, a rule and the status bar.
+    fn devin(reply: &str) -> String {
+        format!("❭ the question I asked before\n{reply}\n─────────────────────────────── Đọc thông tin dự án ─\n❭ Ask Devin anything\n────────────────────────────────────\nFusion · Claude Opus 5.5 ◆ SWE-2.1 Medium · bypass        ctrl+o to expand edits\n")
+    }
+
+    #[test]
+    fn a_reply_that_asks_nothing_does_not_ask() {
+        let summary = "Đã xong. Tôi đã cập nhật README và chạy lại test.\n\nKết quả:\n- 14 test đều qua.\n- Không còn cảnh báo nào.";
+        assert!(!reply_asks(&devin(summary)));
+        // What came before the last thing typed is an earlier turn's.
+        assert!(!reply_asks(&devin(&format!("Should I go on?\n❭ yes please\n{summary}"))));
+    }
+
+    #[test]
+    fn decisions_left_to_the_owner_in_prose_ask() {
+        let decisions = "Còn hai việc cần bạn quyết:\n\n1. Cài Tesseract để chạy OCR: cần quyền cài phần mềm trên máy, nên tôi chờ bạn đồng ý.\n2. Ảnh mẫu: tôi đã lưu vào thư mục samples.\n3. Git: thư mục dự án chưa có git. Bạn có muốn tôi git init và commit không?";
+        assert!(reply_asks(&devin(decisions)));
+        // A question anywhere in the reply, not only on its last line.
+        assert!(reply_asks(&devin("Bạn có muốn tôi git init không?\nNếu không, tôi để nguyên.")));
+    }
+
+    #[test]
+    fn a_question_mark_is_read_past_quotes_brackets_and_emphasis() {
+        for line in ["**Should I commit this?**", "Do you want me to run it (it takes a minute)?", "Which one: \"A\" or \"B?\"", "_Proceed?_  ", "Có tiếp tục không？", "(Should I also update the docs?)"] {
+            assert!(reply_asks(&devin(line)), "{line}");
+        }
+        for line in ["Done. See notes.md (why?) for details.", "Fixed the `?` operator in parse.rs", "All done."] {
+            assert!(!reply_asks(&devin(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_input_box_and_the_status_bar_are_not_the_reply() {
+        let screen = "Đã xong, mọi test đều qua.\n────────────────────\n❭ What would you like to do next?\n────────────────────\n? for shortcuts · Ready?\n";
+        assert!(!reply_asks(screen));
+        // A percentage in a sentence is prose, not a shell prompt: the question is still read.
+        assert!(reply_asks(&devin("The build is 20% faster.\nShould I raise the limit to 80% too?")));
+        // Claude's and Codex's input boxes.
+        assert!(reply_asks("Want me to open a PR?\n\n❯ \n  ? for shortcuts\n"));
+        assert!(!reply_asks("Opened the PR.\n\n› Ask Codex anything?\n"));
+        // A status bar under the box that starts with a percentage is not the box.
+        assert!(reply_asks("Should I commit?\n❭ Ask Devin anything\n45% context left · bypass\n"));
+    }
+
+    #[test]
+    fn a_replys_own_lines_do_not_cut_it_short() {
+        // Percentages, `C#`, a path with an arrow, a quote, a file tree and a table under the question.
+        let lines = ["100% test đã qua.", "C# bindings regenerated", "D:\\Works\\a.md -> renamed", "> Note: nothing else changed", "├── src/\n│   └── main.rs", "┌────┬────┐\n│ a  │ b  │\n└────┴────┘"];
+        for below in lines {
+            assert!(reply_asks(&devin(&format!("Bạn có muốn tôi commit không?\n{below}\nXong."))), "{below}");
+        }
+        // An earlier command at a shell prompt, with a virtualenv or in zsh, ends the reply.
+        for prompt in ["(venv) user@host:~/p$ make", "user@host proj % make", "PS D:\\proj> make", "D:\\proj>make"] {
+            assert!(!reply_asks(&format!("Continue?\n{prompt}\nBuilt.\n{prompt}\n")), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn without_an_input_box_the_last_lines_are_read() {
+        assert!(reply_asks("Some output\nShall I continue?\n"));
+        assert!(!reply_asks(&("Is this old?\n".to_string() + &"line\n".repeat(12))));
+        assert!(!reply_asks(""));
+    }
+
+    #[test]
+    fn devins_input_box_is_an_input_line() {
+        // A numbered question with Devin's box below it is the agent asking in prose, not a menu waiting on a key.
+        assert_eq!(detect(&devin("Which approach?\n1. Rewrite\n2. Patch")), None);
+        assert_eq!(detect("Which approach?\n❯ 1. Rewrite\n  2. Patch\n❭ Ask Devin anything\n"), None);
     }
 }

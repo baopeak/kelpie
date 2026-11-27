@@ -443,6 +443,10 @@ const PASTE_SETTLE: Duration = Duration::from_millis(300);
 /// and this many of its last lines are read.
 const PROMPT_LOOK_QUIET: Duration = Duration::from_millis(700);
 const PROMPT_LOOK_LINES: usize = 14;
+/// A bell is read at most this long after it rang, even if the screen never goes quiet (a clock or spinner repainting).
+const BELL_READ_MAX: Duration = Duration::from_secs(3);
+/// Lines of the screen a bell's reply is read from: a long reply, its input box and the chrome below.
+const BELL_LOOK_LINES: usize = 40;
 const PASTE_MAX_WAIT: Duration = Duration::from_secs(3);
 
 pub struct Session {
@@ -786,6 +790,10 @@ impl Session {
             g.activity.last_input = Some(Instant::now());
             g.last_activity = now_millis();
             g.activity.bell = None;
+            // A key answers the turn the bell ended; the terminal's own replies (a cursor report after the bell) do not.
+            if !is_terminal_report(&bytes) {
+                g.activity.pending_bell = None;
+            }
         }
         if let Some(pty) = &g.pty {
             let _ = pty.ctl.send(Ctl::Input(bytes));
@@ -1324,6 +1332,29 @@ impl Session {
         g.screen_prompt = found;
     }
 
+    /// Reads what a bell from an agent without hooks meant, once the screen is quiet (it may ring before its last repaint): it asks the
+    /// person when a prompt is on screen or its reply asks something (`choices::reply_asks`), and waits on them; otherwise its turn is
+    /// over, and the session is unread like any finished turn nobody watched.
+    fn read_bell(g: &mut Inner, now: Instant) {
+        let Some(rang) = g.activity.pending_bell else { return };
+        if g.pty.is_none() {
+            g.activity.pending_bell = None;
+            return;
+        }
+        let quiet = g.activity.last_output.is_none_or(|o| now.duration_since(o) >= PROMPT_LOOK_QUIET);
+        if !quiet && now.duration_since(rang) < BELL_READ_MAX {
+            return;
+        }
+        g.activity.pending_bell = None;
+        // A prompt counts only while unanswered: one answered earlier stays in `screen_prompt` until the screen is looked at again.
+        let prompt = g.screen_prompt.is_some() && g.activity.screen_prompt.is_some_and(|at| g.activity.last_input.is_none_or(|i| i < at));
+        if prompt || crate::choices::reply_asks(&g.vt.text_tail(BELL_LOOK_LINES)) {
+            g.activity.bell = Some(rang);
+        } else if !g.focused {
+            g.unread = true;
+        }
+    }
+
     /// Types `text` as a prompt once the program is ready (see [`PendingPrompt`]).
     pub fn queue_prompt(&self, prompt: TypedPrompt) {
         self.inner.lock().pending_prompt = Some(PendingPrompt { prompt, since: Instant::now(), pasted: false });
@@ -1413,6 +1444,7 @@ impl Session {
         let watched = self.wake.receiver_count() > 0;
         let before = watched.then(|| (g.waiting_since, g.screen_prompt.clone()));
         Self::look_for_prompt(&mut g, now);
+        Self::read_bell(&mut g, now);
         let status = g.activity.status(now);
         g.waiting_since = match (status, g.waiting_since) {
             (Status::Waiting, Some(t)) => Some(t),
@@ -1908,6 +1940,42 @@ mod tests {
         // A second tap, from this device or another: the wait was answered, by the desktop.
         assert_eq!(answered_by(s.answer(Some(since), Answer::Text("1"), false)), Some("desktop".to_string()));
         assert_eq!(rx.writes(), vec![b"1".to_vec()], "only the first answer was typed");
+    }
+
+    /// Devin's screen at the end of a turn whose reply is `reply`, then the bell it rings for both a finished turn and a question.
+    fn devin_rings(reply: &str) -> (Arc<Session>, fake::Typed) {
+        let (s, rx) = fake::running(1, "s1", "devin");
+        let reply = reply.replace('\n', "\r\n");
+        s.ingest(format!("\x1b]0;devin.exe: Đọc thông tin dự án\x07{reply}\r\n──── Đọc thông tin dự án ─\r\n❭ Ask Devin anything\r\n────────────\r\nFusion · bypass\x07").as_bytes());
+        (s, rx)
+    }
+
+    #[test]
+    fn a_bell_without_hooks_waits_only_when_the_reply_asks() {
+        let later = |s: &Session, by: Duration| {
+            let now = Instant::now() + by;
+            s.tick(now);
+            s.inner.lock().activity.status(now)
+        };
+        // A summary: the turn is done, and nobody saw it.
+        let (s, _rx) = devin_rings("Đã xong. Mọi test đều qua.");
+        assert!(s.inner.lock().activity.pending_bell.is_some(), "the bell is read once the screen is quiet");
+        assert_eq!(later(&s, Duration::from_secs(2)), Status::Idle);
+        assert!(s.info().unread && s.info().waiting_since.is_none());
+        // Decisions left to the owner in prose: it waits on them, with no keys to offer.
+        let (s, _rx) = devin_rings("3. Git: thư mục dự án chưa có git. Bạn có muốn tôi git init và commit không?");
+        assert_eq!(later(&s, Duration::from_secs(2)), Status::Waiting);
+        assert!(s.info().waiting_since.is_some() && s.screen_prompt().is_none());
+        // Answered: the wait is over.
+        s.input(b"y".to_vec());
+        assert_eq!(later(&s, Duration::from_secs(3)), Status::Idle);
+        // The bell of a key just typed (no completion) is still nothing, whatever the screen says.
+        let (s, _rx) = devin_rings("Bạn có muốn tôi git init không?");
+        s.inner.lock().activity.pending_bell = None;
+        s.input(b"\t".to_vec());
+        s.ingest(b"\x07");
+        assert_eq!(s.inner.lock().activity.pending_bell, None);
+        assert_eq!(later(&s, Duration::from_secs(2)), Status::Idle);
     }
 
     /// A Claude permission menu on screen for `command`, the request its hook reported, and the wait it began.
