@@ -9,6 +9,7 @@ import { onEvent, readFile, writeFile } from "../lib/ipc";
 import { asksFor, refreshAsk, refreshFiles, reread } from "../lib/file-refresh";
 import { cksumOf } from "../lib/spec-index";
 import { isRemote } from "../lib/remote";
+import { isOutsideFile, outsideParts } from "../lib/outside-file";
 import { liveOk, watchFile } from "../lib/remote-live";
 import { Icon } from "./icons";
 import { baseExtensions, languageFor } from "../lib/codemirror";
@@ -47,15 +48,23 @@ function kindOf(path: string): Kind {
 /** Label of the rendered view for kinds that also have an editable source. */
 const RENDERED: Partial<Record<Kind, string>> = { markdown: msg("Preview"), csv: msg("Table"), notebook: msg("Notebook"), mermaid: msg("Diagram") };
 
+/** `path`: relative to the project, or the absolute path of a local file outside it, which is shown read-only and read as its name in
+ *  its own folder. */
 export function FileViewer(props: { project: Project; path: string; line?: number; focused: boolean }) {
+  const outside = () => isOutsideFile(props.path) && !isRemote(props.project);
+  const at = () => {
+    if (!outside()) return { project: props.project, path: props.path };
+    const { root, name } = outsideParts(props.path);
+    return { project: { ...props.project, path: root, remote: undefined }, path: name };
+  };
   const kind = () => kindOf(props.path);
   // Opening at a line (search hit, go to file) means the source.
   const [mode, setMode] = createSignal<"rendered" | "source">(RENDERED[kindOf(props.path)] && !props.line ? "rendered" : "source");
   const rendered = () => kind() === "image" || kind() === "pdf" || (!!RENDERED[kind()] && mode() === "rendered");
   const [version, setVersion] = createSignal(0);
   // On a host with live updates, a change there re-reads this file (through file-refresh).
-  createEffect(() => onCleanup(watchFile(props.project, props.path)));
-  createEffect(on(refreshAsk, (a) => asksFor(a, props.project.path, props.path) && rendered() && setVersion((v) => v + 1), { defer: true }));
+  createEffect(() => onCleanup(watchFile(at().project, at().path)));
+  createEffect(on(refreshAsk, (a) => asksFor(a, at().project.path, at().path) && rendered() && setVersion((v) => v + 1), { defer: true }));
   return (
     <div class="viewer">
       <div class="viewer-bar">
@@ -63,27 +72,27 @@ export function FileViewer(props: { project: Project; path: string; line?: numbe
         <Show when={RENDERED[kind()]}>
           <div class="toggles">
             <button class={`toggle${mode() === "rendered" ? " on" : ""}`} onClick={() => setMode("rendered")}>{t(RENDERED[kind()]!)}</button>
-            <button class={`toggle${mode() === "source" ? " on" : ""}`} onClick={() => setMode("source")}>{kind() === "markdown" ? t("Edit") : t("Source")}</button>
+            <button class={`toggle${mode() === "source" ? " on" : ""}`} onClick={() => setMode("source")}>{kind() === "markdown" && !outside() ? t("Edit") : t("Source")}</button>
           </div>
         </Show>
         <Show when={kind() === "text" || mode() === "source"}>
           <button class={`toggle${store.state.settings.wordWrap ? " on" : ""}`} title={t("Word wrap (Alt+Z)")} onClick={() => store.setSettings({ wordWrap: !store.state.settings.wordWrap })}>{t("Wrap")}</button>
         </Show>
-        <button class="icon-btn" data-action="reload-file" title={isRemote(props.project) ? t("Reload from the host") : t("Reload from disk")} onClick={() => refreshFiles(props.project.path, props.path)}>
+        <button class="icon-btn" data-action="reload-file" title={isRemote(props.project) ? t("Reload from the host") : t("Reload from disk")} onClick={() => refreshFiles(at().project.path, at().path)}>
           <Icon name="refresh" size={13} />
         </button>
       </div>
-      <Show when={rendered()} fallback={<TextEditor project={props.project} path={props.path} line={props.line} focused={props.focused} />}>
+      <Show when={rendered()} fallback={<TextEditor project={at().project} path={at().path} line={props.line} focused={props.focused} locked={outside()} />}>
         {/* A rendered view reads its file once: a reload makes it again. */}
         <For each={[version()]}>
           {() => (
             <Switch>
-              <Match when={kind() === "image"}><ImageView project={props.project} path={props.path} /></Match>
-              <Match when={kind() === "pdf"}><PdfView project={props.project} path={props.path} /></Match>
-              <Match when={kind() === "markdown"}><MarkdownView project={props.project} path={props.path} /></Match>
-              <Match when={kind() === "csv"}><CsvView project={props.project} path={props.path} /></Match>
-              <Match when={kind() === "notebook"}><NotebookView project={props.project} path={props.path} /></Match>
-              <Match when={kind() === "mermaid"}><MermaidView project={props.project} path={props.path} /></Match>
+              <Match when={kind() === "image"}><ImageView project={at().project} path={at().path} /></Match>
+              <Match when={kind() === "pdf"}><PdfView project={at().project} path={at().path} /></Match>
+              <Match when={kind() === "markdown"}><MarkdownView project={at().project} path={at().path} /></Match>
+              <Match when={kind() === "csv"}><CsvView project={at().project} path={at().path} /></Match>
+              <Match when={kind() === "notebook"}><NotebookView project={at().project} path={at().path} /></Match>
+              <Match when={kind() === "mermaid"}><MermaidView project={at().project} path={at().path} /></Match>
             </Switch>
           )}
         </For>
@@ -150,7 +159,8 @@ function MarkdownView(props: { project: Project; path: string }) {
   );
 }
 
-function TextEditor(props: { project: Project; path: string; line?: number; focused: boolean }) {
+/** `locked`: never written (a file outside the project). */
+function TextEditor(props: { project: Project; path: string; line?: number; focused: boolean; locked?: boolean }) {
   let host!: HTMLDivElement;
   let view: EditorView | undefined;
   const language = new Compartment();
@@ -168,7 +178,7 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
   let seq = 0;
   const remote = () => isRemote(props.project);
 
-  const readOnly = () => !!file() && (file()!.truncated || file()!.binary);
+  const readOnly = () => !!props.locked || (!!file() && (file()!.truncated || file()!.binary));
 
   /** The selected text with the lines it covers: `@selection` in a composer, Send selection. */
   const picked = () => {
@@ -232,7 +242,7 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
           parent: host,
           doc: text,
           extensions: [
-            baseExtensions({ readOnly: f.truncated, onSave: () => void save() }),
+            baseExtensions({ readOnly: f.truncated || !!props.locked, onSave: () => void save() }),
             language.of([]),
             wrap.of(wrapExt()),
             EditorView.updateListener.of((u) => {
@@ -313,6 +323,7 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
       <Show when={dirty() || readOnly() || external()}>
         <div class="viewer-bar" style={{ "border-top": "0" }}>
           <Show when={dirty()}><span class="dirty">● {t("Unsaved — {key}+S to save", { key: isMac ? "⌘" : "Ctrl" })}</span></Show>
+          <Show when={props.locked}><span>{t("Read-only: this file is outside the project")}</span></Show>
           <Show when={readOnly() && file()?.truncated}><span>{t("Read-only: showing the first 5 MiB of {size} MiB", { size: (file()!.size / 1048576).toFixed(1) })}</span></Show>
           <Show when={external()}>
             <span style={{ color: "var(--waiting)" }}>{t("Changed on disk.")}</span>

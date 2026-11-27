@@ -44,14 +44,46 @@ describe("openChatFile", () => {
     expect(openFile).toHaveBeenCalledWith("p1", "src/a.ts", { line: undefined });
   });
 
-  it("does not touch the file system for a path outside, and says so", async () => {
-    for (const path of ["C:\\Windows\\system32\\calc.exe", "D:\\other\\a.ts", "../a.ts", "\\\\host\\share\\a", "D:a.ts"]) {
+  it("opens a local file outside the project by its absolute path, read by its folder and name", async () => {
+    const cases = [
+      ["C:\\Windows\\system32\\drivers\\etc\\hosts", "C:/Windows/system32/drivers/etc", "hosts", "C:/Windows/system32/drivers/etc/hosts"],
+      ["D:\\other\\a.ts", "D:/other", "a.ts", "D:/other/a.ts"],
+      ["../a.ts", "D:/", "a.ts", "D:/a.ts"],
+      ["/home/u/notes.md", "/home/u", "notes.md", "/home/u/notes.md"],
+    ];
+    for (const [path, root, name, abs] of cases) {
+      readFile.mockClear();
+      openFile.mockClear();
+      await openChatFile(project, { path, line: 7 });
+      expect(readFile).toHaveBeenCalledWith(root, name, 1);
+      expect(openFile).toHaveBeenCalledWith("p1", abs, { line: 7 });
+    }
+    expect(quickOpen).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("never reads a network share or a drive-relative path, and says so", async () => {
+    for (const path of ["\\\\host\\share\\a", "//host/share/a", "D:a.ts"]) {
       notify.mockClear();
       await openChatFile(project, { path });
       expect(notify).toHaveBeenCalledWith(`${path} is outside this project`);
     }
     expect(readFile).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
+  it("says a file outside the project is not found rather than opening an empty viewer", async () => {
+    readFile.mockRejectedValue(new Error("not found"));
+    await openChatFile(project, { path: "D:\\other\\gone.ts" });
+    expect(notify).toHaveBeenCalledWith("File not found: D:\\other\\gone.ts");
+    expect(openFile).not.toHaveBeenCalled();
     expect(quickOpen).not.toHaveBeenCalled();
+  });
+
+  it("keeps a project on a host to its own files", async () => {
+    await openChatFile({ ...project, path: "ssh://box/srv/proj", remote: { dest: "box", tmux: false } }, { path: "/etc/hosts" });
+    expect(notify).toHaveBeenCalledWith("/etc/hosts is outside this project");
+    expect(readFile).not.toHaveBeenCalled();
     expect(openFile).not.toHaveBeenCalled();
   });
 
@@ -132,7 +164,7 @@ describe("what shows a file opening", () => {
 
   it("is not told when nothing opened, nor for a web link", async () => {
     const told = vi.fn();
-    await openChatFile(project, { path: "D:\\other\\a.ts" }, told);
+    await openChatFile(project, { path: "\\\\host\\share\\a.ts" }, told);
     readFile.mockRejectedValue(new Error("missing"));
     await openChatFile(project, { path: "gone.ts" }, told);
     openChatLink("https://x.y", project, told);
@@ -167,11 +199,10 @@ describe("openChatLink", () => {
     expect(openUrl).not.toHaveBeenCalled();
   });
 
-  it("shows a toast for a local file outside the project and launches nothing", async () => {
+  it("shows a local file outside the project in the viewer and launches nothing", async () => {
     openChatLink("C:\\Windows\\system32\\calc.exe", project);
     await settled();
-    expect(notify).toHaveBeenCalledWith("C:\\Windows\\system32\\calc.exe is outside this project");
-    expect(readFile).not.toHaveBeenCalled();
+    expect(openFile).toHaveBeenCalledWith("p1", "C:/Windows/system32/calc.exe", { line: undefined });
     expect(openUrl).not.toHaveBeenCalled();
     expect(openPath).not.toHaveBeenCalled();
     expect(revealItemInDir).not.toHaveBeenCalled();
@@ -216,15 +247,14 @@ describe("resolveChatFile from a terminal's folder", () => {
     expect(await resolveChatFile(project, { path: "a.ts" }, "D:\\proj\\sub")).toEqual({ rel: "a.ts" });
   });
 
-  it("works out `..` from the folder, but never leaves the project", async () => {
+  it("works out `..` from the folder; past the project it is a file outside, by its absolute path", async () => {
     expect(await resolveChatFile(project, { path: "../lib/b.ts" }, "D:\\proj\\sub")).toEqual({ rel: "lib/b.ts" });
-    notify.mockClear();
-    expect(await resolveChatFile(project, { path: "../../etc/passwd.txt" }, "D:\\proj\\sub")).toEqual({ error: "../../etc/passwd.txt is outside this project" });
-    expect(readFile).toHaveBeenCalledTimes(1);
+    expect(await resolveChatFile(project, { path: "../../etc/passwd.txt" }, "D:\\proj\\sub")).toEqual({ abs: "D:/etc/passwd.txt" });
+    expect(readFile).toHaveBeenLastCalledWith("D:/etc", "passwd.txt", 1);
   });
 
   it("ignores the folder for an absolute path", async () => {
     expect(await resolveChatFile(project, { path: "D:\\proj\\x.py" }, "D:\\proj\\sub")).toEqual({ rel: "x.py" });
-    expect(await resolveChatFile(project, { path: "D:\\other\\x.py" }, "D:\\proj\\sub")).toEqual({ error: "D:\\other\\x.py is outside this project" });
+    expect(await resolveChatFile(project, { path: "D:\\other\\x.py" }, "D:\\proj\\sub")).toEqual({ abs: "D:/other/x.py" });
   });
 });
