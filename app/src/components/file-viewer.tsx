@@ -82,7 +82,7 @@ export function FileViewer(props: { project: Project; path: string; line?: numbe
           <Icon name="refresh" size={13} />
         </button>
       </div>
-      <Show when={rendered()} fallback={<TextEditor project={at().project} path={at().path} line={props.line} focused={props.focused} locked={outside()} />}>
+      <Show when={rendered()} fallback={<TextEditor project={at().project} path={at().path} line={props.line} focused={props.focused} locked={outside()} named={outside() ? props.path : undefined} />}>
         {/* A rendered view reads its file once: a reload makes it again. */}
         <For each={[version()]}>
           {() => (
@@ -159,8 +159,9 @@ function MarkdownView(props: { project: Project; path: string }) {
   );
 }
 
-/** `locked`: never written (a file outside the project). */
-function TextEditor(props: { project: Project; path: string; line?: number; focused: boolean; locked?: boolean }) {
+/** `locked`: never written (a file outside the project). `named`: how a selection names the file when not by `path` (an outside
+ *  file's absolute path, where `path` is only its name in its folder). */
+function TextEditor(props: { project: Project; path: string; line?: number; focused: boolean; locked?: boolean; named?: string }) {
   let host!: HTMLDivElement;
   let view: EditorView | undefined;
   const language = new Compartment();
@@ -187,7 +188,7 @@ function TextEditor(props: { project: Project; path: string; line?: number; focu
     const doc = view.state.doc;
     // A selection that ends with a line break does not cover the next line.
     const last = to > from && doc.lineAt(to).from === to ? to - 1 : to;
-    return { text: doc.sliceString(from, to), path: props.path, startLine: doc.lineAt(from).number, endLine: doc.lineAt(last).number };
+    return { text: doc.sliceString(from, to), path: props.named ?? props.path, startLine: doc.lineAt(from).number, endLine: doc.lineAt(last).number };
   };
   const selection = selectionSource(picked);
 

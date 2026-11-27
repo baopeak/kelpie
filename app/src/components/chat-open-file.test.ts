@@ -14,6 +14,8 @@ const { notify, openFile, readFile, quickOpen, openUrl, openPath, revealItemInDi
 vi.mock("../lib/store", () => ({ store: { notify, openFile } }));
 vi.mock("../lib/ipc", () => ({ readFile, quickOpen }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl, openPath, revealItemInDir }));
+// The project is on a Windows drive: paths read as Windows reads them, whatever runs the tests.
+vi.mock("../lib/platform", async (actual) => ({ ...(await actual<typeof import("../lib/platform")>()), isWindows: true }));
 
 import { openChatFile, openChatLink, resolveChatFile } from "./chat-open-file";
 
@@ -42,6 +44,9 @@ describe("openChatFile", () => {
   it("turns an absolute path inside the project into a relative one", async () => {
     await openChatFile(project, { path: "d:/PROJ/src/a.ts" });
     expect(openFile).toHaveBeenCalledWith("p1", "src/a.ts", { line: undefined });
+    // As an agent running in Git Bash prints it.
+    await openChatFile(project, { path: "/d/proj/src/b.ts" });
+    expect(openFile).toHaveBeenLastCalledWith("p1", "src/b.ts", { line: undefined });
   });
 
   it("opens a local file outside the project by its absolute path, read by its folder and name", async () => {
@@ -49,7 +54,7 @@ describe("openChatFile", () => {
       ["C:\\Windows\\system32\\drivers\\etc\\hosts", "C:/Windows/system32/drivers/etc", "hosts", "C:/Windows/system32/drivers/etc/hosts"],
       ["D:\\other\\a.ts", "D:/other", "a.ts", "D:/other/a.ts"],
       ["../a.ts", "D:/", "a.ts", "D:/a.ts"],
-      ["/home/u/notes.md", "/home/u", "notes.md", "/home/u/notes.md"],
+      ["/d/other/notes.md", "D:/other", "notes.md", "D:/other/notes.md"],
     ];
     for (const [path, root, name, abs] of cases) {
       readFile.mockClear();
@@ -63,7 +68,7 @@ describe("openChatFile", () => {
   });
 
   it("never reads a network share or a drive-relative path, and says so", async () => {
-    for (const path of ["\\\\host\\share\\a", "//host/share/a", "D:a.ts"]) {
+    for (const path of ["\\\\host\\share\\a", "//host/share/a", "\\??\\UNC\\host\\share\\a.txt", "/??/UNC/host/share/a.txt", "D:a.ts", "/home/u/a.txt"]) {
       notify.mockClear();
       await openChatFile(project, { path });
       expect(notify).toHaveBeenCalledWith(`${path} is outside this project`);
