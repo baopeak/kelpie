@@ -122,8 +122,8 @@ Truy cập từ điện thoại là tuỳ chọn và được tắt theo mặc �
 
 <table>
 <tr>
-<td align="center" valign="top" width="50%"><!-- clip: mac-phone-control.mp4 --><a href="#xem-các-clip-ngắn"><img src="docs/screenshots/mac-phone-control-poster.png" alt="Ảnh bìa clip: bên trái là điện thoại đang xem màn hình máy Mac, bên phải là máy Mac với dòng chữ được gõ từ điện thoại trong TextEdit" width="420"></a><br><strong>Điện thoại điều khiển máy Mac</strong><br><sub>Từ điện thoại, bạn chạm vào TextEdit trên Mac, gõ một dòng rồi bấm ⌘S để lưu.</sub></td>
-<td align="center" valign="top" width="50%"><!-- clip: clip-worktree-finish.mp4 --><a href="#xem-các-clip-ngắn"><img src="docs/screenshots/clip-worktree-finish-poster.png" alt="Ảnh bìa clip: Finish đã gộp worktree vào main và xoá worktree đó" width="420"></a><br><strong>Từ worktree tới main</strong><br><sub>Bạn tạo worktree mới, một shell commit thêm một bước kiểm tra trong đó, rồi Finish gộp nó vào main và worktree biến mất.</sub></td>
+<td align="center" valign="top" width="50%"><a href="docs/media/mac-phone-control.gif"><img src="docs/media/mac-phone-control.gif" alt="Clip: bên trái là điện thoại đang xem màn hình máy Mac, bên phải là máy Mac với dòng chữ được gõ từ điện thoại trong TextEdit" width="420"></a><br><strong>Điện thoại điều khiển máy Mac</strong><br><sub>Từ điện thoại, bạn chạm vào TextEdit trên Mac, gõ một dòng rồi bấm ⌘S để lưu.</sub></td>
+<td align="center" valign="top" width="50%"><a href="docs/media/clip-worktree-finish.gif"><img src="docs/media/clip-worktree-finish.gif" alt="Clip: Finish đã gộp worktree vào main và xoá worktree đó" width="420"></a><br><strong>Từ worktree tới main</strong><br><sub>Bạn tạo worktree mới, một shell commit thêm một bước kiểm tra trong đó, rồi Finish gộp nó vào main và worktree biến mất.</sub></td>
 </tr>
 </table>
 
@@ -196,7 +196,7 @@ Mọi ảnh dưới đây đều được chụp từ ứng dụng thật với 
 <td align="center" valign="top" width="33%"><a href="docs/screenshots/past-conversations.png"><img src="docs/screenshots/past-conversations.png" alt="Tab Sessions liệt kê các cuộc trò chuyện cũ với Claude Code và Codex của dự án này (agent giả lập)." width="260"></a><br><sub>Tab Sessions liệt kê các cuộc trò chuyện cũ với Claude Code và Codex của dự án này (agent giả lập).</sub></td>
 </tr>
 <tr>
-<td align="center" valign="top" width="33%"><!-- clip: clip-phone-answer.mp4 --><a href="#xem-các-clip-ngắn"><img src="docs/screenshots/clip-phone-answer-poster.png" alt="Ảnh bìa clip: một menu demo (không phải agent) đang chờ, điện thoại trả lời bằng một chạm, và khung trên máy tính chạy tiếp." width="260"></a><br><sub>Ảnh bìa clip: một menu demo (không phải agent) đang chờ, điện thoại trả lời bằng một chạm, và khung trên máy tính chạy tiếp.</sub></td>
+<td align="center" valign="top" width="33%"><a href="docs/media/clip-phone-answer.gif"><img src="docs/media/clip-phone-answer.gif" alt="Clip: một menu demo (không phải agent) đang chờ, điện thoại trả lời bằng một chạm, và khung trên máy tính chạy tiếp." width="260"></a><br><sub>Clip: một menu demo (không phải agent) đang chờ, điện thoại trả lời bằng một chạm, và khung trên máy tính chạy tiếp.</sub></td>
 <td align="center" valign="top" width="33%"><a href="docs/screenshots/light.png"><img src="docs/screenshots/light.png" alt="Không gian nhiều khung với theme sáng." width="260"></a><br><sub>Không gian nhiều khung với theme sáng.</sub></td>
 <td align="center" valign="top" width="33%"><a href="docs/screenshots/vietnamese.png"><img src="docs/screenshots/vietnamese.png" alt="Không gian nhiều khung với giao diện tiếng Việt." width="260"></a><br><sub>Không gian nhiều khung với giao diện tiếng Việt.</sub></td>
 </tr>

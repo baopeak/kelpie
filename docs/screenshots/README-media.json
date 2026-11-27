@@ -10,7 +10,8 @@
         "vi": "Từ điện thoại, chạm vào TextEdit trên Mac, gõ một dòng rồi bấm ⌘S để lưu."
       },
       "how": "scripts/e2e/screen_mac.py --video: Playwright video of the phone page beside `screencapture -v` of the Mac, joined with ffmpeg",
-      "hosting": "GitHub attachment (not in the repository)"
+      "hosting": "animated GIF in the repository (docs/media; ffmpeg, 10 fps, 900 px wide, 128-colour palette); the MP4 is not in the repository",
+      "gif": "docs/media/mac-phone-control.gif"
     },
     "clip-phone-answer.mp4": {
       "platform": "Windows + phone (iPhone-sized Chromium)",
@@ -22,7 +23,8 @@
       },
       "how": "scripts/e2e/readme_phone_win.py --what answer: ffmpeg gdigrab of the app's window beside Playwright's video of the phone page, joined with ffmpeg hstack (10 s, 1628x844, H.264, no sound, 99 KB). The menu is a small demo program, not an agent.",
       "agent": "simulated",
-      "hosting": "GitHub attachment (not in the repository)"
+      "hosting": "animated GIF in the repository (docs/media; ffmpeg, 10 fps, 900 px wide, 128-colour palette); the MP4 is not in the repository",
+      "gif": "docs/media/clip-phone-answer.gif"
     },
     "clip-worktree-finish.mp4": {
       "platform": "Windows",
@@ -33,7 +35,8 @@
         "vi": "Tạo worktree mới, một shell commit thêm một bước kiểm tra trong đó, rồi Finish gộp nó vào main và worktree biến mất."
       },
       "how": "scripts/e2e/readme_shots.py --clip-finish on a throwaway clone of the demo checkout: ffmpeg gdigrab of the app's window, played 1.2 times faster (19.6 s, 1238x720, H.264, no sound, 270 KB)",
-      "hosting": "GitHub attachment (not in the repository)"
+      "hosting": "animated GIF in the repository (docs/media; ffmpeg, 10 fps, 900 px wide, 128-colour palette); the MP4 is not in the repository",
+      "gif": "docs/media/clip-worktree-finish.gif"
     }
   },
   "pictures": {
