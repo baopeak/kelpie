@@ -1343,7 +1343,10 @@ host's *Files* or *Open as project* to work with its files.
 Install **tmux** on the server, and Kelpie runs every terminal and agent there inside it. A session
 then keeps running on the server when the connection drops, when you close Kelpie or when your
 computer sleeps or restarts; opening it again (or *Resume*) attaches to it as it was — an agent in
-the middle of a task carries on meanwhile. Without tmux, a session ends with its connection.
+the middle of a task carries on meanwhile. Without tmux, a session ends with its connection. Kelpie's
+tmux sessions take the mouse (`mouse on`, only for those sessions): the wheel scrolls back through
+what the agent printed instead of recalling earlier prompts. A drag selects in tmux; on Windows
+and Linux, Shift+drag selects in Kelpie as elsewhere.
 
 The host's check (SSH hosts page, *Check connection*, or *Add Remote Project*) shows `tmux ✓` or
 *tmux not installed*; on a known system, **Install tmux** types the command into a terminal there:
