@@ -1,9 +1,11 @@
 """Shared helpers for the WebDriver e2e scripts."""
+import http.client
 import json
 import os
 import shutil
 import subprocess
 import sys
+import urllib.error
 
 from wd import Driver
 
@@ -51,8 +53,23 @@ def default_app():
     return os.path.join(meta["target_directory"], "debug", "kelpie.exe" if os.name == "nt" else "kelpie")
 
 
+# Daemon calls that only read: asking again changes nothing.
+READS = frozenset({"session.read", "session.list", "daemon.info"})
+
+
 def daemon(d, method, params=None):
-    r = d.invoke("daemon_call", {"method": method, "params": params or {}})
+    call = lambda: d.invoke("daemon_call", {"method": method, "params": params or {}})  # noqa: E731
+    try:
+        r = call()
+    except (http.client.RemoteDisconnected, ConnectionResetError, urllib.error.URLError) as e:
+        if isinstance(e, urllib.error.URLError) and not isinstance(e.reason, ConnectionResetError):
+            raise
+        # WebKitWebDriver (2.50) now and then closes one request's connection while the app, its web process and the
+        # session all stay alive. A read is asked once more, and only while the session still answers; anything that
+        # changes something is never sent twice.
+        if method not in READS or d.js("return document.readyState") is None:
+            raise
+        r = call()
     if "err" in r:
         raise RuntimeError(r["err"])
     return r["ok"]
