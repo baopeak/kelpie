@@ -56,6 +56,7 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
     store.splitPicker(props.project.id, where);
   };
   // A maximize left over after the other panes closed means nothing for a lone pane.
+  // A maximized pane is alone on screen: like a lone pane, it wears no focus ring.
   const zoomedHere = () => multi() && store.zoomed()[props.tab.id] === props.pane.id;
   const tools = () => (
     <>
@@ -102,7 +103,7 @@ export function PaneView(props: { pane: Pane; project: Project; tab: Tab }) {
   const filePath = () => ((props.pane.kind === "file" || props.pane.kind === "diff") && props.pane.path) || undefined;
 
   return (
-    <div class={`pane${focused() && multi() ? " focused" : ""}${broadcasting() ? " broadcast" : ""}${target() ? " on-host" : ""}`} data-pane={props.pane.id} data-tab={props.tab.id} data-pane-host={target()?.dest}
+    <div class={`pane${focused() && multi() ? " focused" : ""}${zoomedHere() ? " zoomed" : ""}${broadcasting() ? " broadcast" : ""}${target() ? " on-host" : ""}`} data-pane={props.pane.id} data-tab={props.tab.id} data-pane-host={target()?.dest}
       style={{ "--host-color": hostColor(), "--pane-color": session() ? kindInfo(session()!.kind).color : undefined }} onPointerDown={focus}>
       {/* Above the pane's opaque children (::before / ::after mark broadcast and focus). */}
       <Show when={hostColor()}><div class="pane-host-stripe" /></Show>
