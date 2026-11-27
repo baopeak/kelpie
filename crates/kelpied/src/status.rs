@@ -1,4 +1,4 @@
-//! Agent/session activity state derived from hooks, bells and output activity.
+//! Agent/session activity state derived from hooks, bells, prompts on screen and output activity.
 //!
 //! Hooks are authoritative when an agent reported one recently; otherwise output activity is
 //! used, ignoring echo that directly follows user input.
@@ -14,7 +14,8 @@ pub enum Status {
     Idle,
     /// Producing output / agent turn in progress.
     Working,
-    /// Agent needs the user (permission prompt, question, bell).
+    /// Agent needs the user: a hook said so, a prompt is on screen (`choices::detect`), or it rang the bell. Without hooks, a bell
+    /// waits only when the reply above the input box asks something (`choices::reply_asks`); otherwise the turn is done.
     Waiting,
     /// Process exited (session may be restarted).
     Exited,
@@ -57,7 +58,11 @@ pub struct Activity {
     /// A report of this agent came with the session's token: reports without one are then ignored
     /// (a program in the session cannot speak for the agent once the agent has proved itself).
     pub verified_hooks: bool,
+    /// A bell that asks for the user.
     pub bell: Option<Instant>,
+    /// A bell from an agent without hooks, not read yet: it rings when a turn ends as well as when it asks (Devin's `notify`).
+    /// The session reads the reply once the screen is quiet (`Session::read_bell`), then it is a `bell` or a finished turn.
+    pub pending_bell: Option<Instant>,
     pub hook: Option<(Status, Instant)>,
     /// The last agent turn ended in an error (API failure, rate limit); cleared once it works again.
     pub failed: bool,
@@ -82,7 +87,7 @@ pub struct Activity {
 
 impl Default for Activity {
     fn default() -> Self {
-        Activity { alive: true, last_output: None, burst_start: None, last_input: None, last_typed: None, last_draft: None, last_edit: None, last_enter: None, failed_at: None, verified_hooks: false, bell: None, hook: None, failed: false, limited: false, turn_started: None, turn_seq: 0, limit_dead: false, hooks_report_start: false, screen_prompt: None }
+        Activity { alive: true, last_output: None, burst_start: None, last_input: None, last_typed: None, last_draft: None, last_edit: None, last_enter: None, failed_at: None, verified_hooks: false, bell: None, pending_bell: None, hook: None, failed: false, limited: false, turn_started: None, turn_seq: 0, limit_dead: false, hooks_report_start: false, screen_prompt: None }
     }
 }
 
@@ -97,7 +102,12 @@ impl Activity {
 
     pub fn on_bell(&mut self, now: Instant) {
         if self.last_input.is_none_or(|i| now.duration_since(i) >= BELL_REACTION_WINDOW) {
-            self.bell = Some(now);
+            // An agent with hooks says itself when a turn ends; its bell is what it always was.
+            if self.hook.is_some() {
+                self.bell = Some(now);
+            } else {
+                self.pending_bell = Some(now);
+            }
         }
     }
 
@@ -363,8 +373,18 @@ mod tests {
         // Tab with no completion over a slow link.
         a.on_bell(t0 + Duration::from_millis(400));
         assert_eq!(a.status(t0 + Duration::from_secs(5)), Status::Idle);
+        assert_eq!((a.bell, a.pending_bell), (None, None));
+        // Later, a bell of its own: without hooks it is not a wait until the reply on screen is read.
         a.on_bell(t0 + Duration::from_secs(30));
-        assert_eq!(a.status(t0 + Duration::from_secs(31)), Status::Waiting);
+        assert_eq!(a.pending_bell, Some(t0 + Duration::from_secs(30)));
+        assert_eq!(a.status(t0 + Duration::from_secs(31)), Status::Idle);
+        // An agent with hooks: its bell waits as it always did, once its hook no longer speaks for it.
+        let mut hooked = Activity { last_input: Some(t0), ..Default::default() };
+        hooked.on_hook(Status::Working, false, t0);
+        hooked.on_output(t0 + Duration::from_secs(1));
+        hooked.on_bell(t0 + Duration::from_secs(30));
+        assert_eq!((hooked.bell, hooked.pending_bell), (Some(t0 + Duration::from_secs(30)), None));
+        assert_eq!(hooked.status(t0 + Duration::from_secs(200)), Status::Waiting);
     }
 
     #[test]

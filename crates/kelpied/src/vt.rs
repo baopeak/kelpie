@@ -550,6 +550,23 @@ mod tests {
     }
 
     #[test]
+    fn a_bel_that_ends_a_title_is_not_a_bell() {
+        let bells = |chunks: &[&[u8]]| {
+            let mut vt = Vt::new(80, 24, 100);
+            chunks.iter().flat_map(|c| vt.feed(c)).filter(|e| *e == VtEvent::Bell).count()
+        };
+        let title = "\x1b]0;devin.exe: Đọc thông tin dự án\x07".as_bytes();
+        assert_eq!(bells(&[title]), 0);
+        // Split across reads anywhere, through the middle of a character too.
+        for at in 1..title.len() {
+            assert_eq!(bells(&[&title[..at], &title[at..]]), 0, "split at {at}");
+        }
+        // Notifications (OSC 9, OSC 777) end with a BEL as well.
+        assert_eq!(bells(&[b"\x1b]9;Devin is done\x07\x1b]777;notify;Devin;done\x07"]), 0);
+        assert_eq!(bells(&[title, b"text\x07"]), 1);
+    }
+
+    #[test]
     fn roundtrip_wide_chars_and_wrap() {
         assert_roundtrip("日本語テキスト🙂 abc 0123456789012345678901234567890 wrap".as_bytes(), 12, 5);
     }
