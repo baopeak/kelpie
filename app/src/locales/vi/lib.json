@@ -39,6 +39,7 @@
   "Could not resume {name}: {error}": "Không thể tiếp tục {name}: {error}",
   "{name} stopped with an error while its sub-sessions run: resuming it in {n} s": "{name} dừng vì lỗi trong khi các sub-session của nó vẫn chạy, nên Kelpie sẽ tiếp tục nó sau {n} giây",
   "{name} stopped with an error again: it is no longer resumed by itself": "{name} lại dừng vì lỗi, nên Kelpie không tự tiếp tục nó nữa",
+  "{name} stopped with an error while its sub-sessions run: resume it to read their reports": "{name} dừng vì lỗi trong khi các sub-session của nó vẫn chạy, nên bạn hãy tiếp tục nó để đọc báo cáo của chúng",
   "Resuming {n} session stopped by a restart": "Đang tiếp tục {n} phiên đã dừng do khởi động lại",
   "Resuming {n} sessions stopped by a restart": "Đang tiếp tục {n} phiên đã dừng do khởi động lại",
   "Could not start a terminal: {error}": "Không thể khởi động terminal: {error}",

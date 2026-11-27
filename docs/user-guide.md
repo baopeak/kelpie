@@ -860,6 +860,12 @@ also message a child, or a session in another project (delivered when that sessi
 into a prompt waiting on you). A message from another session is never you: it cannot approve
 anything.
 
+**A parent that crashes.** When the agent of a session that still has sub-sessions running stops with
+an error (not a stop you asked for), Kelpie resumes it in the same conversation after 5 s, then 30 s,
+then 2 min, three times at most in ten minutes, and the reports waiting for it arrive once it is idle.
+A chat resumes in the chat view. A chat whose conversation Kelpie does not know yet, a shell, and a
+crash while Kelpie's window is closed are left to you: resume it from its row or its pane.
+
 **Approvals.** By default each sub-session asks you first: a card at the bottom right names the
 asking session, the agent, folder, task and model, and says in red when the child will run without
 asking before it acts. *Allow once*, *Allow for this session* (until the session daemon restarts),

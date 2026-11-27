@@ -1,6 +1,6 @@
 // When a crashed session is resumed by itself: only a crash, only while sub-sessions it opened run, and a few times at most.
 import { describe, expect, it } from "vitest";
-import { CrashResumes, DELAYS_MS, WINDOW_MS, crashed, hasLiveChildren, resumeKey } from "./crash-resume";
+import { CrashResumes, DELAYS_MS, WINDOW_MS, crashed, hasLiveChildren, crashResumable, resumeKey } from "./crash-resume";
 import type { SessionInfo } from "./types";
 
 const s = (over: Partial<SessionInfo>): SessionInfo => ({ id: "p", alive: true, failed: false, exit_code: null, chat: false, ...over }) as SessionInfo;
@@ -15,6 +15,11 @@ describe("crashed", () => {
     expect(crashed(s({}), s({ alive: true, failed: true }))).toBe(false);
     expect(crashed(s({ alive: false, failed: true }), s({ alive: false, failed: true }))).toBe(false);
     expect(crashed(undefined, s({ alive: false, failed: true }))).toBe(false);
+  });
+
+  it("is not the end of a move to the other view, even one that ends in an error", () => {
+    expect(crashed(s({ switching: true }), s({ alive: false, failed: true, switching: true }))).toBe(false);
+    expect(crashed(s({ switching: true }), s({ alive: false, failed: true }))).toBe(false);
   });
 });
 
@@ -36,6 +41,14 @@ describe("CrashResumes", () => {
     // At 1.5 s past the window the tries at 0 and 1 s are over and the one at 2 s still counts.
     expect(r.next("conv", 1500 + WINDOW_MS)).toBe(DELAYS_MS[1]);
     expect(r.next("conv", 3 * WINDOW_MS)).toBe(DELAYS_MS[0]);
+  });
+
+  it("leaves a chat without its conversation's id to the person", () => {
+    expect(crashResumable(s({ chat: true, agent_session_id: "conv-1" }))).toBe(true);
+    expect(crashResumable(s({ chat: true, agent_session_id: "latest" }))).toBe(false);
+    expect(crashResumable(s({ chat: true }))).toBe(false);
+    // A terminal resumes in the same session, with its own id.
+    expect(crashResumable(s({ chat: false }))).toBe(true);
   });
 
   it("counts a chat resumed in a new session as the same conversation", () => {

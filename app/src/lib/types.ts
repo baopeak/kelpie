@@ -36,6 +36,8 @@ export interface SessionInfo {
   last_activity: number;
   /** Was running when the daemon stopped (reboot, update, crash); not restarted since. */
   interrupted: boolean;
+  /** The app is moving its conversation to the other view (terminal or chat): its process is about to stop on purpose. */
+  switching?: boolean;
   /** Runs on another machine over SSH. */
   remote?: { dest: string; port?: number; config?: string; tmux: boolean } | null;
   /** The session whose agent opened this one with Kelpie's sub-session tools (daemon API 30+; absent: nobody's sub-session). */

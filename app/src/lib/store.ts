@@ -27,7 +27,7 @@ import { confirmDialog } from "./confirm-dialog";
 import { createHandOver, type ShutdownAnswer } from "./hand-over";
 import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, familyRoot, folderName, sessionDepthTree, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
 import { remember } from "./prompt-history";
-import { CrashResumes, crashed, hasLiveChildren, resumeKey } from "./crash-resume";
+import { CrashResumes, crashResumable, crashed, hasLiveChildren, resumeKey } from "./crash-resume";
 import { pulseSession } from "./reveal-pulse";
 import { defaultSettings } from "./default-settings";
 import type { Flag } from "./merge-line";
@@ -556,7 +556,8 @@ function createAppStore() {
         // or switched branch, so refresh that project's subtitle.
         if (prev?.status === "working" && p.status !== "working" && p.project_id) refreshProjectInfo(p.project_id, 1000);
         if (prev?.alive && !p.alive) handOverIfIdle();
-        if (crashed(prev, p) && hasLiveChildren(p.id, sessions)) resumeAfterCrash(p);
+        // Agents only: a shell or a command that opened sub-sessions and exits with an error is not run again.
+        if (crashed(prev, p) && isAgentKind(p.kind) && hasLiveChildren(p.id, sessions)) resumeAfterCrash(p);
         break;
       }
       case "session.closed": {
@@ -1858,6 +1859,10 @@ function createAppStore() {
   /** `s` crashed while sub-sessions it opened still run: resumed after a pause, a few times at most (`crash-resume.ts`). A chat is
    *  resumed in a new chat session, which takes over its sub-sessions and the reports waiting for it. */
   function resumeAfterCrash(s: SessionInfo) {
+    if (!crashResumable(s)) {
+      notify(t("{name} stopped with an error while its sub-sessions run: resume it to read their reports", { name: sessionLabel(s) }), undefined, 10_000);
+      return;
+    }
     const delay = crashResumes.next(resumeKey(s), Date.now());
     if (delay === null) {
       notify(t("{name} stopped with an error again: it is no longer resumed by itself", { name: sessionLabel(s) }), undefined, 10_000);
@@ -1865,8 +1870,9 @@ function createAppStore() {
     }
     notify(t("{name} stopped with an error while its sub-sessions run: resuming it in {n} s", { name: sessionLabel(s), n: Math.round(delay / 1000) }), undefined, 8000);
     setTimeout(() => {
+      // Still stopped, still with work running under it, and not stopped since by a daemon restart (resumed per the setting).
       const now = sessions[s.id];
-      if (now && !now.alive) void resumeSession(s.id);
+      if (now && !now.alive && !now.interrupted && !now.switching && hasLiveChildren(s.id, sessions)) void resumeSession(s.id);
     }, delay);
   }
 
