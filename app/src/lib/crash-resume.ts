@@ -7,13 +7,19 @@ import type { SessionInfo } from "./types";
 export const DELAYS_MS = [5_000, 30_000, 120_000];
 export const WINDOW_MS = 10 * 60_000;
 
+/** What `crashed` reads of a session before an update. A copy: the store updates a session's object in place, so the object read
+ *  before the update already says what the update says. */
+export type ExitState = Pick<SessionInfo, "alive" | "switching">;
+export const exitState = (s: SessionInfo | undefined): ExitState | undefined => s && { alive: s.alive, switching: s.switching };
+
 /** `next` is `prev` after its process ended in an error: not a stop asked for, not a normal exit, not the end of a move to the other
  *  view (which may end in an error, and whose new session already resumes the conversation). */
-export const crashed = (prev: SessionInfo | undefined, next: SessionInfo) => !!prev?.alive && !next.alive && !!next.failed && !next.switching && !prev.switching;
+export const crashed = (prev: ExitState | undefined, next: SessionInfo) => !!prev?.alive && !next.alive && !!next.failed && !next.switching && !prev.switching;
 
 /** A chat resumes in a new session: without its conversation's id it would start another conversation, or take the folder's latest,
- *  which may be a sub-session's, and every new session would count its tries afresh. Such a chat is left to the person. */
-export const crashResumable = (s: SessionInfo) => !s.chat || resumeKey(s) !== s.id;
+ *  which may be a sub-session's, and every new session would count its tries afresh. Such a chat is left to the person. (A terminal
+ *  goes by the store's `resumable`.) */
+export const chatResumable = (s: SessionInfo) => resumeKey(s) !== s.id;
 
 /** A sub-session `id` opened is still running. */
 export const hasLiveChildren = (id: string, sessions: Record<string, SessionInfo>) => Object.values(sessions).some((s) => s.parent === id && s.alive);

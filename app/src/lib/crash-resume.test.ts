@@ -1,6 +1,7 @@
 // When a crashed session is resumed by itself: only a crash, only while sub-sessions it opened run, and a few times at most.
 import { describe, expect, it } from "vitest";
-import { CrashResumes, DELAYS_MS, WINDOW_MS, crashed, hasLiveChildren, crashResumable, resumeKey } from "./crash-resume";
+import { createStore, reconcile } from "solid-js/store";
+import { CrashResumes, DELAYS_MS, WINDOW_MS, chatResumable, crashed, exitState, hasLiveChildren, resumeKey } from "./crash-resume";
 import type { SessionInfo } from "./types";
 
 const s = (over: Partial<SessionInfo>): SessionInfo => ({ id: "p", alive: true, failed: false, exit_code: null, chat: false, ...over }) as SessionInfo;
@@ -15,6 +16,16 @@ describe("crashed", () => {
     expect(crashed(s({}), s({ alive: true, failed: true }))).toBe(false);
     expect(crashed(s({ alive: false, failed: true }), s({ alive: false, failed: true }))).toBe(false);
     expect(crashed(undefined, s({ alive: false, failed: true }))).toBe(false);
+  });
+
+  it("is told from a copy taken before the store's update, which changes the session's object in place", () => {
+    const [sessions, setSessions] = createStore<Record<string, SessionInfo>>({ p: s({}) });
+    const prev = sessions.p;
+    const before = exitState(prev);
+    setSessions("p", reconcile(s({ alive: false, failed: true })));
+    expect(crashed(before, sessions.p)).toBe(true);
+    // The object itself already says it stopped.
+    expect(crashed(prev, sessions.p)).toBe(false);
   });
 
   it("is not the end of a move to the other view, even one that ends in an error", () => {
@@ -44,11 +55,9 @@ describe("CrashResumes", () => {
   });
 
   it("leaves a chat without its conversation's id to the person", () => {
-    expect(crashResumable(s({ chat: true, agent_session_id: "conv-1" }))).toBe(true);
-    expect(crashResumable(s({ chat: true, agent_session_id: "latest" }))).toBe(false);
-    expect(crashResumable(s({ chat: true }))).toBe(false);
-    // A terminal resumes in the same session, with its own id.
-    expect(crashResumable(s({ chat: false }))).toBe(true);
+    expect(chatResumable(s({ chat: true, agent_session_id: "conv-1" }))).toBe(true);
+    expect(chatResumable(s({ chat: true, agent_session_id: "latest" }))).toBe(false);
+    expect(chatResumable(s({ chat: true }))).toBe(false);
   });
 
   it("counts a chat resumed in a new session as the same conversation", () => {
