@@ -1480,7 +1480,10 @@ Claude Code a run's status comes from its `task_*` events and never from its too
 Agent tool returns `async_launched` as soon as the agent is launched. Links in a reply carry their
 target in `data-href`, read on click by `parseChatLink` alone (`chat/chat-links.ts`): DOMPurify
 empties `file:` and `a.ts:42` hrefs, and `CHAT_SANITIZE` also drops what could navigate the window or
-cover its buttons (`form`, `area`, `style`, `class`). Nothing an agent names is ever launched.
+cover its buttons (`form`, `area`, `style`, `class`). Nothing an agent names is ever launched. A
+local file outside the project opens in a read-only file pane that holds its absolute path; the
+viewer reads it as its name in its own folder (`lib/outside-file.ts`), so `fs_read_file`'s guard is
+unchanged. Network shares, drive-relative paths and files outside a remote project are refused.
 
 | Agent | Process | Protocol |
 |---|---|---|

@@ -179,6 +179,7 @@
   "Binary file ({size} KB) — not shown.": "Tệp nhị phân ({size} KB) — không hiển thị.",
   "Unsaved — {key}+S to save": "Chưa lưu — {key}+S để lưu",
   "Read-only: showing the first 5 MiB of {size} MiB": "Chỉ đọc: hiện 5 MiB đầu của {size} MiB",
+  "Read-only: this file is outside the project": "Chỉ đọc: tệp này nằm ngoài dự án",
   "Changed on disk.": "Đã thay đổi trên đĩa.",
   "Today": "Hôm nay",
   "Yesterday": "Hôm qua",

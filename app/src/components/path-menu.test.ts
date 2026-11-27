@@ -62,6 +62,16 @@ describe("pathMenuItems", () => {
     expect(writeText.mock.calls.map((c: any[]) => c[0]).sort()).toEqual(["D:\\proj\\src\\a.ts", "a.ts", "src/a.ts"]);
   });
 
+  it("copies a file outside the project by its full path, and reveals it in its own folder", async () => {
+    const items = pathMenuItems(local, "C:/Users/u/notes.md");
+    run(items, "Copy Relative Path");
+    run(items, "Copy Path");
+    run(items, REVEAL);
+    await settled();
+    expect(writeText.mock.calls.map((c: any[]) => c[0])).toEqual(["C:\\Users\\u\\notes.md", "C:\\Users\\u\\notes.md"]);
+    expect(revealEntry).toHaveBeenCalledWith("C:/Users/u", "notes.md");
+  });
+
   it("offers no reveal for a remote project: its files are not in this computer's file manager", () => {
     expect(labels(pathMenuItems(remote, "a.ts"))).toEqual(["Copy Relative Path", "Copy Path", "Copy Name"]);
   });
@@ -89,6 +99,13 @@ describe("fileRefMenuItems", () => {
     await settled();
     expect(notify).toHaveBeenCalledWith("File not found: gone.py");
     expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("finds a file named outside the project in its own folder", async () => {
+    run(fileRefMenuItems(local, { path: "D:\\other\\x.py" }), REVEAL);
+    await settled();
+    expect(readFile).toHaveBeenCalledWith("D:/other", "x.py", 1);
+    expect(revealEntry).toHaveBeenCalledWith("D:/other", "x.py");
   });
 
   it("opens at the line, from the folder the text was written in", async () => {

@@ -167,8 +167,9 @@ their name and shortcut when you hover them.
    - The bar over the transcript names the prompt of the turn you are reading; click it to go back to
      that prompt, also from far up a long conversation. It leaves the caret in the message field.
    - Click a file in a reply to open it: a link, a path in inline code or in the text (`src/a.ts:42` opens at that
-     line; a bare `name.py` is found by its name), a tool's target (an edit's opens its changes) or the file on an approval card. Something
-     outside the project only shows a message: nothing an agent names is ever launched. Addresses in
+     line; a bare `name.py` is found by its name), a tool's target (an edit's opens its changes) or the file on an approval card. A file
+     on this computer outside the project opens read-only (on Windows a Git Bash path such as `/d/work/a.ts` names drive D); a network
+     share, or anything outside a project on a host, only shows a message. Nothing an agent names is ever launched. Addresses in
      your own messages open in the browser. Right-click a named file to copy its relative or full path or its name,
      or a link to copy its address. The same copy items are in the file tree and in a file pane's header.
    - Paste (`Ctrl+V`) or drop pictures into the message field, up to 8 and 5 MB each, also on their
