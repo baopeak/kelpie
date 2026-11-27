@@ -414,8 +414,11 @@ pub fn build_remote_launch(kind: &str, user_args: &[String], resume: Resume, pro
         // Sessions started before the rename to Kelpie run in `erka-<id>`: re-attach to that one
         // when it is still there instead of starting the agent a second time.
         let (name, legacy) = (format!("kelpie-{id}"), format!("erka-{id}"));
+        // The session takes the mouse (`mouse on`, this session only): tmux keeps the window's terminal on its alternate screen,
+        // where a wheel turn with the mouse off becomes ↑/↓ for the agent's input history. With it on, the wheel scrolls
+        // tmux's history (copy mode) and a program that asks for the mouse still gets it.
         format!(
-            "if command -v tmux >/dev/null 2>&1; then n={}; tmux has-session -t {} 2>/dev/null && n={}; exec tmux new-session -A -s \"$n\" -c {dir} {}; else {direct}; fi",
+            "if command -v tmux >/dev/null 2>&1; then n={}; tmux has-session -t {} 2>/dev/null && n={}; exec tmux new-session -A -s \"$n\" -c {dir} {} \\; set-option mouse on; else {direct}; fi",
             sh_quote(&name),
             sh_quote(&format!("={legacy}")),
             sh_quote(&legacy),
@@ -1054,6 +1057,7 @@ mod remote_tests {
         let l = build_remote_launch("claude", &[], Resume::None, Some("fix it"), &remote(true), "/srv/x", "1234-5678-abcd").unwrap();
         let j = command_line(&l.argv);
         assert!(j.contains("tmux new-session -A -s \"$n\""), "{j}");
+        assert!(j.contains(r"\; set-option mouse on; else"), "the wheel scrolls tmux's history, not the agent's input: {j}");
         // Quoted once more inside the remote shell's -c argument.
         assert!(j.contains(r"n='\''kelpie-12345678abcd'\''"), "{j}");
         assert!(j.contains(r"tmux has-session -t '\''=erka-12345678abcd'\'' 2>/dev/null && n='\''erka-12345678abcd'\''"), "re-attaches a pre-rename session: {j}");
