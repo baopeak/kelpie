@@ -10,7 +10,7 @@ import { ANSWER_API, NEW_SESSION_API, nextWaiting, setAnswering } from "./attent
 import { loadMissedPhoneStarts, PHONE_STARTS_READ, type AuditRead } from "./phone-starts";
 import { NOTIFY_API, createRepeatGuard, describeNotify, worthPopup, type NotifyEvent } from "./notify-events";
 import { t } from "./i18n";
-import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTemplate, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
+import { allPanes, autoGrid, buildGrid, cellCount, equalize, findPane, fromTemplate, gridCellNames, insertBeside, leaf, migrateLayout, moveGutter, movePane, removePane, replacePane, splitPane, swapPanes, templateLeaves, toTemplate, type GridSpec, type Side } from "./layout";
 import { basename, isMac, normPath, uid } from "./platform";
 import { projectColors } from "./theme";
 import { disposeView, peekView, resetStreams, setInputFanout } from "./terminal-host";
@@ -1235,11 +1235,13 @@ function createAppStore() {
   }
 
   /** Opens a new tab with a grid; cell i runs `kinds[i]` (null = an empty pane with a
-   *  launcher). `prompt` goes to every agent started. */
-  async function launchGrid(projectId: string, spec: GridSpec, kinds: (SessionKind | null)[], opts: { prompt?: string; args?: string[]; account?: string; target?: SessionTarget } = {}) {
+   *  launcher). `prompt` goes to every agent started. A `name` is numbered by cell, in the
+   *  order the cells sit on screen ("api 1", "api 2", …); a single cell takes it as given. */
+  async function launchGrid(projectId: string, spec: GridSpec, kinds: (SessionKind | null)[], opts: { prompt?: string; args?: string[]; account?: string; target?: SessionTarget; name?: string } = {}) {
     const n = cellCount(spec);
     const wanted = Array.from({ length: n }, (_, i) => kinds[i] ?? null);
-    const started = await Promise.all(wanted.map((k) => (k ? startSession(projectId, k, { args: opts.args, account: opts.account, target: opts.target, prompt: isAgentKind(k) || k === "shell" ? opts.prompt : undefined }) : Promise.resolve(undefined))));
+    const names = gridCellNames(spec, opts.name);
+    const started = await Promise.all(wanted.map((k, i) => (k ? startSession(projectId, k, { args: opts.args, account: opts.account, target: opts.target, name: names[i], prompt: isAgentKind(k) || k === "shell" ? opts.prompt : undefined }) : Promise.resolve(undefined))));
     const panes = started.map((info): Pane => (info ? { id: uid(), kind: "terminal", sessionId: info.id } : { ...emptyPane(), ...(opts.target ? { target: opts.target } : {}) }));
     const tab = addTab(projectId, panes[0]);
     setTabRoot(projectId, tab.id, buildGrid(spec, panes, emptyPane), panes[0].id);

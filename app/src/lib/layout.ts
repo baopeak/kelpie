@@ -223,6 +223,18 @@ export const MAX_GRID = 6;
 
 export const cellCount = (spec: GridSpec) => spec.counts.reduce((a, b) => a + b, 0);
 
+/** The names of a grid's cells, in cell order (the order buildGrid fills them), for a launch named `name`: numbered from 1 in
+ *  the order the cells sit on screen (top to bottom, then left to right), which differs from cell order in a column grid;
+ *  a single cell takes the name as given; no name leaves every session its default. */
+export function gridCellNames(spec: GridSpec, name: string | undefined): (string | undefined)[] {
+  const n = cellCount(spec);
+  if (!name) return Array(n).fill(undefined);
+  if (n === 1) return [name];
+  const cells = Array.from({ length: n }, (_, i) => ({ id: String(i), kind: "terminal" }) as Pane);
+  const rank = new Map(readingOrder(buildGrid(spec, cells, () => cells[0])).map((p, r) => [p.id, r]));
+  return cells.map((c) => `${name} ${rank.get(c.id)! + 1}`);
+}
+
 export function gridLabel(spec: GridSpec): string {
   const c = spec.counts;
   if (c.every((n) => n === c[0])) return spec.mode === "rows" ? `${c.length} × ${c[0]}` : `${c[0]} × ${c.length}`;

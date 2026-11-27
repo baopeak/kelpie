@@ -781,7 +781,8 @@ Sessions keep running through both.
 The grid button in the tab bar (or `Ctrl+Shift+L` / `⌘⇧L`) arranges the tab: presets from
 2 columns to 3×3, any number of rows or columns, or per-row counts such as `3,2` (three panes
 on top, two below). Existing panes keep their place; new cells are empty panes with a launcher.
-The new-session dialog's *Grid…* placement starts one agent per cell of a new grid tab. Drag a pane by its header onto another pane to
+The new-session dialog's *Grid…* placement starts one agent per cell of a new grid tab; a name
+typed there is numbered by cell, left to right and top to bottom (`api` gives `api 1`, `api 2`, …). Drag a pane by its header onto another pane to
 swap them or onto its edge to move it there, onto another tab to move it into that tab, or onto
 empty tab-bar space to give it its own tab. Drag a tab along the tab bar to reorder it, or onto
 an edge of a pane of the open tab to merge its panes in there (palette: *Move Tab Left / Right*,
