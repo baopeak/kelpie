@@ -27,6 +27,7 @@ import { confirmDialog } from "./confirm-dialog";
 import { createHandOver, type ShutdownAnswer } from "./hand-over";
 import { SUB_SESSIONS_API, buildSessionTree, dispatchRequest, familyRoot, folderName, sessionDepthTree, setSubPolicy, subRequests, toSubPolicy, toSubRequest, type SubRequest } from "./sub-sessions";
 import { remember } from "./prompt-history";
+import { CrashResumes, chatResumable, crashed, exitState, hasLiveChildren, resumeKey } from "./crash-resume";
 import { pulseSession } from "./reveal-pulse";
 import { defaultSettings } from "./default-settings";
 import type { Flag } from "./merge-line";
@@ -549,12 +550,16 @@ function createAppStore() {
         break;
       case "session.updated": {
         const prev = sessions[p.id];
+        // Read before the update below, which changes `prev` in place.
+        const before = exitState(prev);
         setSessions(p.id, reconcile(p as SessionInfo));
         if (legacyNotify()) void maybeNotify(prev, p);
         // Background projects are not watched: an agent finishing a turn may have committed
         // or switched branch, so refresh that project's subtitle.
         if (prev?.status === "working" && p.status !== "working" && p.project_id) refreshProjectInfo(p.project_id, 1000);
         if (prev?.alive && !p.alive) handOverIfIdle();
+        // Agents only: a shell or a command that opened sub-sessions and exits with an error is not run again.
+        if (crashed(before, p) && isAgentKind(p.kind) && hasLiveChildren(p.id, sessions)) resumeAfterCrash(p);
         break;
       }
       case "session.closed": {
@@ -1849,6 +1854,35 @@ function createAppStore() {
     } finally {
       resuming.delete(id);
     }
+  }
+
+  const crashResumes = new CrashResumes();
+  /** The pending resume of each conversation: a new crash (after a resume by hand) replaces it. */
+  const crashTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** `s` crashed while sub-sessions it opened still run: resumed after a pause, a few times at most (`crash-resume.ts`). A chat is
+   *  resumed in a new chat session, which takes over its sub-sessions and the reports waiting for it. */
+  function resumeAfterCrash(s: SessionInfo) {
+    // A terminal agent needs its conversation's id too (or an agent that resumes the folder's latest): else it would be guessed.
+    if (s.chat ? !chatResumable(s) : !resumable(s)) {
+      notify(t("{name} stopped with an error while its sub-sessions run: resume it to read their reports", { name: sessionLabel(s) }), undefined, 10_000);
+      return;
+    }
+    const key = resumeKey(s);
+    clearTimeout(crashTimers.get(key));
+    crashTimers.delete(key);
+    const delay = crashResumes.next(key, Date.now());
+    if (delay === null) {
+      notify(t("{name} stopped with an error again: it is no longer resumed by itself", { name: sessionLabel(s) }), undefined, 10_000);
+      return;
+    }
+    notify(t("{name} stopped with an error while its sub-sessions run: resuming it in {n} s", { name: sessionLabel(s), n: Math.round(delay / 1000) }), undefined, 8000);
+    crashTimers.set(key, setTimeout(() => {
+      crashTimers.delete(key);
+      // Still stopped, still with work running under it, and not stopped since by a daemon restart (resumed per the setting).
+      const now = sessions[s.id];
+      if (now && !now.alive && !now.interrupted && !now.switching && hasLiveChildren(s.id, sessions)) void resumeSession(s.id);
+    }, delay));
   }
 
   /** Sessions the daemon restored after it stopped while they ran (reboot, update, crash):
