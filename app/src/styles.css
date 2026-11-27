@@ -290,16 +290,17 @@ input, textarea, select { font: inherit; color: var(--text); }
 .session-row.selected:hover { background: color-mix(in srgb, var(--accent) 20%, var(--bg-active)); }
 .session-row.selected .name { font-weight: 600; }
 .session-row.holds-selected { color: var(--text); box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
-/* Reveal pulse (reveal-pulse.ts): a short glow on the row and the pane a click landed on. It fades once, opacity only (no layout,
+/* Reveal pulse (reveal-pulse.ts): a short ring on the row and the pane a click landed on, no tint:
+   the focus frame already marks the pane, so the background never flashes. It fades once, opacity only (no layout,
    no repaint per frame); the a/b names alternate so a second reveal restarts it. Reduced motion: a steady mark for the moment. */
 .session-row:is(.reveal-pulse-a, .reveal-pulse-b)::after {
   content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none; opacity: 0;
-  background: color-mix(in srgb, var(--accent) 22%, transparent); box-shadow: inset 0 0 0 1.5px var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 .session-row.reveal-pulse-a::after { animation: reveal-pulse-a .9s ease-out; }
 .session-row.reveal-pulse-b::after { animation: reveal-pulse-b .9s ease-out; }
 /* The pane's pulse is wider than the 2px focus ring, so it still shows on the focused pane and never reads as focus elsewhere. */
-.pane-pulse { position: absolute; inset: 0; z-index: 6; border-radius: inherit; pointer-events: none; opacity: 0; box-shadow: inset 0 0 0 4px var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.pane-pulse { position: absolute; inset: 0; z-index: 6; border-radius: inherit; pointer-events: none; opacity: 0; box-shadow: inset 0 0 0 4px var(--accent); }
 .pane-pulse.reveal-pulse-a { animation: reveal-pulse-a .9s ease-out; }
 .pane-pulse.reveal-pulse-b { animation: reveal-pulse-b .9s ease-out; }
 @keyframes reveal-pulse-a { 0% { opacity: 0; } 18% { opacity: 1; } 100% { opacity: 0; } }
