@@ -154,8 +154,14 @@ impl Daemon {
                     self.resources.command_started(session_id, call, command, project, now);
                 }
             }
-            "PostToolUse" | "PostToolUseFailure" if !call.is_empty() => self.resources.command_ended(session_id, call, event == "PostToolUseFailure", now),
-            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" => self.resources.turn_boundary(session_id),
+            "PostToolUse" | "PostToolUseFailure" if !call.is_empty() => {
+                self.resources.command_ended(session_id, call, event == "PostToolUseFailure", now);
+                self.gate_release(session_id, Some(call));
+            }
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" => {
+                self.resources.turn_boundary(session_id);
+                self.gate_release(session_id, None);
+            }
             _ => {}
         }
     }

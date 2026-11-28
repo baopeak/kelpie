@@ -127,6 +127,8 @@ impl Daemon {
             }
             exists.insert(id);
         }
+        // A command the gate let through in a session that ended is not running any more.
+        self.gate.lock().retain(|k, _| k.split('/').next().is_some_and(|s| alive.contains(s)));
         let (changed, joined) = {
             let mut policy = self.priorities.lock();
             let changed = policy.sweep(&|id: &str| exists.contains(id), &|id: &str| alive.contains(id), now_millis());

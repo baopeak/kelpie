@@ -384,7 +384,6 @@ impl Ledger {
         Ledger { path, entries, dirty: false, unreadable }
     }
 
-    #[cfg(test)]
     pub fn get(&self, project: &str, f: &Fingerprint) -> Option<&Entry> {
         self.entries.get(&entry_key(project, f))
     }

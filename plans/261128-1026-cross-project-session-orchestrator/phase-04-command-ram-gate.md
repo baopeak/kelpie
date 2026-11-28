@@ -1,5 +1,20 @@
 # Phase 4: Command gate and parallelism optimizer
 
+Status: **4a implemented** on branch `feat/command-gate`: the gate (`gate.rs`, `daemon/gate_rpc.rs`) and Claude's blocking hook,
+proven by `scripts/e2e/command_gate.py` (8/8). On this 8 GB machine a background build was held 30 s for memory, then given one
+job while a critical build ran.
+
+As built, differing from below:
+- **No permission decision:** the hook never sends one. It changes the command (`updatedInput`) or adds a note
+  (`additionalContext`), so the person's permission flow is untouched. Claude's auto mode gets no rewrites, because it refuses
+  changed calls.
+- **Shares:** they use the effective weight without the rank factor of waiting commands; the gate does not queue holds by priority
+  among themselves (each re-checks every second).
+- **Next (4b):**
+  - Codex (its own hook config), and Gemini and Devin through user-level hook entries inert outside Kelpie;
+  - chat (ACP) permission steps;
+  - OOM signatures bumping the ledger.
+
 ## Context
 
 Spikes come from commands *inside* sessions: cargo, pnpm/next build, tests, Playwright/Chrome, docker, PDF, raster and ML jobs, and ffmpeg. One of these is the sign/PDF job that was killed for low memory.
