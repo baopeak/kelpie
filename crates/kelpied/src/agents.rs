@@ -568,6 +568,9 @@ fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path, allow_kelpie_too
     let exe = hook_exe.to_string_lossy().replace('\\', "/");
     let command = format!("\"{exe}\" hook claude");
     let entry = serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }]);
+    // The command gate: a shell command waits here while the computer has no room for it (see `gate.rs`). Its own entry,
+    // as it may take far longer than a status report; past its timeout the command runs as written.
+    let gate = serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": format!("\"{exe}\" hook claude-gate"), "timeout": 120 }] });
     let mut hooks = serde_json::Map::new();
     for event in [
         "SessionStart",
@@ -583,6 +586,9 @@ fn write_claude_hook_settings(hook_exe: &Path, data_dir: &Path, allow_kelpie_too
         "PostCompact",
     ] {
         hooks.insert(event.into(), entry.clone());
+    }
+    if let Some(pre) = hooks.get_mut("PreToolUse").and_then(|v| v.as_array_mut()) {
+        pre.push(gate);
     }
     let mut settings = serde_json::json!({ "hooks": hooks });
     let name = if allow_kelpie_tools {
@@ -855,6 +861,12 @@ mod tests {
         for event in ["PermissionRequest", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop"] {
             assert!(settings["hooks"].get(event).is_some(), "{event}");
         }
+        // The command gate has an entry of its own on Bash, with room to hold a command.
+        let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(pre[1]["matcher"], "Bash");
+        assert_eq!(pre[1]["hooks"][0]["timeout"], 120);
+        assert!(pre[1]["hooks"][0]["command"].as_str().unwrap().ends_with("hook claude-gate"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

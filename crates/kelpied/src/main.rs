@@ -33,6 +33,7 @@ mod client;
 mod daemon;
 mod echo_bench;
 mod files;
+mod gate;
 mod limit_reset;
 mod load;
 mod mcp;
@@ -336,9 +337,60 @@ pub(crate) fn log_filter(mut filter: tracing_subscriber::EnvFilter) -> tracing_s
 
 /// Called by agents' hook machinery. Must be fast, print nothing to stdout (Claude feeds
 /// SessionStart stdout into the model context) and never fail the agent.
+/// Claude Code's pre-tool hook for `Bash` (`kelpied hook claude-gate`): asks the command gate whether the command runs now
+/// (`gate.acquire`), waiting while it is held, and tells Claude through its hook output. Nothing printed means "as it is":
+/// never an approval, so the person's permission rules and prompts apply as always. A changed command (`updatedInput`)
+/// keeps every other field the agent sent. Any failure here prints nothing, and the command runs as written.
+fn gate_hook(session_id: &str) {
+    use std::io::Read;
+    let mut buf = String::new();
+    let _ = std::io::stdin().take(1 << 20).read_to_string(&mut buf);
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&buf) else { return };
+    let (Some(command), Some(call)) = (payload.pointer("/tool_input/command").and_then(|v| v.as_str()), payload.get("tool_use_id").and_then(|v| v.as_str())) else { return };
+    if payload.get("tool_name").and_then(|v| v.as_str()) != Some("Bash") || payload.pointer("/tool_input/run_in_background").and_then(|v| v.as_bool()) == Some(true) {
+        return;
+    }
+    let params = serde_json::json!({
+        "session_id": session_id, "call": call, "command": command,
+        "permission_mode": payload.get("permission_mode"), "timeout_ms": payload.pointer("/tool_input/timeout"),
+    });
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+    let answer = rt.block_on(async {
+        let ask = async {
+            let mut c = client::Client::connect().await?;
+            c.call("gate.acquire", params).await
+        };
+        // Under the hook's own timeout (120 s), so an answer always comes before Claude gives up on the hook.
+        tokio::time::timeout(std::time::Duration::from_secs(110), ask).await.ok().and_then(Result::ok)
+    });
+    if let Some(out) = answer.and_then(|a| gate_hook_output(&payload, &a)) {
+        println!("{out}");
+    }
+}
+
+/// What Claude is told for the gate's answer `a` to the tool call `payload` (none: nothing to say).
+fn gate_hook_output(payload: &serde_json::Value, a: &serde_json::Value) -> Option<serde_json::Value> {
+    let note = a.get("note").and_then(|n| n.as_str());
+    let mut out = serde_json::json!({"hookEventName": "PreToolUse"});
+    if a.get("decision").and_then(|d| d.as_str()) == Some("rewrite") {
+        let mut input = payload.get("tool_input").cloned().unwrap_or_default();
+        input["command"] = a.get("command")?.clone();
+        out["updatedInput"] = input;
+    } else if note.is_none() {
+        return None;
+    }
+    if let Some(note) = note {
+        out["additionalContext"] = serde_json::json!(note);
+    }
+    Some(serde_json::json!({"hookSpecificOutput": out}))
+}
+
 fn hook(args: &[String]) {
     let agent = args.first().cloned().unwrap_or_default();
     let Ok(session_id) = std::env::var("KELPIE_SESSION_ID") else { return };
+    if agent == "claude-gate" {
+        return gate_hook(&session_id);
+    }
     // Codex passes the JSON as the last argv; Claude writes it to stdin.
     let mut payload: serde_json::Value = match args.get(1) {
         Some(arg) => serde_json::from_str(arg).unwrap_or(serde_json::Value::Null),
@@ -372,6 +424,20 @@ fn hook(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
+    /// The gate never approves a command: what Claude is told changes the command, or adds a note, and nothing else.
+    #[test]
+    fn the_gate_hook_says_only_what_changed() {
+        let payload = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "cargo build", "description": "Build", "timeout": 600000}});
+        assert_eq!(super::gate_hook_output(&payload, &serde_json::json!({"decision": "run"})), None, "as it is: nothing printed");
+        let rewrite = super::gate_hook_output(&payload, &serde_json::json!({"decision": "rewrite", "command": "CARGO_BUILD_JOBS=2 cargo build", "note": "two jobs"})).unwrap();
+        let out = &rewrite["hookSpecificOutput"];
+        assert_eq!(out["updatedInput"], serde_json::json!({"command": "CARGO_BUILD_JOBS=2 cargo build", "description": "Build", "timeout": 600000}), "every other field kept");
+        assert_eq!(out["additionalContext"], "two jobs");
+        assert!(out.get("permissionDecision").is_none(), "the person's permission flow applies as always");
+        let waited = super::gate_hook_output(&payload, &serde_json::json!({"decision": "run", "note": "held 12 s"})).unwrap();
+        assert_eq!(waited["hookSpecificOutput"], serde_json::json!({"hookEventName": "PreToolUse", "additionalContext": "held 12 s"}));
+    }
+
     use super::{inherits_editor_host, wait_for_exit};
 
     #[test]

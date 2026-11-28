@@ -487,6 +487,11 @@ impl Resources {
         self.inner.lock().samples
     }
 
+    /// What the ledger learned of command `f` in `project`.
+    pub fn learned(&self, project: &str, f: &Fingerprint) -> Option<ledger::Entry> {
+        self.ledger.lock().get(project, f).cloned()
+    }
+
     /// Writes the ledger when it learned something.
     pub fn save(&self) {
         self.ledger.lock().save();

@@ -31,6 +31,7 @@ use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, tu
 
 mod admission_gate;
 mod automation;
+mod gate_rpc;
 mod browser_rpc;
 mod owed_rpc;
 mod pr_rpc;
@@ -249,6 +250,8 @@ pub struct Daemon {
     pub resources: Arc<crate::resources::Resources>,
     /// The person's ranking of projects and sessions, boosts and reservations (`policy.resources.*`, `resource-policy.json`).
     priorities: Mutex<crate::resource_policy::Policy>,
+    /// Heavy commands the command gate let through and that have not ended, by `session/call` (`gate.acquire`).
+    gate: Mutex<HashMap<String, gate_rpc::Granted>>,
     /// Browsing hosts and this computer, and the transfer queue (`sftp.*`, `local.*`, `xfer.*`).
     pub files: Arc<crate::files::service::Files>,
     /// The app's connection, asked for what only the window can do (`provider`).
@@ -414,6 +417,7 @@ impl Daemon {
                 procs: crate::procs::Procs::default(),
                 resources: Arc::new(crate::resources::Resources::new(Some(data_dir.join("command-ledger.json")))),
                 priorities: Mutex::new(crate::resource_policy::Policy::open(Some(data_dir.join("resource-policy.json")))),
+                gate: Mutex::new(HashMap::new()),
                 files,
                 providers: crate::provider::Providers::default(),
                 browser: crate::browser_agent::State::new(policy.browser, &data_dir),
@@ -2557,6 +2561,18 @@ impl Daemon {
                 return Ok(None);
             }
             m if m.starts_with("checkpoint.") => self.checkpoint_rpc(m, &params)?,
+            // A held command waits here for room (up to 90 s): answered from a thread of its own.
+            "gate.acquire" => {
+                let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
+                std::thread::Builder::new().name("kelpie-gate".into()).spawn(move || {
+                    let reply = match me.gate_acquire(&params) {
+                        Ok(v) => json!({"id": id, "result": v}),
+                        Err(e) => json!({"id": id, "error": {"message": format!("{e:#}")}}),
+                    };
+                    let _ = tx.send(json_out(&reply));
+                })?;
+                return Ok(None);
+            }
             // Files answer when ssh and the host do: from their own task, so this client's other requests go on.
             m if m.starts_with("sftp.") || m.starts_with("local.") || m.starts_with("xfer.") => {
                 let (files, tx, id, method) = (self.files.clone(), tx.clone(), id.clone(), m.to_string());

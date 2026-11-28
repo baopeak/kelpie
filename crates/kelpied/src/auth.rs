@@ -131,13 +131,13 @@ pub fn authenticate(d: &Daemon, params: &Value) -> Result<Role> {
 const SCRIPTING: &[&str] = &[
     "daemon.info", "agent.presets", "session.list", "session.read", "session.input", "session.create",
     "meta.list", "meta.get", "meta.set", "run.list", "run.get", "run.create", "run.retry",
-    "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "note.add", "note.list", "owed.open", "owed.list",
+    "run.task_done", "run.task_skip", "run.cancel", "run.report", "hook.report", "gate.acquire", "note.add", "note.list", "owed.open", "owed.list",
     "sub.spawn", "sub.message", "sub.report", "sub.inbox", "sub.close", "page.open", "browser.call", "browser.policy", "window.call", "window.policy",
 ];
 /// Methods a restricted session's programs may call, on their own session only. `page.open` shows a page in the session's own project;
 /// `browser.call` uses the panes the window lets this session use, under the same policy as any other session.
 /// `window.call` and `window.policy` are left out on purpose: the window tools add power to a limited session, so it does not get them.
-const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "note.add", "note.list", "owed.open", "owed.list", "sub.report", "sub.inbox", "page.open", "browser.call", "browser.policy"];
+const OWN: &[&str] = &["daemon.info", "agent.presets", "session.list", "session.read", "session.input", "meta.get", "meta.set", "run.report", "hook.report", "gate.acquire", "note.add", "note.list", "owed.open", "owed.list", "sub.report", "sub.inbox", "page.open", "browser.call", "browser.policy"];
 /// Methods of a session whose token went missing.
 const CLAIMED: &[&str] = &["daemon.info", "hook.report"];
 

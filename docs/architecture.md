@@ -2456,6 +2456,32 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
     - It looks a minute at a time, on one waiting thread per automation; a firing during the wait is folded into it.
     - It does not run if it was turned off meanwhile, and is recorded as skipped after 30 minutes.
     - Automations of other tiers start as before.
+- **Command gate** (`gate.rs`, `daemon/gate_rpc.rs`, `kelpied hook claude-gate`): a heavy shell command waits, or runs with fewer
+  jobs, when the computer has no room for it as written.
+  - **Hook:** Claude's settings carry a second `PreToolUse` entry (matcher `Bash`, timeout 120 s) that pipes the tool call to
+    `kelpied hook claude-gate`.
+    - The hook asks `gate.acquire {session_id, call, command, permission_mode, timeout_ms}`. A session may ask for itself only.
+    - It prints nothing (the command runs as written), or `hookSpecificOutput` with `updatedInput` (the changed command, every
+      other field kept) and/or `additionalContext` (a note for the model).
+    - It never prints a `permissionDecision`: the person's permission rules and prompts apply as always.
+    - Any failure prints nothing.
+  - **Heavy commands:** a profile per tool (cargo, make/ninja, go, package installs and builds, next/vite/webpack/turbo, tsc,
+    playwright, vitest/jest, pytest, gradle/mvn/dotnet/xcodebuild, docker, ffmpeg, image tools). Each has a base and a per-job memory
+    figure and its parallelism knob. The ledger's measured plan replaces the profile once the command ran in the project.
+  - **Decision:**
+    - Cores and memory are shared by effective-priority weight with the heavy commands the gate let through and that have not ended.
+    - Memory is what is available, minus 12 % for the system, others' live reservations, and the estimates of commands started in
+      the last 30 s. Critical work keeps only half the system's share and ignores others' reservations.
+    - A command runs as written when its share holds it. Otherwise it runs with the most jobs that fit, set by `CARGO_BUILD_JOBS=N`,
+      `-jN`, `-p N`, `--workers=N` or `--maxWorkers=N`. This needs the tier's `rewrite` switch, and is never in Claude's auto mode,
+      which refuses changed calls.
+    - Otherwise it waits.
+    - Two disk writers on a busy disk, or two GPU jobs, take turns. A command alone always runs.
+  - **Waiting:** a held command is looked at every second for at most 90 s (and half the tool's timeout), then runs with one job.
+    The note says how long it waited and why.
+  - **Release:** a command is released at its `PostToolUse`, at a turn boundary, or when its session goes.
+  - **Off switch:** `KELPIE_COMMAND_GATE=0` turns the gate off.
+  - **Scope:** Codex, Gemini, Devin and chat sessions are not gated yet.
 - **Automations** (`automations.rs`, `automation.*`, `automations.json`): hourly / daily /
   weekdays / weekly in local time (chrono). The ticker checks every 10 s and starts each due run on its own
   thread (never awaited: ten due runs cost the ticker about 2 ms); a run creates an ordinary session with

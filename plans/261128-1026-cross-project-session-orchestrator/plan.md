@@ -59,7 +59,7 @@ One `effective()` priority feeds admission, the optimizer, the ladder and the to
 | 1 | [Resource monitor: CPU, RAM, disk, GPU per machine, session and command](phase-01-resource-monitor.md) — **implemented** (API 51) | — | +1 |
 | 2 | [Priority ranking (projects, sessions, boost, reservation) and resource policy](phase-02-project-tiers-policy.md) — **implemented** (API 52) | 1 | +1 |
 | 3 | [One admission queue for sessions, run tasks, sub-sessions and automations](phase-03-admission-queue.md) — **implemented** | 2 | +1 |
-| 4 | [Command gate and parallelism optimizer (Claude, Codex, Gemini, Devin, ACP)](phase-04-command-ram-gate.md) | 1, 3 | +1 |
+| 4 | [Command gate and parallelism optimizer (Claude, Codex, Gemini, Devin, ACP)](phase-04-command-ram-gate.md) — **4a implemented** (core + Claude); 4b (Codex, Gemini, Devin, ACP) next | 1, 3 | +1 |
 | 5 | [Contention ladder per resource](phase-05-pressure-ladder.md) | 2, 4 | +1 |
 | 6 | [Token ledger, budgets, cache-aware idling, lead/sidekick routing](phase-06-token-ledger-budgets.md) | 2 | +1 |
 | 7 | [Orchestrator view, docs, real-app e2e](phase-07-orchestrator-view-e2e.md) | 1–6 | — |
