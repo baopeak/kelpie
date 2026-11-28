@@ -123,6 +123,9 @@ pub enum Verb {
     ScRtcServers,
     /// The pull request of a project's branch, and whether GitHub would merge it (`pulls`).
     PrGet,
+    /// Boost a session (`boost`: 30m, 1h, 2h, turn or off; `replace`: the boost to end when two run already): the person's
+    /// own ranking, as the window's session menu sets it.
+    Boost,
     /// A fresh challenge for the passkey that covers one merge: this repository, pull request, head commit and method.
     PrChallenge,
     /// Merge a pull request, with the passkey's assertion over what `PrChallenge` described.
@@ -182,6 +185,7 @@ impl Verb {
             "pr_get" => Verb::PrGet,
             "pr_challenge" => Verb::PrChallenge,
             "pr_merge" => Verb::PrMerge,
+            "boost" => Verb::Boost,
             _ => return None,
         })
     }
@@ -189,7 +193,7 @@ impl Verb {
     pub fn needs(self) -> Permission {
         match self {
             Verb::List | Verb::Hb | Verb::Ack | Verb::Sub | Verb::Unsub | Verb::ChatSub | Verb::PushInfo | Verb::PushSub | Verb::PushUnsub | Verb::PushPrefs | Verb::PushTest | Verb::LockChallenge | Verb::LockEnrol | Verb::LockUnlock | Verb::LockNow | Verb::LockTouch | Verb::PrGet => Permission::Read,
-            Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume | Verb::NewOptions | Verb::NewSession => Permission::Write,
+            Verb::Input | Verb::Key | Verb::Answer | Verb::ChatAnswer | Verb::ChatSend | Verb::ChatCancel | Verb::ChatStop | Verb::ChatResume | Verb::NewOptions | Verb::NewSession | Verb::Boost => Permission::Write,
             Verb::Panes | Verb::TkStart | Verb::TkInput | Verb::TkText | Verb::TkAck | Verb::TkStop | Verb::TkRebind => Permission::Control,
             Verb::Screens | Verb::ScStart | Verb::ScStop | Verb::ScAck | Verb::ScInput | Verb::ScText | Verb::ScKey | Verb::ScRebind | Verb::ScResume | Verb::ScSharpen | Verb::ScRtcOffer | Verb::ScRtcIce | Verb::ScVia | Verb::ScRtcServers => Permission::Control,
             Verb::PrChallenge | Verb::PrMerge => Permission::Control,
@@ -259,11 +263,11 @@ pub fn key_bytes(key: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const ALL: [Verb; 50] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::NewOptions, Verb::NewSession, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers, Verb::PrGet, Verb::PrChallenge, Verb::PrMerge];
+    const ALL: [Verb; 51] = [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::Input, Verb::Key, Verb::Answer, Verb::ChatAnswer, Verb::ChatSend, Verb::ChatCancel, Verb::ChatStop, Verb::ChatResume, Verb::NewOptions, Verb::NewSession, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers, Verb::PrGet, Verb::PrChallenge, Verb::PrMerge, Verb::Boost];
 
     #[test]
     fn the_table_is_closed_and_every_verb_has_its_permission() {
-        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "panes", "tk_start", "tk_input", "tk_text", "tk_ack", "tk_stop", "tk_rebind", "screens", "sc_start", "sc_stop", "sc_ack", "sc_input", "sc_text", "sc_key", "sc_rebind", "sc_resume", "sc_sharpen", "sc_rtc_offer", "sc_rtc_ice", "sc_via", "sc_rtc_servers", "pr_get", "pr_challenge", "pr_merge"];
+        let names = ["list", "hb", "ack", "sub", "unsub", "chat_sub", "input", "key", "answer", "chat_answer", "chat_send", "chat_cancel", "chat_stop", "chat_resume", "new_options", "new_session", "push_info", "push_sub", "push_unsub", "push_prefs", "push_test", "lock_challenge", "lock_enrol", "lock_unlock", "lock_now", "lock_touch", "panes", "tk_start", "tk_input", "tk_text", "tk_ack", "tk_stop", "tk_rebind", "screens", "sc_start", "sc_stop", "sc_ack", "sc_input", "sc_text", "sc_key", "sc_rebind", "sc_resume", "sc_sharpen", "sc_rtc_offer", "sc_rtc_ice", "sc_via", "sc_rtc_servers", "pr_get", "pr_challenge", "pr_merge", "boost"];
         assert_eq!(names.len(), ALL.len());
         for (name, verb) in names.iter().zip(ALL) {
             assert_eq!(Verb::parse(name), Some(verb), "{name}");
@@ -291,7 +295,7 @@ mod tests {
         let reachable: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= read_only).collect();
         assert_eq!(reachable, [Verb::List, Verb::Hb, Verb::Ack, Verb::Sub, Verb::Unsub, Verb::ChatSub, Verb::PushInfo, Verb::PushSub, Verb::PushUnsub, Verb::PushPrefs, Verb::PushTest, Verb::LockChallenge, Verb::LockEnrol, Verb::LockUnlock, Verb::LockNow, Verb::LockTouch, Verb::PrGet]);
         let writes: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() <= Permission::Write).collect();
-        assert_eq!(writes.len(), 27, "everything but taking over a pane, seeing the screen or merging a pull request");
+        assert_eq!(writes.len(), 28, "everything but taking over a pane, seeing the screen or merging a pull request");
         let control: Vec<Verb> = ALL.into_iter().filter(|v| v.needs() == Permission::Control).collect();
         assert_eq!(control, [Verb::Panes, Verb::TkStart, Verb::TkInput, Verb::TkText, Verb::TkAck, Verb::TkStop, Verb::TkRebind, Verb::Screens, Verb::ScStart, Verb::ScStop, Verb::ScAck, Verb::ScInput, Verb::ScText, Verb::ScKey, Verb::ScRebind, Verb::ScResume, Verb::ScSharpen, Verb::ScRtcOffer, Verb::ScRtcIce, Verb::ScVia, Verb::ScRtcServers, Verb::PrChallenge, Verb::PrMerge]);
     }

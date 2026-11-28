@@ -240,6 +240,30 @@ endpoint, identifying as Kelpie. When a refresh fails (e.g. the endpoint's rate 
 values stay shown, dimmed, with the reason in the tooltip. Both meters can be turned off in
 Settings → Usage & Resources.
 
+### Priorities
+
+When the computer is short of CPU, memory or disk, Kelpie gives the most to the work you rank highest. Open
+**Priorities** from the palette, or with **Priority & reservation…** on a project's or a session's right-click menu.
+
+- **Projects** sit in three tiers: **Critical**, **Normal** (the default) and **Background**.
+  - Drag a project to rank it inside its tier, or drop it on another tier to move it there.
+  - The top of a tier gets half again what its bottom gets.
+  - A project that is not normal shows its tier beside its name in the sidebar.
+- **A session** follows its project unless you give it a tier of its own. A sub-session or a run's task never
+  ranks above the session that opened it.
+- **Boost** (a session's right-click menu, the Priorities page, or ⚡ on a phone) puts a session at the top of
+  critical for 30 min, 1 h, 2 h or until its current turn ends.
+  - A boost ends on its own, and the session's row shows ⚡ while it lasts.
+  - At most two sessions are boosted at once; boosting a third asks which boost to end.
+- **Reserve…** keeps cores and memory free for a project or a session while it has a live session.
+  - Kelpie refuses reservations that together would leave the system and the window too little: on an 8 GB
+    computer about 4.7 GB and all cores but one.
+- Sessions waiting for you still come first in Activity and when jumping to the next waiting session.
+  Among them, the higher ranked come first.
+
+The ranking is kept by the daemon (`resource-policy.json`), so it holds with the window closed. Only you set it:
+an agent can neither raise itself nor lower another.
+
 ### Context, tokens and cost
 
 Each Claude Code, Codex and OMP session shows a small **context ring** on its sidebar row, pane

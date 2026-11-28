@@ -71,9 +71,11 @@ export const CHAT_QUEUE_API = 21;
 /** Whether a daemon at level `api` owns the queue. A lower level has no `chat.send`, however close the number. */
 export const daemonOwnsQueue = (api: number) => api >= CHAT_QUEUE_API;
 
-/** Live sessions that need the user, the same ones the status bar counts: those waiting on a prompt first, the longest wait first
- *  (unknown start times last), then quiet sub-sessions that reported they need you or are blocked, the oldest report first. */
-export function waitingSessions(sessions: SessionInfo[]): SessionInfo[] {
+/** Live sessions that need the user, the same ones the status bar counts: those waiting on a prompt first, then quiet
+ *  sub-sessions that reported they need you or are blocked. Inside each, the person's priority (`weight`, higher first: a
+ *  boosted or critical session before a background one), then the longest wait (unknown start times last) or the oldest
+ *  report. */
+export function waitingSessions(sessions: SessionInfo[], weight: (id: string) => number = () => 0): SessionInfo[] {
   const kind = new Map<string, 1 | 2>();
   for (const s of sessions) {
     const k = needsYou(s);
@@ -83,6 +85,7 @@ export function waitingSessions(sessions: SessionInfo[]): SessionInfo[] {
     .filter((s) => kind.has(s.id))
     .sort((a, b) =>
       kind.get(a.id)! - kind.get(b.id)! ||
+      weight(b.id) - weight(a.id) ||
       (kind.get(a.id) === 1
         ? (a.waiting_since ?? Number.MAX_SAFE_INTEGER) - (b.waiting_since ?? Number.MAX_SAFE_INTEGER)
         : (a.report?.at ?? 0) - (b.report?.at ?? 0)) ||
@@ -91,8 +94,8 @@ export function waitingSessions(sessions: SessionInfo[]): SessionInfo[] {
 
 /** The waiting session after `currentId` in that order, wrapping around; the first when the
  *  current one is not waiting. */
-export function nextWaiting(sessions: SessionInfo[], currentId?: string | null): SessionInfo | undefined {
-  const list = waitingSessions(sessions);
+export function nextWaiting(sessions: SessionInfo[], currentId?: string | null, weight?: (id: string) => number): SessionInfo | undefined {
+  const list = waitingSessions(sessions, weight);
   const i = list.findIndex((s) => s.id === currentId);
   return list[(i + 1) % Math.max(list.length, 1)];
 }

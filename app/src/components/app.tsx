@@ -74,6 +74,7 @@ const TryDialog = lazy(() => import("./try-dialog"));
 const UpdateDialog = lazy(() => import("./update-dialog"));
 const QuickAnswer = lazy(() => import("./quick-answer"));
 const CostPage = lazy(() => import("./cost-page"));
+const PrioritiesPage = lazy(() => import("./priorities-page"));
 
 /** Tells the daemon which palette to answer terminal colour queries with. */
 function syncDaemonTheme() {
@@ -248,6 +249,7 @@ export function App() {
         <Match when={store.overlay() === "try"}><TryDialog /></Match>
         <Match when={store.overlay() === "answer"}><QuickAnswer /></Match>
         <Match when={store.overlay() === "cost"}><CostPage /></Match>
+        <Match when={store.overlay() === "priorities"}><PrioritiesPage /></Match>
         <Match when={["palette", "quickopen", "jump"].includes(store.overlay() ?? "") && store.overlay()} keyed>
           {(o) => <Palette scope={o === "quickopen" ? "files" : o === "jump" ? "sessions" : "all"} />}
         </Match>

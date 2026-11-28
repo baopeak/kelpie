@@ -46,6 +46,9 @@ export interface SessionRow {
   cwd: string;
   last_activity: number;
   waiting_since: number | null;
+  /** The person boosted it (daemon API 52): until when, or null until its turn ends. */
+  boosted?: boolean;
+  boost_until?: number | null;
 }
 
 export interface LoadStatus {
@@ -772,6 +775,11 @@ export class Link {
 
   chatStop(id: string) {
     return this.request({ type: "chat_stop", id });
+  }
+
+  /** Boosts a session (daemon API 52): `off` ends it; `replace` names the boost to end when two run already. */
+  boost(id: string, boost: "30m" | "1h" | "2h" | "turn" | "off", replace?: string) {
+    return this.request({ type: "boost", id, boost, ...(replace ? { replace } : {}) });
   }
 
   chatResume(id: string) {

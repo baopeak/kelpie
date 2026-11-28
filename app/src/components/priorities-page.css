@@ -1,0 +1,23 @@
+/* Priorities page (lazy: loaded with priorities-page.tsx). */
+.priorities-page { position: fixed; inset: 0; z-index: 40; background: var(--dashboard-bg); display: flex; flex-direction: column; outline: none; overflow: auto; }
+.prio-empty { padding: 18px 22px; }
+.prio-summary { display: flex; gap: 24px; padding: 0 22px 12px; font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.prio-tier { margin: 0 22px 14px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }
+.prio-tier h3 { margin: 0 0 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); }
+.prio-tier.tier-critical h3 { color: var(--accent); }
+.prio-drop { padding: 8px 4px; font-size: 12px; }
+.prio-project { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); padding: 6px 10px; margin-top: 6px; cursor: grab; }
+.prio-project.dragging { opacity: .5; }
+.prio-project.focused, .prio-session.focused { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.prio-project-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.prio-project-head .grip { color: var(--text-faint); display: inline-flex; }
+.prio-project-head .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.prio-project-head .name { font-weight: 600; }
+.prio-session { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 5px 0 3px 26px; font-size: 12.5px; cursor: default; border-radius: 6px; }
+.prio-session .name { min-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prio-session .boosts, .prio-session .boosted { display: inline-flex; align-items: center; gap: 4px; }
+.prio-session .boosted { color: var(--accent); }
+.priorities-page select { height: 24px; font-size: 12px; background: var(--bg-elev-2); color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; }
+.reserve-edit { display: inline-flex; align-items: center; gap: 4px; }
+.reserve-edit input { width: 64px; height: 24px; font-size: 12px; }
+.reserve-edit .btn.small { height: 24px; padding: 0 8px; font-size: 12px; }

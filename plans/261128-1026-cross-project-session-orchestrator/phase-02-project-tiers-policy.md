@@ -1,5 +1,17 @@
 # Phase 2: Priority ranking (projects and sessions) and resource policy
 
+Status: **implemented** on branch `feat/priority-ranking` (API 52), stacked on phase 1.
+
+As built:
+- **Sidebar:** the menus give Boost for 1 hour, Boost until this turn ends, End boost, and Priority & reservation… (opens the
+  Priorities page on that row).
+- **Priorities page:** the drag ranking, the tier selects, boosts and reservations.
+- **Phone:** a ⚡ button on an open session (1 h, or end it), backed by the `boost` write verb.
+- **Not done:** the sidebar project list is not re-sorted by tier, so the person's own order stays. The tier shows as a chip,
+  and only the waiting list (Activity, next waiting session) orders by priority.
+- **Defaults:** max_agents, the per-project cap and the per-tier switches are stored and editable over RPC; phases 3 to 5 read
+  them.
+
 ## Context
 
 Projects live in the app (`types.ts:73`: id, name, path, color, pinned, status), and the daemon knows only `session.project_id`. Policy that acts with the window closed must live in the daemon.

@@ -4,7 +4,7 @@ import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { clock, describeConn, ago } from "./conn-text";
 import { Inbox, STATE_WORDS } from "./inbox";
 import { t } from "./i18n";
-import { ask, canStartSessions, closeSession, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, projects, remoteScreen, remoteScreens, stateBannerShown, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
+import { ask, canBoost, canStartSessions, closeSession, toggleBoost, conn, connected, device, deviceNews, forgetDevice, link, lastLiveAt, livePathNow, lockShown, movedHost, notPairedMessage, now, openId, paintedFrom, paired, pairDevice, pairing, pairShown, plainHttpOrigin, projects, remoteScreen, remoteScreens, stateBannerShown, sessions, setPairing, setTrustOpen, takeover, takeovers, trustOpen } from "./phone-state";
 import { NewSessionSheet } from "./new-session";
 import { APP_VERSION, HOSTED, servedVersion, trustText, type ServedVersion } from "./hosted";
 import { PaneTakeover } from "./pane-takeover";
@@ -240,6 +240,12 @@ export function App() {
     return s ? labelOf(s) : "Kelpie";
   };
   const badge = () => (open() ? needsCount(sessions()) : 0);
+  /** The open, live session the person may boost (a device that can type, a daemon that ranks work). */
+  const boostable = () => {
+    const id = openId();
+    if (!id || !open() || inSettings() || takeover() || remoteScreen() || !canBoost()) return undefined;
+    return sessions().find((x) => x.id === id && x.alive);
+  };
   const back = () => (inSettings() ? closeSettings() : remoteScreen() ? remoteScreens.close() : takeover() ? takeovers.close() : history.state?.s ? history.back() : closeSession());
   const onInbox = () => paired() && open() && !inSettings() && !openId() && !takeover() && !remoteScreen();
   /** Under an open session's name: its state in a word, its agent and where it runs. */
@@ -262,6 +268,14 @@ export function App() {
           </div>
           <Show when={onInbox() && badge() > 0}><span class="badge" aria-label={t("Sessions that need you")}>{badge()}</span></Show>
         </div>
+        <Show when={boostable()}>
+          {(s) => (
+            <button class={`icon boost${s().boosted ? " on" : ""}`} data-boost aria-pressed={!!s().boosted} disabled={!connected()}
+              aria-label={s().boosted ? t("End boost") : t("Boost for 1 hour")} title={s().boosted ? t("End boost") : t("Boost for 1 hour")} onClick={() => void toggleBoost(s().id)}>
+              <Icon name="bolt" size={22} />
+            </button>
+          )}
+        </Show>
         <Show when={paired() && lockShown().clear && !inSettings() && !remoteScreen() && !takeover()}>
           <button class="gear" data-open-settings aria-label={t("Settings")} onClick={openSettings}><Icon name="gear" size={22} /></button>
         </Show>

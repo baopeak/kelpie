@@ -34,6 +34,7 @@ mod browser_rpc;
 mod owed_rpc;
 mod pr_rpc;
 mod process;
+mod priority_rpc;
 mod resource_rpc;
 mod sub_rpc;
 mod window_rpc;
@@ -245,6 +246,8 @@ pub struct Daemon {
     procs: crate::procs::Procs,
     /// The machine's CPU, memory, disks and GPUs, sampled always, and what each command cost (`resources.*`).
     pub resources: Arc<crate::resources::Resources>,
+    /// The person's ranking of projects and sessions, boosts and reservations (`policy.resources.*`, `resource-policy.json`).
+    priorities: Mutex<crate::resource_policy::Policy>,
     /// Browsing hosts and this computer, and the transfer queue (`sftp.*`, `local.*`, `xfer.*`).
     pub files: Arc<crate::files::service::Files>,
     /// The app's connection, asked for what only the window can do (`provider`).
@@ -409,6 +412,7 @@ impl Daemon {
                 subs: crate::subs::Subs::new(policy.sub).with_stats_file(data_dir.join("sub-stats.json")),
                 procs: crate::procs::Procs::default(),
                 resources: Arc::new(crate::resources::Resources::new(Some(data_dir.join("command-ledger.json")))),
+                priorities: Mutex::new(crate::resource_policy::Policy::open(Some(data_dir.join("resource-policy.json")))),
                 files,
                 providers: crate::provider::Providers::default(),
                 browser: crate::browser_agent::State::new(policy.browser, &data_dir),
@@ -1850,6 +1854,7 @@ impl Daemon {
             if now.duration_since(last_run_tick) >= Duration::from_secs(1) {
                 last_run_tick = now;
                 self.run_tick();
+                self.priority_sweep();
                 self.mobile.lock_sweep();
             }
             // Mail between sessions: one look a second, and nothing but a lock when nobody has any.
@@ -1938,6 +1943,7 @@ impl Daemon {
                         };
                         let boundary = last_boundary.insert(info.handle, now);
                         let typed = input.is_some_and(|i| boundary.is_none_or(|b| i > b));
+                        self.priority_turn_ended(&info.spec.id);
                         // Taken here, not in the blocking task: the next turn may start before it runs.
                         let started = self.checkpoints.take_work_start(&info.spec.id, now_millis());
                         // Looking for the repository touches the disk: not on the ticker.
@@ -2531,6 +2537,7 @@ impl Daemon {
             m if m.starts_with("pr.") => return self.pr_rpc(tx, id, m, params),
             m if m.starts_with("process.") => return self.process_rpc(tx, id, m, params),
             m if m.starts_with("resources.") => self.resource_rpc(m, &params)?,
+            m if m.starts_with("policy.resources.") || m == "session.priority.set" => self.priority_rpc(m, &params)?,
             // Undo, its preview and drop wait for the repository's snapshots and run git: they
             // answer from their own thread so this client's other requests are not held up.
             m @ ("checkpoint.undo_plan" | "checkpoint.undo" | "checkpoint.drop") => {

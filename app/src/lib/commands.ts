@@ -12,6 +12,7 @@ import { navBack, navForward } from "./nav-history";
 import { addExistingWorktrees } from "./worktrees";
 import { openFinish, openReviewWith, openTryAgents } from "./review-queue";
 import { waitingSessions } from "./attention";
+import { PRIORITY_API, priorities, weightOf } from "./priorities";
 import { subRequests } from "./sub-sessions";
 import { focusFirstSubRequest } from "./sub-session-actions";
 import { openWorktreeDialog } from "../components/worktree-dialog";
@@ -89,7 +90,7 @@ export const commands: Command[] = [
   { id: "jump", label: msg("Jump to Session / Project…"), win: "mod+shift+k", mac: "mod+k", run: () => store.setOverlay("jump") },
   { id: "sub.review", label: msg("Review sub-session request"), win: "mod+shift+a", mac: "mod+shift+a", when: () => subRequests().length > 0, run: () => focusFirstSubRequest() },
   { id: "attention.next", label: msg("Next Session Waiting for You"), win: "mod+shift+.", mac: "mod+shift+.", run: () => store.revealNextWaiting() },
-  { id: "attention.answer", label: msg("Answer Waiting Session…"), when: () => waitingSessions(Object.values(store.sessions)).length > 0, run: () => { const s = waitingSessions(Object.values(store.sessions))[0]; if (s) store.openAnswer(s.id); } },
+  { id: "attention.answer", label: msg("Answer Waiting Session…"), when: () => waitingSessions(Object.values(store.sessions)).length > 0, run: () => { const s = waitingSessions(Object.values(store.sessions), (id) => weightOf(priorities(), id))[0]; if (s) store.openAnswer(s.id); } },
   { id: "dashboard", label: msg("Toggle Agent Dashboard"), win: "mod+shift+m", mac: "mod+shift+m", run: () => store.setOverlay(store.overlay() === "dashboard" ? null : "dashboard") },
   { id: "project.add", label: msg("Add Project Folder…"), run: () => void pickProjectFolder() },
   { id: "project.addRemote", label: msg("Add Remote Project (SSH)…"), run: () => store.setOverlay("remote") },
@@ -203,6 +204,7 @@ export const commands: Command[] = [
   { id: "accounts", label: msg("Claude / Codex Accounts…"), run: () => store.openSettings("accounts") },
   { id: "agent-setup", label: msg("Agent Setup (MCP, instructions, skills)…"), run: () => store.openSettings("agent-setup") },
   { id: "usage.cost", label: msg("Usage & Cost…"), run: () => store.setOverlay("cost") },
+  { id: "priorities", label: msg("Priorities…"), when: () => store.daemonApi() >= PRIORITY_API, run: () => store.setOverlay("priorities") },
   { id: "runs", label: msg("Toggle Runs (Orchestration)"), win: "mod+shift+r", mac: "mod+shift+r", run: () => store.setOverlay(store.overlay() === "runs" ? null : "runs") },
   { id: "runs.new", label: msg("New Run…"), run: () => openRuns(true) },
   { id: "hosts", label: msg("SSH Hosts…"), win: "mod+alt+h", mac: "mod+alt+h", run: () => (store.overlay() === "hosts" ? store.setOverlay(null) : openHosts()) },

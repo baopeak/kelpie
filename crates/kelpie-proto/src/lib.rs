@@ -130,7 +130,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// session's use now (with ten minutes of history when asked) and the commands it runs, and who uses each contended resource most; the
 /// `resources.changed` event carries the same without history after each sample; `resources.ledger {project?}` lists what each command an agent
 /// ran has cost so far; `daemon.info` says `resource_samples`. The user's only. An older daemon has none of it, so a client shows resources only at 51.
-pub const API_LEVEL: u32 = 51;
+/// 52: the person's ranking of work: `policy.resources.get` answers `{policy: {projects: {id: {tier, rank, reserve?}}, sessions: {id: {tier?, boost?,
+/// boosted_at, reserve?}}, max_agents, max_agents_per_project, switches}, effective: {session: {tier, weight, boosted, boost_until, source,
+/// reserve}}, boosted, reserved, reservable, max_boosts}`; `policy.resources.set {projects?: {id: {tier?, rank?, reserve?|null}}, order?: {tier, ids},
+/// max_agents?, max_agents_per_project?, switches?}` and `session.priority.set {id, tier?: critical|normal|background|project, boost?:
+/// 30m|1h|2h|turn|off, replace?, reserve?|null}` answer the same, refuse a third boost (naming the two) unless `replace` names one, and refuse
+/// reservations that together would leave the system less than its share; the `policy.resources.changed` event carries the same. The user's
+/// only. An older daemon has none of it, so a client shows priorities only at 52.
+pub const API_LEVEL: u32 = 52;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

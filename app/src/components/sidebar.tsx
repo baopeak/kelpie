@@ -34,6 +34,8 @@ import { ancestorsOf, childrenOfSession, foldedParents, subtreeSummary, togglePa
 import { pulseClass } from "../lib/reveal-pulse";
 import { reportedState, sessionState, type SessionState } from "../lib/session-state";
 import { closeFinishedSubSessions, finishedOf } from "../lib/sub-session-actions";
+import { PRIORITY_API, boostLeft, priorities, projectTier } from "../lib/priorities";
+import { boostSession, endBoost, openPriorities } from "../lib/priority-actions";
 
 export const STATUS_WORDS = { idle: msg("idle"), working: msg("working"), waiting: msg("waiting"), exited: msg("exited") } as const;
 
@@ -164,11 +166,28 @@ async function inPane(s: SessionInfo, fn: typeof switchToChat) {
   if (pane) await fn(project, tab, pane);
 }
 
+/** What a boosted session's mark says: how long the boost has left. */
+function boostTitle(id: string, now: number): string {
+  const until = priorities()?.effective[id]?.boost_until;
+  return t("Boosted: gets the most CPU and memory ({left})", { left: until ? boostLeft(until, now) : t("until this turn ends") });
+}
+
 function sessionMenu(s: SessionInfo): MenuItem[] {
   const items: MenuItem[] = [
     { label: t("Rename…"), run: () => setRenaming(`s:${s.id}`) },
     s.unread ? { label: t("Mark as read"), run: () => void store.markUnread(s.id, false) } : { label: t("Mark as unread"), run: () => void store.markUnread(s.id, true) },
   ];
+  // Its priority: a boost, or the Priorities page on its line (a daemon before API 52 has none).
+  if (s.alive && store.daemonApi() >= PRIORITY_API) {
+    const eff = priorities()?.effective[s.id];
+    items.push(null);
+    if (eff?.boosted) {
+      items.push({ label: eff.boost_until ? t("End boost ({left} left)", { left: boostLeft(eff.boost_until, Date.now()) }) : t("End boost"), run: () => void endBoost(s) });
+    } else {
+      items.push({ label: t("Boost for 1 hour"), run: () => void boostSession(s, "1h") }, { label: t("Boost until this turn ends"), run: () => void boostSession(s, "turn") });
+    }
+    items.push({ label: t("Priority & reservation…"), run: () => openPriorities(s.id) });
+  }
   if (!s.alive && !s.chat) items.push({ label: store.resumable(s) ? t("Resume") : t("Restart"), run: () => void daemon("session.restart", { handle: s.handle }).catch((e) => store.notify(String(e))) });
   // Chat view runs the agent on this computer: never for a session on a remote host.
   if (s.alive && supportsChat(s.kind) && !s.remote) {
@@ -274,6 +293,7 @@ function projectMenu(p: Project): MenuItem[] {
       : []),
     { label: t("Move up"), run: () => store.moveProject(p.id, -1) },
     { label: t("Move down"), run: () => store.moveProject(p.id, 1) },
+    ...(store.daemonApi() >= PRIORITY_API ? [{ label: t("Priority & reservation…"), run: () => openPriorities(p.id) }] : []),
     null,
     ...(worktree && !p.remote && !health ? [{ label: t("Finish…"), run: () => openFinish(p.id) }] : []),
     ...(worktree && !health ? [{ label: t("Remove worktree…"), danger: true, run: () => void confirmRemoveWorktree(p) }] : []),
@@ -404,6 +424,9 @@ function SessionRow(props: { s: SessionInfo; kids: number }) {
         </button>
       </Show>
       <ContextRing s={props.s} />
+      <Show when={priorities()?.effective[props.s.id]?.boosted}>
+        <span class="prio-mark" title={boostTitle(props.s.id, now())}><Icon name="bolt" size={10} /></span>
+      </Show>
       <Show when={continueAt(props.s)} fallback={
         <Show when={LABEL[state()]} fallback={<span class="age">{relTimeShort(props.s.last_activity || props.s.created_at, now())}</span>}>
           {(label) => <span class={`age state-label ${state()}`}>{t(label())}</span>}
@@ -499,7 +522,16 @@ function ProjectRow(props: { project: Project }) {
         </Show>
         <Show when={!collapsedSidebar()}>
           <span class="project-text">
-            <Show when={renaming() === `p:${props.project.id}`} fallback={<span class="project-name">{props.project.name}</span>}>
+            <Show when={renaming() === `p:${props.project.id}`} fallback={
+              <span class="project-name">{props.project.name}
+                {/* A tier other than normal shows beside the name. */}
+                <Show when={priorities() && projectTier(priorities(), props.project.id) !== "normal"}>
+                  <span class={`tier-chip ${projectTier(priorities(), props.project.id)}`}>
+                    {projectTier(priorities(), props.project.id) === "critical" ? t("critical") : t("background")}
+                  </span>
+                </Show>
+              </span>
+            }>
               <RenameInput value={props.project.name} onDone={(v) => v?.trim() && store.renameProject(props.project.id, v.trim())} />
             </Show>
             <Show when={renaming() === `c:${props.project.id}`}>

@@ -2428,12 +2428,16 @@ fn sessions(daemon: &Daemon) -> Value {
     json!(daemon
         .list()
         .into_iter()
-        .map(|s| json!({
-            "id": s.spec.id, "name": s.spec.name, "kind": s.spec.kind, "title": s.title,
-            "status": s.status, "unread": s.unread, "alive": s.alive, "chat": s.chat,
-            "project_id": s.spec.project_id, "cwd": s.spec.cwd, "last_activity": s.last_activity,
-            "waiting_since": s.waiting_since,
-        }))
+        .map(|s| {
+            // The person's boost of it: until when (null: until its turn ends), so the phone shows and ends it.
+            let boost = daemon.effective_priority(&s.spec.id).filter(|e| e.boosted);
+            json!({
+                "id": s.spec.id, "name": s.spec.name, "kind": s.spec.kind, "title": s.title,
+                "status": s.status, "unread": s.unread, "alive": s.alive, "chat": s.chat,
+                "project_id": s.spec.project_id, "cwd": s.spec.cwd, "last_activity": s.last_activity,
+                "waiting_since": s.waiting_since, "boosted": boost.is_some(), "boost_until": boost.and_then(|e| e.boost_until),
+            })
+        })
         .collect::<Vec<_>>())
 }
 
@@ -3162,6 +3166,18 @@ impl Conn {
                 return options.map(Some).map_err(|(code, message)| refuse(code, message));
             }
             Verb::NewSession => return self.new_session(req).await.map(Some),
+            Verb::Boost => {
+                let (id, _) = self.entry(req)?;
+                let boost = req["boost"].as_str().filter(|b| matches!(*b, "30m" | "1h" | "2h" | "turn" | "off")).ok_or_else(|| refuse("bad_request", "boost is 30m, 1h, 2h, turn or off"))?;
+                let mut params = json!({"id": id, "boost": boost});
+                if let Some(r) = req["replace"].as_str().filter(|r| !r.is_empty() && r.len() <= 128) {
+                    params["replace"] = json!(r);
+                }
+                return match self.daemon.priority_rpc("session.priority.set", &params) {
+                    Ok(_) => Ok(Some(json!({"type": "ack", "result": "ok"}))),
+                    Err(e) => Err(refuse("refused", e.to_string())),
+                };
+            }
             // Answered later, off this connection's loop, by `Conn::pr_verb`.
             Verb::PrGet | Verb::PrChallenge | Verb::PrMerge => return Err(refuse("bad_request", "not here")),
             Verb::PushInfo => {
@@ -4392,6 +4408,22 @@ mod tests {
         async fn ask_write(&mut self, req: Value) -> Value {
             self.ask(Permission::Write, req).await
         }
+    }
+
+    /// The person's boost from a phone: what the window's session menu does, with what may be asked checked here.
+    #[tokio::test]
+    async fn a_phone_boosts_a_session_and_its_row_says_until_when() {
+        let mut r = rig();
+        let ok = r.ask_write(json!({"type": "boost", "id": "t1", "boost": "1h"})).await;
+        assert_eq!(ok["result"], "ok", "{ok}");
+        let row = |d: &Daemon| sessions(d).as_array().unwrap().iter().find(|s| s["id"] == "t1").cloned().unwrap();
+        assert_eq!(row(&r.daemon)["boosted"], true);
+        assert!(row(&r.daemon)["boost_until"].as_u64().is_some_and(|t| t > now_millis()));
+        assert_eq!(code(&r.ask_write(json!({"type": "boost", "id": "t1", "boost": "9h"})).await), Some("bad_request"));
+        assert_eq!(code(&r.ask_write(json!({"type": "boost", "id": "nobody", "boost": "1h"})).await), Some("no_session"));
+        assert_eq!(code(&r.ask(Permission::Read, json!({"type": "boost", "id": "t1", "boost": "off"})).await), Some("read_only"));
+        assert_eq!(r.ask_write(json!({"type": "boost", "id": "t1", "boost": "off"})).await["result"], "ok");
+        assert_eq!(row(&r.daemon)["boosted"], false);
     }
 
     /// Real loopback transports, isolated from the user's daemon and mobile settings.

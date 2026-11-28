@@ -106,6 +106,9 @@ header h1 { margin: 0; font-size: var(--fs-lg); font-weight: 700; line-height: 1
 .icon, .gear { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap); min-height: var(--tap); padding: 0; border: 0; border-radius: var(--r-md); background: none; color: var(--text); line-height: 1; }
 .gear { color: var(--dim); }
 .icon:active, .gear:active { background: var(--surface-2); }
+/* The open session’s boost (the person’s ranking): lit while it runs. */
+.icon.boost { color: var(--dim); }
+.icon.boost.on { color: var(--accent); }
 .badge { flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 7px; font-size: var(--fs-xs); font-weight: 700; border-radius: var(--r-pill); background: var(--waiting); color: #141823; }
 
 /* The connection indicator is always visible: a coloured dot and a word, or only the dot where the header needs the room for a name. */

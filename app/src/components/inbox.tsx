@@ -7,6 +7,7 @@ import { Icon } from "./icons";
 import { Kip, kipShown } from "./brand";
 import type { InboxItem } from "../lib/types";
 import { waitedFor, waitingSessions } from "../lib/attention";
+import { priorities, weightOf } from "../lib/priorities";
 import { t } from "../lib/i18n";
 import { subRequests } from "../lib/sub-sessions";
 import { SubRequestCard } from "./sub-request-card";
@@ -24,7 +25,7 @@ export function InboxPanel(props: { onClose: () => void }) {
   // Working agents stay on top: the feed is for catching up on everything else.
   const working = createMemo(() => Object.values(store.sessions).filter((s) => s.alive && s.status === "working" && s.kind !== "shell"));
   // Those waiting on the user first, the longest wait on top: answered right here.
-  const waiting = createMemo(() => waitingSessions(Object.values(store.sessions)));
+  const waiting = createMemo(() => waitingSessions(Object.values(store.sessions), (id) => weightOf(priorities(), id)));
 
   const open = (i: InboxItem) => {
     store.markInbox(i.id);
