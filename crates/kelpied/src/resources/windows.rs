@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::mem::size_of;
 
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW};
 use windows_sys::Win32::System::Memory::{CreateMemoryResourceNotification, LowMemoryResourceNotification, QueryMemoryResourceNotification};
 use windows_sys::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W,
@@ -270,9 +270,16 @@ fn gpus(c: &HashMap<&'static str, Vec<(String, f64)>>) -> (Vec<GpuReading>, Hash
     (list, by_pid)
 }
 
-/// Free and total space of the volume holding `path`.
+/// `GetDriveTypeW`: a network drive.
+const DRIVE_REMOTE: u32 = 4;
+
+/// Free and total space of the volume whose root is `path` (a mapped network drive is left out: asking it can stall).
 fn volume(path: &std::path::Path) -> Option<VolumeReading> {
     let p = wide(&path.to_string_lossy());
+    // SAFETY: a NUL-terminated root path.
+    if unsafe { GetDriveTypeW(p.as_ptr()) } == DRIVE_REMOTE {
+        return None;
+    }
     let (mut free, mut total) = (0u64, 0u64);
     // SAFETY: a NUL-terminated path and valid out-pointers (the third, total free bytes, is not asked for).
     if unsafe { GetDiskFreeSpaceExW(p.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) } == 0 || total == 0 {

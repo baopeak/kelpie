@@ -4,6 +4,7 @@
 //! the computer, and in other projects, is not a session's to read.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use super::*;
 use crate::procs::{Sampler, Target};
@@ -12,10 +13,33 @@ use crate::resources::{Probe, SessionSample};
 /// Time between samples while a session works, and while none does.
 const BUSY_EVERY: Duration = Duration::from_secs(2);
 const IDLE_EVERY: Duration = Duration::from_secs(10);
-/// Volumes looked at: the daemon's data and the folders sessions run in.
+/// Least time between two samples: a command starting wakes the sampler, and a burst of them must not make rates
+/// over a few milliseconds (noise) or let two samples a moment apart pass for a lasting rise.
+const MIN_GAP: Duration = Duration::from_secs(1);
+/// Volumes looked at: the data folder's and those of the folders sessions run in.
 const MAX_VOLUMES: usize = 8;
-/// The ledger is written at most this often (and when the monitor stops).
+/// The ledger is written at most this often, and when the daemon saves its state on the way out.
 const SAVE_EVERY: Duration = Duration::from_secs(30);
+
+/// The volume a folder is on, as its free space is read. Windows: the drive's root (`C:\`); a UNC path (a network share,
+/// `\\wsl$`) is left out, as asking one can stall. Unix: the folder itself (`statvfs` answers for its volume).
+fn volume_of(path: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        match path.components().next()? {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => Some(PathBuf::from(format!("{}:\\", char::from(d).to_ascii_uppercase()))),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Some(path.to_path_buf())
+    }
+}
 
 /// `KELPIE_RESOURCE_MONITOR=0` turns the sampling off (the gauges then stay unknown).
 fn monitor_enabled() -> bool {
@@ -33,7 +57,7 @@ impl Daemon {
     fn resource_targets(&self) -> (Vec<(Target, Option<String>)>, bool, Vec<PathBuf>) {
         let mut targets = Vec::new();
         let mut working = false;
-        let mut volumes: BTreeSet<PathBuf> = BTreeSet::from([self.data_dir.clone()]);
+        let mut volumes: BTreeSet<PathBuf> = volume_of(&self.data_dir).into_iter().collect();
         let ids: Vec<String> = self.sessions.read().values().map(|e| e.spec().id).collect();
         for id in ids {
             let Some(entry) = self.by_id(&id) else { continue };
@@ -43,7 +67,7 @@ impl Daemon {
             }
             working |= matches!(info.status, Status::Working);
             if volumes.len() < MAX_VOLUMES && !info.spec.cwd.is_empty() {
-                volumes.insert(PathBuf::from(&info.spec.cwd));
+                volumes.extend(volume_of(Path::new(&info.spec.cwd)));
             }
             let project = info.spec.project_id.clone().or_else(|| Some(info.spec.cwd.clone()));
             if let Ok(t) = self.process_target(&id) {
@@ -90,6 +114,9 @@ impl Daemon {
                 let resources = d.resources.clone();
                 drop(d);
                 resources.wait(pause);
+                if let Some(rest) = MIN_GAP.checked_sub(last.elapsed()) {
+                    std::thread::sleep(rest);
+                }
             }
         });
         if let Err(e) = spawned {
@@ -117,13 +144,18 @@ impl Daemon {
         let call = payload.get("tool_use_id").and_then(Value::as_str).unwrap_or_default();
         let now = now_millis();
         match event {
-            "PreToolUse" if payload.get("tool_name").and_then(Value::as_str) == Some("Bash") && !call.is_empty() => {
+            // A command sent to the background ends its tool call at once: what it costs cannot be told apart, so it is not measured.
+            "PreToolUse"
+                if payload.get("tool_name").and_then(Value::as_str) == Some("Bash")
+                    && !call.is_empty()
+                    && payload.pointer("/tool_input/run_in_background").and_then(Value::as_bool) != Some(true) =>
+            {
                 if let Some(command) = payload.pointer("/tool_input/command").and_then(Value::as_str) {
                     self.resources.command_started(session_id, call, command, project, now);
                 }
             }
             "PostToolUse" | "PostToolUseFailure" if !call.is_empty() => self.resources.command_ended(session_id, call, event == "PostToolUseFailure", now),
-            "Stop" | "StopFailure" | "SessionEnd" => self.resources.turn_ended(session_id, now),
+            "UserPromptSubmit" | "Stop" | "StopFailure" | "SessionEnd" => self.resources.turn_boundary(session_id),
             _ => {}
         }
     }

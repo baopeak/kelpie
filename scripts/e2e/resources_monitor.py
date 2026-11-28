@@ -110,7 +110,7 @@ try:
     check("cpu, ram, disk and space are known", all(gauges.get(k) in ("ok", "busy", "saturated") for k in ("cpu", "ram", "disk", "space")), gauges)
     m = snap["machine"]
     check("the machine reading has memory, commit, a disk and the data folder's volume",
-          m["mem_total_mb"] and m["commit_limit_mb"] and m["disks"] and any(os.path.normcase(v["path"]) == os.path.normcase(data_dir) for v in m["volumes"]),
+          m["mem_total_mb"] and m["commit_limit_mb"] and m["disks"] and any(os.path.normcase(v["path"]).startswith(os.path.normcase(os.path.splitdrive(data_dir)[0] or data_dir)) for v in m["volumes"]),
           {k: m[k] for k in ("mem_total_mb", "commit_limit_mb")})
     print("  gpu:", gauges.get("gpu"), [(g["id"][-12:], g["util_pct"]) for g in m["gpus"]], flush=True)
 
@@ -151,13 +151,13 @@ try:
     check("its CPU reached what the workers really got", got > 0 and seen["cores"] >= got * 0.85, f"{round(seen['cores'], 2)} vs {got}")
     check("its disk writes were seen", seen["io_mbps"] >= 5, round(seen["io_mbps"], 1))
     run = seen["running"] or {}
-    check("the command was listed as running, by its fingerprint", run.get("fingerprint") == "python", run)
+    check("the command was listed as running, by its fingerprint", run.get("fingerprint") == "python hog.py", run)
 
     # 3. The ledger learned it.
     learned = wait_for(lambda: c.call("resources.ledger", {"project": "res-proj"})["commands"], 10)
     e = (learned or [{}])[0]
     print("  learned:", json.dumps({k: (round(v, 2) if isinstance(v, float) else v) for k, v in e.items()}), flush=True)
-    check("the ledger learned the command once", e.get("fingerprint") == "python" and e.get("runs") == 1, e.get("runs"))
+    check("the ledger learned the command once", e.get("fingerprint") == "python hog.py" and e.get("runs") == 1, e.get("runs"))
     check(f"…with its memory within 15 % of {HOLD_MB} MiB", abs(e.get("ram_mb", 0) - HOLD_MB) <= HOLD_MB * 0.15, round(e.get("ram_mb", 0)))
     check("…its peak CPU at least what the workers got", e.get("peak_cores", 0) >= got * 0.85, f"{round(e.get('peak_cores', 0), 2)} vs {got}")
     check("…sampled at the working pace from the start (a sample every 2 s or so)", run.get("samples", 0) >= SECONDS // 3, run.get("samples"))
