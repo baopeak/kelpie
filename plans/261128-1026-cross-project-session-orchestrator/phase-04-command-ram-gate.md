@@ -11,8 +11,11 @@ As built, differing from below:
   - A change keeps the command's first words (flags go after the subcommand, never an env prefix), so prefix allow rules still
     match.
   - There are no rewrites in Claude's auto mode (it refuses changed calls) or dontAsk mode.
-- **Open:** whether Claude applies `updatedInput` with no decision in default mode is implied by its docs but not stated; it
-  needs a check with a real Claude session.
+- **Verified with real Claude Code** (`claude -p`, default mode, a test hook returning only `updatedInput` and
+  `additionalContext`):
+  - The changed command ran (`echo before` became `echo REWRITTEN`), and the note reached the model.
+  - A changed write command with no allow rule (`touch …`) stopped at the approval step and did not run.
+  - So the hook never approves anything.
 - **Shares:** they use the effective weight without the rank factor of waiting commands; the gate does not queue holds by priority
   among themselves (each re-checks every second).
 - **Next (4b):**
