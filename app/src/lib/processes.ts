@@ -30,6 +30,10 @@ export interface ProcInfo {
   exe: string | null;
   mem: number;
   cpu: number;
+  /** Memory only it holds (its commit on Windows), bytes (API 51). */
+  private?: number;
+  /** Bytes it has read and written since it started (API 51). */
+  io?: number;
   ports: Port[];
   orphan?: boolean;
 }

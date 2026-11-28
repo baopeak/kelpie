@@ -62,6 +62,10 @@ pub struct Proc {
     pub mem: u64,
     /// Percent of one core since the previous scan of this process (0 on the first).
     pub cpu: f32,
+    /// Memory only this process holds (its commit on Windows), bytes: what it costs the machine, shared pages left out.
+    pub private: u64,
+    /// Bytes it has read and written since it started (files, pipes and devices).
+    pub io: u64,
 }
 
 impl Proc {
@@ -319,6 +323,44 @@ impl Procs {
 }
 
 /// When `pid` started, as the scans read it (to record a session's process when the session starts it).
+/// One session's processes as the resource sampler sums them (`resources`).
+pub struct TreeUsage {
+    pub id: String,
+    /// The session's own process first when it runs, then everything in its tree and its job.
+    pub procs: Vec<Proc>,
+}
+
+/// Reads the table of processes for the resource sampler. It has a reader of its own (its CPU use is measured since its own
+/// previous look), remembers nothing about orphans and counts no scan: the app's `process.*` calls stay what they were.
+#[derive(Default)]
+pub struct Sampler {
+    reader: os::Reader,
+}
+
+impl Sampler {
+    /// Every process running now, and each target's tree among them (found as [`Procs::scan`] finds it).
+    pub fn read(&mut self, targets: &[Target]) -> (Vec<Proc>, Vec<TreeUsage>) {
+        let table = self.reader.read(None);
+        let rows: Vec<(u32, Option<u32>, u64)> = table.values().map(|p| (p.pid, p.ppid, p.start_time)).collect();
+        let children_of = kelpie_proto::procs::child_map(&rows);
+        let trees = targets
+            .iter()
+            .map(|t| {
+                let root = t.root.filter(|pid| table.get(pid).is_some_and(|p| t.root_start.is_none_or(|s| s == p.start_time)));
+                let mut pids: Vec<u32> = root.into_iter().collect();
+                let below = root.map(|r| kelpie_proto::procs::descendants(&children_of, r)).unwrap_or_default();
+                for pid in below.into_iter().chain(t.tree.as_ref().and_then(|tree| tree.pids()).into_iter().flatten()) {
+                    if !pids.contains(&pid) {
+                        pids.push(pid);
+                    }
+                }
+                TreeUsage { id: t.id.clone(), procs: pids.iter().filter_map(|pid| table.get(pid).cloned()).collect() }
+            })
+            .collect();
+        (table.into_values().collect(), trees)
+    }
+}
+
 pub fn start_time_of(pid: u32) -> Option<u64> {
     os::start_time_of(pid)
 }
@@ -441,6 +483,7 @@ mod os {
                 return Table::new();
             }
             let now = Instant::now();
+            let wall_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
             let base = self.buf.as_ptr().cast::<u8>();
             let end = (filled as usize).min(self.buf.len() * 8);
             let mut table = Table::new();
@@ -466,10 +509,18 @@ mod os {
                         let wall = now.duration_since(then).as_secs_f64();
                         if wall > 0.0 { ((cpu_time - before) as f64 / 1e7 / wall * 100.0) as f32 } else { 0.0 }
                     }
+                    // Started since the previous reading: its use since it started. (On the first reading every
+                    // process is old, and its lifetime's average would say little about now.)
+                    _ if !self.cpu.is_empty() => {
+                        let alive_ms = wall_ms.saturating_sub(start_time);
+                        if alive_ms > 0 { (cpu_time as f64 / 1e4 / alive_ms as f64 * 100.0) as f32 } else { 0.0 }
+                    }
                     _ => 0.0,
                 };
                 cpu.insert(pid, (start_time, cpu_time, now));
-                table.insert(pid, Proc { pid, ppid: (pid != 0).then_some(ppid), name, start_time, exe: None, mem: e.WorkingSetSize as u64, cpu: used });
+                // Its I/O counters follow the documented fields: reads, writes and other operations, then the bytes of each.
+                let io = (e.Reserved7[3].max(0) + e.Reserved7[4].max(0)) as u64;
+                table.insert(pid, Proc { pid, ppid: (pid != 0).then_some(ppid), name, start_time, exe: None, mem: e.WorkingSetSize as u64, cpu: used, private: e.PrivatePageCount as u64, io });
                 if e.NextEntryOffset == 0 {
                     break;
                 }
@@ -565,7 +616,7 @@ mod os {
     /// The table: processes only (on Linux sysinfo lists each thread as a process of its own unless told not to),
     /// without their executable paths, which are read fresh for the processes a scan looks at.
     fn refresh_kind() -> ProcessRefreshKind {
-        ProcessRefreshKind::nothing().with_memory().with_cpu().without_tasks()
+        ProcessRefreshKind::nothing().with_memory().with_cpu().with_disk_usage().without_tasks()
     }
 
     fn live(p: &sysinfo::Process) -> bool {
@@ -615,7 +666,12 @@ mod os {
                 .filter(|(pid, p)| live(p) && p.thread_kind().is_none() && wanted.is_none_or(|w| w.contains(&pid.as_u32())))
                 .map(|(pid, p)| {
                     let pid = pid.as_u32();
-                    (pid, Proc { pid, ppid: p.parent().map(|p| p.as_u32()), name: p.name().to_string_lossy().into_owned(), start_time: p.start_time(), exe: None, mem: p.memory(), cpu: p.cpu_usage() })
+                    {
+                    let disk = p.disk_usage();
+                    let io = disk.total_read_bytes + disk.total_written_bytes;
+                    // Unix has no cheap private figure for another process: resident memory stands in for it.
+                    (pid, Proc { pid, ppid: p.parent().map(|p| p.as_u32()), name: p.name().to_string_lossy().into_owned(), start_time: p.start_time(), exe: None, mem: p.memory(), cpu: p.cpu_usage(), private: p.memory(), io })
+                }
                 })
                 .collect()
         }
@@ -748,7 +804,7 @@ pub(crate) mod tests {
     }
 
     fn running(pid: u32, start: u64, exe: &str) -> Proc {
-        Proc { pid, ppid: None, name: "x".into(), start_time: start, exe: Some(exe.into()), mem: 0, cpu: 0.0 }
+        Proc { pid, ppid: None, name: "x".into(), start_time: start, exe: Some(exe.into()), mem: 0, cpu: 0.0, private: 0, io: 0 }
     }
 
     #[test]

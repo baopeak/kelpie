@@ -66,7 +66,7 @@ fn wants_ports(targets: &[Target], scans: &[TreeScan], lsof_costs: bool) -> bool
 
 impl Daemon {
     /// The session's process as the scanner needs it.
-    fn process_target(&self, id: &str) -> Result<Target> {
+    pub(super) fn process_target(&self, id: &str) -> Result<Target> {
         let entry = self.by_id(id).ok_or_else(|| anyhow!("no session {id}"))?;
         let (root, root_start, tree) = match entry.proc_root() {
             Some(r) => (Some(r.pid), r.start, r.tree),
@@ -169,7 +169,7 @@ mod tests {
     use super::*;
 
     fn proc_(pid: u32) -> Proc {
-        Proc { pid, ppid: None, name: "p".into(), start_time: 1, exe: None, mem: 0, cpu: 0.0 }
+        Proc { pid, ppid: None, name: "p".into(), start_time: 1, exe: None, mem: 0, cpu: 0.0, private: 0, io: 0 }
     }
 
     fn look(custom: bool, root: bool, children: usize) -> (Target, TreeScan) {
