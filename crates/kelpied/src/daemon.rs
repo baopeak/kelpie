@@ -34,6 +34,7 @@ mod browser_rpc;
 mod owed_rpc;
 mod pr_rpc;
 mod process;
+mod resource_rpc;
 mod sub_rpc;
 mod window_rpc;
 #[cfg(test)]
@@ -242,6 +243,8 @@ pub struct Daemon {
     subs: crate::subs::Subs,
     /// What the sessions run, looked at when the app asks (`process.*`).
     procs: crate::procs::Procs,
+    /// The machine's CPU, memory, disks and GPUs, sampled always, and what each command cost (`resources.*`).
+    pub resources: Arc<crate::resources::Resources>,
     /// Browsing hosts and this computer, and the transfer queue (`sftp.*`, `local.*`, `xfer.*`).
     pub files: Arc<crate::files::service::Files>,
     /// The app's connection, asked for what only the window can do (`provider`).
@@ -405,6 +408,7 @@ impl Daemon {
                 scheduled: ScheduledInputs::open(&data_dir),
                 subs: crate::subs::Subs::new(policy.sub).with_stats_file(data_dir.join("sub-stats.json")),
                 procs: crate::procs::Procs::default(),
+                resources: Arc::new(crate::resources::Resources::new(Some(data_dir.join("command-ledger.json")))),
                 files,
                 providers: crate::provider::Providers::default(),
                 browser: crate::browser_agent::State::new(policy.browser, &data_dir),
@@ -1599,6 +1603,8 @@ impl Daemon {
         }
         // What a hook says is about to run is what an approval card labels.
         session.request_hook(event, &payload);
+        let project = { let spec = session.spec.lock(); spec.project_id.clone().unwrap_or_else(|| spec.cwd.clone()) };
+        self.resource_hook(session_id, agent, event, &payload, &project);
         if let Some(status) = hook_event_status(agent, event, &payload) {
             session.set_hook_status(status, hook_event_failed(event));
             if hook_event_limited(event, &payload) {
@@ -1991,6 +1997,8 @@ impl Daemon {
                 "sessions": self.sessions.read().len(),
                 // Looks at running processes made so far: only the app's requests make one.
                 "process_scans": self.procs.scans(),
+                // Samples of the machine and the sessions' resources (always on, `resources.rs`).
+                "resource_samples": self.resources.samples(),
                 // File transfers running now: an update waits for them.
                 "transfers": self.files.queue.active_count(),
             }),
@@ -2518,6 +2526,7 @@ impl Daemon {
             m if m.starts_with("owed.") => self.owed_rpc(m, &params)?,
             m if m.starts_with("pr.") => return self.pr_rpc(tx, id, m, params),
             m if m.starts_with("process.") => return self.process_rpc(tx, id, m, params),
+            m if m.starts_with("resources.") => self.resource_rpc(m, &params)?,
             // Undo, its preview and drop wait for the repository's snapshots and run git: they
             // answer from their own thread so this client's other requests are not held up.
             m @ ("checkpoint.undo_plan" | "checkpoint.undo" | "checkpoint.drop") => {

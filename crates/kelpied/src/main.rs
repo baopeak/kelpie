@@ -46,6 +46,7 @@ mod persist;
 mod ports;
 mod proc_tree;
 mod procs;
+mod resources;
 mod provider;
 mod pulls;
 mod runtimes;
@@ -268,6 +269,7 @@ fn serve() -> Result<()> {
     let rt = runtime()?;
     let result = rt.block_on(async {
         tokio::spawn(daemon.clone().ticker());
+        daemon.start_resource_monitor();
         tokio::spawn(mobile::autostart(daemon.clone()));
         daemon.notifier.resume();
         server::serve(daemon.clone(), kelpie_proto::endpoint()).await

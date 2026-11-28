@@ -125,7 +125,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// 50: the screen on a Mac: the `screens` and `sc_start` answers carry `os` (`mac` | `windows`), so the phone shows ⌘ ⌥ ⌃ ⇧ and the Mac's
 /// texts; a start or a text the Mac has not allowed is refused `no_screen_permission` / `no_accessibility` with a plain reason; and the
 /// `secure_input` state (a password field holds the Mac's keyboard). An older daemon says no `os`, which the phone takes as Windows.
-pub const API_LEVEL: u32 = 50;
+/// 51: the machine's resources, sampled always: `resources.get {history?, session?}` answers the machine's reading (CPU, run queue, memory and
+/// commit, disks, volumes, GPUs), a gauge per resource (`cpu`, `ram`, `disk`, `space`, `gpu`: `ok` | `busy` | `saturated` | null when unknown), each
+/// session's use now (with ten minutes of history when asked) and the commands it runs, and who uses each contended resource most; the
+/// `resources.changed` event carries the same without history after each sample; `resources.ledger {project?}` lists what each command an agent
+/// ran has cost so far; `daemon.info` says `resource_samples`. The user's only. An older daemon has none of it, so a client shows resources only at 51.
+pub const API_LEVEL: u32 = 51;
 /// Raised by a release that fixes a security problem in the daemon. Updates keep the previous
 /// daemon running with its sessions; an app whose level is higher keeps asking the user to switch
 /// (it never stops sessions by itself). Daemons that predate it report none: level 1.

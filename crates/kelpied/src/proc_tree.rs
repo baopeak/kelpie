@@ -141,6 +141,16 @@ mod imp {
             }
         }
 
+        /// The most memory (commit) the job's processes held together at any moment since the session started, in
+        /// bytes: Windows tracks it constantly, so a spike between two samples is not missed.
+        pub fn peak_commit(&self) -> Option<u64> {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+            // SAFETY: a job handle this tree owns and an out-buffer of the class's size.
+            let ok = unsafe { QueryInformationJobObject(self.job, JobObjectExtendedLimitInformation, (&mut info as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size, std::ptr::null_mut()) };
+            (ok != 0).then_some(info.PeakJobMemoryUsed as u64)
+        }
+
         /// Lets go of the processes still in the job: closing it no longer kills them (a command that opened
         /// an application keeps it).
         pub fn release(&self) {
@@ -309,6 +319,11 @@ mod imp {
 
         /// There is no list to ask for: the processes are found by walking parents from `root`.
         pub fn pids(&self) -> Option<Vec<u32>> {
+            None
+        }
+
+        /// No job keeps a peak here: the sampler's own readings are all there is.
+        pub fn peak_commit(&self) -> Option<u64> {
             None
         }
 

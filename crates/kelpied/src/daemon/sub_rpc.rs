@@ -276,7 +276,7 @@ impl Daemon {
 
     /// [`Self::reserve_slot`] with the finished task sessions already known (the run engine holds the run list's lock).
     fn reserve_slot_with(&self, caller: &str, spec: &SessionSpec, finished: &HashSet<String>) -> Result<subs::Slot<'_>> {
-        let input = CapsInput { mode: self.subs.policy.read().mode, restricted: spec.restricted, caller_depth: spec.depth, caller_children: 0, live_total: 0, cap: self.subs.cap(), load: self.mobile.load.level() };
+        let input = CapsInput { mode: self.subs.policy.read().mode, restricted: spec.restricted, caller_depth: spec.depth, caller_children: 0, live_total: 0, cap: self.subs.cap(), load: self.machine_load() };
         self.subs.reserve(caller, input, || self.live_sub_counts(caller, finished)).map_err(|e| anyhow!(e))
     }
 
@@ -862,7 +862,7 @@ impl Daemon {
     /// What is shown on a task that waits for room.
     fn wait_reason(&self, creator: &str, finished: &HashSet<String>) -> String {
         let (children, total) = self.live_sub_counts(creator, finished);
-        if self.mobile.load.level() >= crate::load::Level::L3 {
+        if self.machine_load() >= crate::load::Level::L3 {
             "waiting: this computer is under heavy load".into()
         } else if children >= subs::MAX_CHILDREN {
             format!("waiting for a free sub-session slot ({children} of {} of this session's busy)", subs::MAX_CHILDREN)
