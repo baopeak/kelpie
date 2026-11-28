@@ -16,10 +16,12 @@
 //! grouped by name.
 //!
 //! **Commands.** Between an agent's report that it runs a shell command (Claude's `PreToolUse` on `Bash`) and its report
-//! that the command ended, the session's samples are the command's: what its tree took above what it held when the command
-//! began. A command seen in at least one sample is learned by the ledger (`ledger.rs`, `command-ledger.json`), which is
-//! what an estimate of the next run is built from. Two commands running at once in one session are both charged the whole
-//! tree: an estimate errs high, never low.
+//! that the command ended, what the processes started since the command began take in the session's tree is the command's:
+//! the agent's own process, its MCP servers and an earlier dev server are never charged to it. A command seen in at least
+//! one sample is learned by the ledger (`ledger.rs`, `command-ledger.json`), which is what an estimate of the next run is
+//! built from. One that never got an end report (denied, blocked by a hook, stopped with Esc) is dropped at the turn's
+//! boundary, unlearned; one sent to the background is not measured. Two commands running at once in one session are both
+//! charged what either started: an estimate errs high, never low.
 
 pub mod ledger;
 #[cfg(test)]
@@ -52,6 +54,11 @@ const ENTER_AFTER: u32 = 2;
 const LEAVE_AFTER_MS: u64 = 10_000;
 /// Commands one session may have open at once; one past it is not measured.
 const MAX_OPEN: usize = 16;
+/// Samples in a row a gauge may miss (a counter that did not answer) before it reads as unknown.
+const MISSES_ALLOWED: u32 = 2;
+/// A process counts as a command's when it started at most this long before the command began (Unix start
+/// times are whole seconds).
+const START_SLACK_MS: u64 = 1_000;
 /// A command with no end reported after this long is dropped unlearned (its report was lost).
 const OPEN_FOR_AT_MOST_MS: u64 = 3 * 60 * 60 * 1000;
 /// Users of a contended resource listed: sessions and outside programs each.
@@ -188,16 +195,24 @@ pub struct Gauge {
     above: Option<(u32, State)>,
     /// Since when (ms) the samples asked for less, and the most of what they asked.
     below: Option<(u64, State)>,
+    /// Samples in a row that could not tell.
+    misses: u32,
 }
 
 impl Gauge {
     /// Takes what a sample at `now` (ms) asks for; true when the state changed.
     pub fn feed(&mut self, now: u64, want: Option<State>) -> bool {
         let Some(want) = want else {
+            // One counter that did not answer is not a change: the state holds for a couple of samples.
+            self.misses += 1;
+            if self.misses <= MISSES_ALLOWED {
+                return false;
+            }
             let changed = self.state.is_some();
             *self = Gauge::default();
             return changed;
         };
+        self.misses = 0;
         let Some(state) = self.state else {
             // The first thing known about it stands.
             self.state = Some(want);
@@ -248,14 +263,13 @@ pub struct Usage {
     pub procs: usize,
 }
 
-/// A command a session runs, while it runs.
+/// A command a session runs, while it runs. What it takes is what the processes started since it began take: the
+/// agent's own process (and its MCP servers, an earlier dev server) are never charged to it.
 #[derive(Debug, Clone)]
 struct Open {
     project: String,
     fingerprint: Fingerprint,
     began: u64,
-    /// The session's private memory when it began, MiB.
-    base_mb: f64,
     samples: u32,
     demand: Demand,
     cores_sum: f64,
@@ -299,6 +313,15 @@ pub struct Resources {
     wake: (std::sync::Mutex<bool>, std::sync::Condvar),
 }
 
+/// When a process started, in ms since the epoch (the scans keep whole seconds on Unix).
+fn started_ms(p: &Proc) -> u64 {
+    if cfg!(windows) {
+        p.start_time
+    } else {
+        p.start_time.saturating_mul(1000)
+    }
+}
+
 /// The machine's probe, kept by the sampling thread.
 #[derive(Default)]
 pub struct Probe(os::Probe);
@@ -329,16 +352,23 @@ impl Resources {
             g.at = now;
             // I/O moved since the last sample, by process: a process seen for the first time counts all it moved
             // (it started since); one that ended took its share with it.
-            let secs = secs.max(0.001);
+            // The sampler keeps samples at least a second apart; a rate over less would be noise.
+            let secs = secs.max(0.5);
             let mut io_now: HashMap<(u32, u64), u64> = HashMap::with_capacity(all.len());
             let mut io_delta: HashMap<u32, u64> = HashMap::with_capacity(all.len());
             for p in all {
                 let key = (p.pid, p.start_time);
                 let before = g.io_seen.get(&key).copied();
-                io_delta.insert(p.pid, before.map_or(if g.samples > 1 { p.io } else { 0 }, |b| p.io.saturating_sub(b)));
+                // Counted from scratch only when the previous table was read: after a failed read every process
+                // would look new and its whole lifetime's traffic would show as one burst.
+                let fresh = if g.samples > 1 && !g.io_seen.is_empty() { p.io } else { 0 };
+                io_delta.insert(p.pid, before.map_or(fresh, |b| p.io.saturating_sub(b)));
                 io_now.insert(key, p.io);
             }
-            g.io_seen = io_now;
+            // A failed read of the table keeps what the last good one saw.
+            if !all.is_empty() {
+                g.io_seen = io_now;
+            }
             let mut in_sessions: HashSet<u32> = HashSet::new();
             let live: HashSet<String> = sessions.iter().map(|s| s.tree.id.clone()).collect();
             g.tracks.retain(|id, _| live.contains(id));
@@ -360,15 +390,25 @@ impl Resources {
                 t.peak_private_mb = t.peak_private_mb.max(u.private_mb);
                 t.peak_commit_mb = s.peak_commit.map(mb).or(t.peak_commit_mb);
                 for o in t.open.values_mut() {
+                    let mut c = Usage::default();
+                    for p in s.tree.procs.iter().filter(|p| started_ms(p) + START_SLACK_MS >= o.began) {
+                        c.private_mb += mb(p.private);
+                        c.cores += f64::from(p.cpu) / 100.0;
+                        c.io_mbps += mb(io_delta.get(&p.pid).copied().unwrap_or(0)) / secs;
+                        if let Some((pct, gmb)) = reading.gpu_by_pid.get(&p.pid) {
+                            c.gpu_pct = c.gpu_pct.max(*pct);
+                            c.gpu_mb += *gmb as f64;
+                        }
+                    }
                     o.samples += 1;
-                    o.cores_sum += u.cores;
+                    o.cores_sum += c.cores;
                     let d = &mut o.demand;
-                    d.ram_mb = d.ram_mb.max(u.private_mb - o.base_mb);
-                    d.peak_cores = d.peak_cores.max(u.cores);
-                    d.io_mb += u.io_mbps * secs;
-                    d.peak_io_mbps = d.peak_io_mbps.max(u.io_mbps);
-                    d.gpu_pct = d.gpu_pct.max(u.gpu_pct);
-                    d.gpu_mb = d.gpu_mb.max(u.gpu_mb);
+                    d.ram_mb = d.ram_mb.max(c.private_mb);
+                    d.peak_cores = d.peak_cores.max(c.cores);
+                    d.io_mb += c.io_mbps * secs;
+                    d.peak_io_mbps = d.peak_io_mbps.max(c.io_mbps);
+                    d.gpu_pct = d.gpu_pct.max(c.gpu_pct);
+                    d.gpu_mb = d.gpu_mb.max(c.gpu_mb);
                 }
                 let lost: Vec<String> = t.open.iter().filter(|(_, o)| now.saturating_sub(o.began) > OPEN_FOR_AT_MOST_MS).map(|(k, _)| k.clone()).collect();
                 for k in lost {
@@ -398,8 +438,7 @@ impl Resources {
         if t.open.len() >= MAX_OPEN {
             return;
         }
-        let base_mb = t.ring.back().map_or(0.0, |u| u.private_mb);
-        t.open.insert(call.to_string(), Open { project: project.to_string(), fingerprint, began: now, base_mb, samples: 0, demand: Demand::default(), cores_sum: 0.0 });
+        t.open.insert(call.to_string(), Open { project: project.to_string(), fingerprint, began: now, samples: 0, demand: Demand::default(), cores_sum: 0.0 });
         drop(g);
         let (flag, cv) = &self.wake;
         *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
@@ -427,12 +466,11 @@ impl Resources {
         }
     }
 
-    /// The agent's turn ended: what it still has open ended with it (a report that never came).
-    pub fn turn_ended(&self, id: &str, now: u64) {
-        let open: Vec<Open> = self.inner.lock().tracks.get_mut(id).map(|t| t.open.drain().map(|(_, o)| o).collect()).unwrap_or_default();
-        let mut ledger = self.ledger.lock();
-        for o in open {
-            learn(&mut ledger, o, false, now);
+    /// A turn began or ended: a command still open never ran to an end the agent reported (the person denied it,
+    /// another hook blocked it, Esc stopped the turn). It is dropped, not learned: what it cost is not known.
+    pub fn turn_boundary(&self, id: &str) {
+        if let Some(t) = self.inner.lock().tracks.get_mut(id) {
+            t.open.clear();
         }
     }
 

@@ -2371,14 +2371,30 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
   after two samples in a row and falls after 10 s. For each contended resource, the snapshot names its biggest users: sessions, and
   programs outside them grouped by name.
 
+  Samples are at least 1 s apart: a command starting wakes the sampler from an idle pause, and a burst of starts cannot shrink
+  the interval. A gauge that misses one or two readings (a counter that did not answer) holds its state. Volumes are read per
+  drive root, and network drives and UNC paths are skipped.
+
   Commands are measured between Claude's `PreToolUse` on `Bash` and the matching `PostToolUse` or `PostToolUseFailure`, by `tool_use_id`.
-  A turn's `Stop` ends what is still open. A command's demand is its tree's peak above the private memory the session held when it began,
-  plus its CPU, I/O and GPU.
+  A command's demand is what the processes started since it began take of the session's tree: private memory at peak, CPU,
+  I/O and GPU. The agent's own process, its MCP servers and an earlier dev server are never charged to it.
+  - A command with no end report (denied, blocked by another hook, stopped with Esc) is dropped unlearned at the next
+    `UserPromptSubmit` or `Stop`.
+  - A `run_in_background` command is not measured.
+  - The ledger file is also written when the daemon saves its state on the way out.
+  - A ledger file that cannot be read is never written over: learning then stays in memory.
   - Commands seen in at least one sample are learned per (project, fingerprint, parallelism) in `command-ledger.json`, written with
     `save_state` at most every 30 s. Each entry keeps an EWMA with spread, and the last five memory peaks.
-  - The fingerprint keeps the program, its subcommand, `--release`-like flags and cargo packages, and reads the parallelism from
-    `-j`, `--jobs`, `--workers`, `--maxWorkers`, `-n`, go's `-p` and `CARGO_BUILD_JOBS`. Wrappers such as `cd … &&`, `VAR=` prefixes,
-    `npx`, `pnpm exec`, `uv run` and `python -m` are stripped first.
+  - The fingerprint keeps:
+    - the program;
+    - its subcommand, skipping flag values such as `git -C path`;
+    - a run script (`npm run build`);
+    - an interpreter's script file (`python render.py`);
+    - `--release`-like flags;
+    - cargo packages and pnpm filters.
+  - Parallelism is read from `-j`, `--jobs`, `--workers`, `--maxWorkers`, pytest's `-n`, go's `-p` and `CARGO_BUILD_JOBS`.
+  - Wrappers are stripped first: `cd … &&`, `VAR=` prefixes, `timeout`, `npx`, `pnpm exec`, `uv run` and `python -m`.
+  - At most 500 commands are kept, and 200 per project.
 
   `resources.get {history?, session?}`, `resources.ledger {project?}` and the `resources.changed` event (after each sample) are the
   user's only. The sub-session caps read the larger of the phone's load level and the monitor's: `L3` while memory is saturated.

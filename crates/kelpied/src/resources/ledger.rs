@@ -2,7 +2,7 @@
 //!
 //! A command is known by its project and its fingerprint (`cargo test --workspace`, `pnpm build`, `next build`) and the
 //! parallelism it ran with (`-j 2`): the same build costs about the same each time in the same project. Each run adds its
-//! demand: the most memory, CPU, disk traffic and GPU the session's processes took above what they held when it started.
+//! demand: the most memory, CPU, disk traffic and GPU the processes it started took.
 //! The figures are kept as a moving average with its spread (an EWMA), plus the last few memory peaks, which is what a
 //! later estimate is built from. Nothing here holds a command's text beyond its fingerprint, nor any of its output.
 
@@ -15,13 +15,18 @@ use serde::{Deserialize, Serialize};
 const ALPHA: f64 = 0.3;
 /// Memory peaks kept per command.
 const PEAKS_KEPT: usize = 5;
-/// Commands kept in all; the ones run longest ago go first.
+/// Commands kept in all, and per project; the ones run longest ago go first (one busy project never pushes out the others').
 const MAX_ENTRIES: usize = 500;
+const MAX_PER_PROJECT: usize = 200;
 
 /// Programs that only prepare the line for the command that does the work.
 const PREFIXES: [&str; 8] = ["env", "sudo", "time", "nice", "nohup", "command", "exec", "call"];
 /// A segment that is only one of these does no work worth measuring.
 const TRIVIAL: [&str; 10] = ["cd", "pushd", "popd", "export", "set", "echo", "true", ":", "source", "."];
+/// Interpreters: the script they run names the work (`python render.py`, `node build.js`).
+const INTERPRETERS: [&str; 13] = ["python", "python3", "py", "node", "bash", "sh", "pwsh", "powershell", "deno", "ruby", "perl", "tsx", "ts-node"];
+/// Flags before a subcommand that take a value (`git -C path status`, `pnpm --filter app build`): the value is not the subcommand.
+const VALUE_FLAGS: [&str; 13] = ["-C", "--manifest-path", "--filter", "-F", "--dir", "--prefix", "--cwd", "--config", "--git-dir", "--work-tree", "--target-dir", "--color", "--profile"];
 /// Programs whose first word after them names what they do (`cargo test`, `pnpm build`).
 const HAS_SUBCOMMAND: [&str; 20] = ["cargo", "pnpm", "npm", "yarn", "bun", "go", "docker", "git", "uv", "pip", "dotnet", "gradle", "gradlew", "make", "turbo", "nx", "playwright", "vitest", "next", "vite"];
 /// Flags that change what a command costs, kept in the fingerprint.
@@ -115,6 +120,18 @@ pub fn fingerprint(line: &str) -> Option<Fingerprint> {
                 w.remove(0);
             } else if PREFIXES.contains(&program(first).as_str()) {
                 w.remove(0);
+            } else if program(first) == "timeout" {
+                // `timeout [-k 5] 600 cargo test`: its flags and the duration go with it.
+                w.remove(0);
+                while w.first().is_some_and(|a| a.starts_with('-')) {
+                    let flag = w.remove(0);
+                    if matches!(flag.as_str(), "-k" | "-s" | "--kill-after" | "--signal") && !w.is_empty() {
+                        w.remove(0);
+                    }
+                }
+                if w.first().is_some_and(|a| a.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+                    w.remove(0);
+                }
             } else {
                 break;
             }
@@ -140,21 +157,67 @@ pub fn fingerprint(line: &str) -> Option<Fingerprint> {
             rest = r.collect();
         }
         let mut key = vec![prog.clone()];
+        let mut packages: Vec<String> = Vec::new();
+        // Where the subcommand or script is: the first word that is not a flag, a flag's value, a toolchain (`+nightly`) or a number.
+        let position = |rest: &[String], value_flags: &[&str]| {
+            let mut i = 0;
+            while i < rest.len() {
+                let a = rest[i].as_str();
+                if value_flags.contains(&a) {
+                    i += 2;
+                    continue;
+                }
+                if !a.starts_with('-') && !a.starts_with('+') && !a.chars().all(|c| c.is_ascii_digit()) {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            None
+        };
         if HAS_SUBCOMMAND.contains(&prog.as_str()) {
-            // The first word that is not a flag (cargo's `+nightly` toolchain is not one either); flags before it still count.
-            if let Some(at) = rest.iter().position(|a| !a.starts_with('-') && !a.starts_with('+') && !a.chars().all(|c| c.is_ascii_digit())) {
-                key.push(rest.remove(at).to_ascii_lowercase());
+            if let Some(at) = position(&rest, &VALUE_FLAGS) {
+                let sub = rest.remove(at).to_ascii_lowercase();
+                // `npm run build`, `pnpm run test`: the script is the work.
+                let script = matches!(prog.as_str(), "npm" | "pnpm" | "yarn" | "bun") && matches!(sub.as_str(), "run" | "run-script");
+                key.push(sub);
+                if script {
+                    if let Some(at) = position(&rest, &[]) {
+                        key.push(rest.remove(at));
+                    }
+                }
+            }
+        } else if INTERPRETERS.contains(&prog.as_str()) {
+            // The script, by its file name; code given inline (`-c`, `-e`, `-Command`) is just that.
+            let inline = rest.iter().position(|a| matches!(a.as_str(), "-c" | "-e" | "--eval" | "-Command" | "-command" | "-p"));
+            let script = position(&rest, &["-X", "-W", "-r", "--require", "--import", "-ExecutionPolicy"]).filter(|at| inline.is_none_or(|i| *at < i));
+            match (script, inline) {
+                (Some(at), _) => key.push(program(&rest.remove(at))),
+                (None, Some(i)) => key.push(rest[i].clone()),
+                _ => {}
             }
         }
-        let mut packages: Vec<String> = Vec::new();
         let mut i = 0;
         while i < rest.len() {
             let a = rest[i].as_str();
             let next = rest.get(i + 1).map(|s| s.as_str());
             let value_of = |flag: &str| a.strip_prefix(flag).and_then(|v| v.strip_prefix('='));
             match a {
-                "-j" | "--jobs" | "--workers" | "--maxWorkers" | "--max-workers" | "--concurrency" | "-n" => {
-                    // A number after it is the parallelism (`-j 2`, pytest-xdist's `-n 4`); anything else is left alone.
+                // pnpm's `--filter app` names the package that is built: part of what it costs.
+                "--filter" | "-F" if matches!(prog.as_str(), "pnpm" | "yarn" | "npm") => {
+                    if let Some(p) = next {
+                        packages.push(format!("--filter {p}"));
+                    }
+                    i += 1;
+                }
+                "-j" | "--jobs" | "--workers" | "--maxWorkers" | "--max-workers" | "--concurrency" => {
+                    // A number after it is the parallelism (`-j 2`); anything else is left alone.
+                    if let Some(n) = next.and_then(|n| n.parse().ok()) {
+                        jobs = jobs.or(Some(n));
+                        i += 1;
+                    }
+                }
+                // pytest-xdist's `-n 4` (elsewhere `-n` means anything).
+                "-n" if prog == "pytest" => {
                     if let Some(n) = next.and_then(|n| n.parse().ok()) {
                         jobs = jobs.or(Some(n));
                         i += 1;
@@ -181,6 +244,8 @@ pub fn fingerprint(line: &str) -> Option<Fingerprint> {
                         jobs = jobs.or(n.parse().ok());
                     } else if let Some(p) = a.strip_prefix("--package=") {
                         packages.push(format!("-p {p}"));
+                    } else if let Some(p) = a.strip_prefix("--filter=").filter(|_| matches!(prog.as_str(), "pnpm" | "yarn" | "npm")) {
+                        packages.push(format!("--filter {p}"));
                     }
                 }
             }
@@ -193,8 +258,9 @@ pub fn fingerprint(line: &str) -> Option<Fingerprint> {
     None
 }
 
-/// What one run of a command took, above what the session held when it started.
+/// What one run of a command took: what the processes it started took.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Demand {
     /// Most memory (private bytes of the whole tree), MiB.
     pub ram_mb: f64,
@@ -213,6 +279,7 @@ pub struct Demand {
 
 /// A running average and its spread.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Avg {
     pub mean: f64,
     pub var: f64,
@@ -236,6 +303,7 @@ impl Avg {
 
 /// Everything learned about one command.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Entry {
     pub runs: u32,
     pub failed: u32,
@@ -286,6 +354,7 @@ pub fn entry_key(project: &str, f: &Fingerprint) -> String {
 }
 
 #[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 struct File {
     version: u32,
     entries: BTreeMap<String, Entry>,
@@ -295,18 +364,24 @@ pub struct Ledger {
     path: Option<PathBuf>,
     entries: HashMap<String, Entry>,
     dirty: bool,
+    /// The file is there but could not be read (nor its previous version): nothing is written over it.
+    unreadable: bool,
 }
 
 impl Ledger {
-    /// The ledger in `path`. A file that cannot be read is kept as it is and the ledger starts empty without
-    /// saving over it until a new run is learned (`persist::load_state` keeps a copy of a damaged one).
+    /// The ledger in `path` (from its previous version when it is damaged). A file that can be read neither way (held
+    /// by another program, unreadable) is left alone: the ledger learns in memory and writes nothing over it, as a failed
+    /// read is not leave to replace what is there.
     pub fn open(path: Option<PathBuf>) -> Ledger {
-        let entries = path
-            .as_deref()
-            .and_then(|p| crate::persist::load_state::<File>(p).ok().flatten())
-            .map(|f| f.entries.into_iter().collect())
-            .unwrap_or_default();
-        Ledger { path, entries, dirty: false }
+        let (entries, unreadable) = match path.as_deref().map(crate::persist::load_state::<File>) {
+            Some(Ok(Some(f))) => (f.entries.into_iter().collect(), false),
+            Some(Err(e)) => {
+                tracing::warn!("command ledger not read ({e}); learning in memory only until the daemon restarts");
+                (HashMap::new(), true)
+            }
+            _ => (HashMap::new(), false),
+        };
+        Ledger { path, entries, dirty: false, unreadable }
     }
 
     #[cfg(test)]
@@ -321,10 +396,23 @@ impl Ledger {
 
     /// Learns one run.
     pub fn learn(&mut self, project: &str, f: &Fingerprint, d: &Demand, failed: bool, at: u64) {
+        let figures = [d.ram_mb, d.cores, d.peak_cores, d.io_mb, d.peak_io_mbps, d.gpu_pct, d.gpu_mb, d.secs];
+        if figures.iter().any(|x| !x.is_finite() || *x < 0.0) {
+            return;
+        }
         self.entries.entry(entry_key(project, f)).or_default().add(d, failed, at);
+        let prefix = format!("{project}\u{1f}");
+        let oldest_of = |entries: &HashMap<String, Entry>, own: bool| {
+            entries.iter().filter(|(k, _)| !own || k.starts_with(&prefix)).min_by_key(|(_, e)| e.last).map(|(k, _)| k.clone())
+        };
+        if self.entries.keys().filter(|k| k.starts_with(&prefix)).count() > MAX_PER_PROJECT {
+            if let Some(k) = oldest_of(&self.entries, true) {
+                self.entries.remove(&k);
+            }
+        }
         if self.entries.len() > MAX_ENTRIES {
-            if let Some(oldest) = self.entries.iter().min_by_key(|(_, e)| e.last).map(|(k, _)| k.clone()) {
-                self.entries.remove(&oldest);
+            if let Some(k) = oldest_of(&self.entries, false) {
+                self.entries.remove(&k);
             }
         }
         self.dirty = true;
@@ -332,7 +420,7 @@ impl Ledger {
 
     /// Writes the ledger when something was learned since the last write.
     pub fn save(&mut self) {
-        let Some(path) = self.path.as_deref().filter(|_| self.dirty) else { return };
+        let Some(path) = self.path.as_deref().filter(|_| self.dirty && !self.unreadable) else { return };
         let file = File { version: 1, entries: self.entries.iter().map(|(k, v)| (k.clone(), v.clone())).collect() };
         match serde_json::to_vec_pretty(&file).map_err(anyhow::Error::from).and_then(|b| crate::persist::save_state(path, &b)) {
             Ok(()) => self.dirty = false,

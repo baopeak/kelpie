@@ -322,7 +322,6 @@ impl Procs {
     }
 }
 
-/// When `pid` started, as the scans read it (to record a session's process when the session starts it).
 /// One session's processes as the resource sampler sums them (`resources`).
 pub struct TreeUsage {
     pub id: String,
@@ -361,6 +360,7 @@ impl Sampler {
     }
 }
 
+/// When `pid` started, as the scans read it (to record a session's process when the session starts it).
 pub fn start_time_of(pid: u32) -> Option<u64> {
     os::start_time_of(pid)
 }
@@ -452,6 +452,9 @@ mod os {
         identity_of_pid(pid)
     }
 
+    /// A process younger than this has no CPU use to report yet.
+    const MIN_LIFE_MS: u64 = 500;
+
     /// Reads the table of processes. Every call reads all of them (there is no cheaper way to ask for a few).
     #[derive(Default)]
     pub struct Reader {
@@ -484,6 +487,8 @@ mod os {
             }
             let now = Instant::now();
             let wall_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            // No process uses more than every core.
+            let most = std::thread::available_parallelism().map_or(1, |n| n.get()) as f32 * 100.0;
             let base = self.buf.as_ptr().cast::<u8>();
             let end = (filled as usize).min(self.buf.len() * 8);
             let mut table = Table::new();
@@ -509,14 +514,16 @@ mod os {
                         let wall = now.duration_since(then).as_secs_f64();
                         if wall > 0.0 { ((cpu_time - before) as f64 / 1e7 / wall * 100.0) as f32 } else { 0.0 }
                     }
-                    // Started since the previous reading: its use since it started. (On the first reading every
-                    // process is old, and its lifetime's average would say little about now.)
+                    // Started since the previous reading: its use since it started, once it has lived long enough for
+                    // the system's CPU clock (it ticks every ~16 ms) to say something. On the first reading every
+                    // process is old, and its lifetime's average would say little about now.
                     _ if !self.cpu.is_empty() => {
                         let alive_ms = wall_ms.saturating_sub(start_time);
-                        if alive_ms > 0 { (cpu_time as f64 / 1e4 / alive_ms as f64 * 100.0) as f32 } else { 0.0 }
+                        if alive_ms >= MIN_LIFE_MS { (cpu_time as f64 / 1e4 / alive_ms as f64 * 100.0) as f32 } else { 0.0 }
                     }
                     _ => 0.0,
-                };
+                }
+                .min(most);
                 cpu.insert(pid, (start_time, cpu_time, now));
                 // Its I/O counters follow the documented fields: reads, writes and other operations, then the bytes of each.
                 let io = (e.Reserved7[3].max(0) + e.Reserved7[4].max(0)) as u64;

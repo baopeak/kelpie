@@ -5,6 +5,12 @@ fn proc_(pid: u32, name: &str, private_mb: u64, cpu: f32, io: u64) -> Proc {
     Proc { pid, ppid: None, name: name.into(), start_time: 1, exe: None, mem: private_mb << 20, cpu, private: private_mb << 20, io }
 }
 
+/// `p` started at `ms` (since the epoch, as the sampler keeps it on this platform).
+fn started(mut p: Proc, ms: u64) -> Proc {
+    p.start_time = if cfg!(windows) { ms } else { ms / 1000 };
+    p
+}
+
 fn calm() -> MachineReading {
     MachineReading {
         cores: 4,
@@ -75,7 +81,10 @@ fn what_the_machine_cannot_tell_is_unknown_not_idle() {
     let mut g = Gauge::default();
     assert!(!g.feed(0, None));
     assert!(g.feed(0, Some(State::Ok)));
-    assert!(g.feed(1, None), "a counter that went away");
+    assert!(!g.feed(1, None), "one missed reading holds the state");
+    assert!(!g.feed(2, None));
+    assert_eq!(g.state, Some(State::Ok));
+    assert!(g.feed(3, None), "a counter that went away");
     assert_eq!(g.state, None);
 }
 
@@ -119,31 +128,35 @@ fn a_command_is_charged_what_the_tree_took_above_its_start() {
     let res = Resources::new(None);
     let agent = proc_(10, "claude.exe", 300, 5.0, 0);
     res.record(0, calm(), &[agent.clone()], vec![session("s", vec![agent.clone()])], 2.0);
-    res.command_started("s", "call-1", "cd crates && CARGO_BUILD_JOBS=2 cargo build --release -p kelpied", "proj", 1_000);
-    for (t, build_mb, cpu) in [(2_000, 900, 180.0), (4_000, 1500, 200.0)] {
-        let tree = vec![agent.clone(), proc_(11, "rustc.exe", build_mb, cpu, 0)];
+    res.command_started("s", "call-1", "cd crates && CARGO_BUILD_JOBS=2 cargo build --release -p kelpied", "proj", 3_000);
+    // A dev server the agent started earlier is not the build's either.
+    let server = proc_(9, "node.exe", 250, 30.0, 0);
+    for (t, build_mb, cpu) in [(4_000, 900, 180.0), (6_000, 1500, 200.0)] {
+        let tree = vec![agent.clone(), server.clone(), started(proc_(11, "rustc.exe", build_mb, cpu, 0), 3_200)];
         res.record(t, calm(), &tree, vec![session("s", tree.clone())], 2.0);
     }
     let running = &res.snapshot(false, Some("s"))["sessions"][0]["commands"][0];
     assert_eq!(running["fingerprint"], "cargo build --release -p kelpied");
     assert_eq!(running["jobs"], 2);
-    res.command_ended("s", "call-1", false, 5_000);
+    res.command_ended("s", "call-1", false, 7_000);
     let learned = res.ledger(Some("proj"));
     let e = &learned[0];
     assert_eq!(e["fingerprint"], "cargo build --release -p kelpied");
     assert_eq!(e["runs"], 1);
-    assert_eq!(e["ram_mb"], 1500.0, "the agent's own 300 MiB are not the build's");
+    assert_eq!(e["ram_mb"], 1500.0, "the agent's own 300 MiB and the server's 250 are not the build's");
     assert!((e["cores"].as_f64().unwrap() - 2.0).abs() < 0.11, "{}", e["cores"]);
     assert_eq!(e["secs"], 4.0);
     // A command no sample saw is not learned, and one with no end is ended by the turn.
-    res.command_started("s", "call-2", "cargo test", "proj", 5_100);
-    res.command_ended("s", "call-2", false, 5_200);
-    res.command_started("s", "call-3", "pnpm build", "proj", 5_300);
-    let tree = vec![agent.clone(), proc_(12, "node.exe", 400, 100.0, 0)];
-    res.record(6_000, calm(), &tree, vec![session("s", tree.clone())], 2.0);
-    res.turn_ended("s", 7_000);
+    res.command_started("s", "call-2", "cargo test", "proj", 7_100);
+    res.command_ended("s", "call-2", false, 7_200);
+    // One the agent never reported an end for (denied, blocked, stopped) is dropped at the turn's boundary.
+    res.command_started("s", "call-3", "pnpm build", "proj", 7_300);
+    let tree = vec![agent.clone(), started(proc_(12, "node.exe", 400, 100.0, 0), 7_400)];
+    res.record(8_000, calm(), &tree, vec![session("s", tree.clone())], 2.0);
+    res.turn_boundary("s");
+    res.command_ended("s", "call-3", false, 9_000);
     let keys: Vec<String> = res.ledger(None).as_array().unwrap().iter().map(|e| e["fingerprint"].as_str().unwrap().to_string()).collect();
-    assert_eq!(keys, ["pnpm build", "cargo build --release -p kelpied"]);
+    assert_eq!(keys, ["cargo build --release -p kelpied"]);
 }
 
 #[test]
@@ -204,7 +217,7 @@ fn a_command_is_known_by_what_does_the_work() {
     assert_eq!(fp("uv run pytest"), k("pytest", None));
     assert_eq!(fp("go build -p 2 ./..."), k("go build", Some(2)));
     assert_eq!(fp("C:\\Users\\x\\.cargo\\bin\\cargo.exe check"), k("cargo check", None));
-    assert_eq!(fp("\"C:/Program Files/nodejs/node.exe\" build.js"), k("node", None));
+    assert_eq!(fp("\"C:/Program Files/nodejs/node.exe\" build.js"), k("node build.js", None));
     assert_eq!(fp("git commit -n -m 'x'"), k("git commit", None), "-n with no number is not a parallelism");
     assert_eq!(fp("sudo nice make -j8 all"), k("make all", Some(8)));
     assert_eq!(fp("make -j 8 all"), k("make all", Some(8)));
@@ -212,6 +225,19 @@ fn a_command_is_known_by_what_does_the_work() {
     assert_eq!(fp("cd foo; echo hi"), None, "nothing in it does work");
     assert_eq!(fp(""), None);
     assert_eq!(fp("echo 'a && b' && cargo fmt"), k("cargo fmt", None), "quotes keep their separators");
+    assert_eq!(fp("npm run build"), k("npm run build", None));
+    assert_eq!(fp("pnpm run test -- --watch=false"), k("pnpm run test", None));
+    assert_eq!(fp("pnpm --filter app build"), k("pnpm build --filter app", None));
+    assert_eq!(fp("timeout 600 cargo test --workspace"), k("cargo test --workspace", None));
+    assert_eq!(fp("timeout -k 5 10m pnpm build"), k("pnpm build", None));
+    assert_eq!(fp("git -C D:/Works/x status"), k("git status", None), "a path is not the subcommand");
+    assert_eq!(fp("cargo --manifest-path a/Cargo.toml build"), k("cargo build", None));
+    assert_eq!(fp("python scripts/e2e/finish.py --fast"), k("python finish.py", None));
+    assert_eq!(fp("python -X utf8 render.py"), k("python render.py", None), "-X's value is not the script");
+    assert_eq!(fp("node -e \"console.log(1)\""), k("node -e", None));
+    assert_eq!(fp("bash"), k("bash", None));
+    assert_eq!(fp("pwsh -NoProfile -File build.ps1"), k("pwsh build", None));
+    assert_eq!(fp("ls -n 4"), k("ls", None), "-n is a parallelism only for pytest");
 }
 
 #[test]

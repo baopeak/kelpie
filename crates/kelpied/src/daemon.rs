@@ -1807,6 +1807,10 @@ impl Daemon {
 
     /// Persists metadata (when dirty) and screen snapshots (when changed or `force`).
     pub fn persist(&self, force: bool) {
+        // What the resource monitor learned is written on the way out as well (it saves on its own every 30 s).
+        if force {
+            self.resources.save();
+        }
         let _one_at_a_time = self.persisting.lock();
         if force || self.meta_dirty.swap(false, Ordering::Relaxed) {
             if let Err(e) = self.store.save_sessions(&self.saved_sessions()) {
