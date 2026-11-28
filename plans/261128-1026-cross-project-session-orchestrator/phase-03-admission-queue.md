@@ -1,5 +1,16 @@
 # Phase 3: One admission queue for every agent session
 
+Status: **implemented** on branch `feat/admission-queue`, stacked on phase 2. No API level: no new methods; tasks carry
+`waiting_since`, and their existing `note` says `queued (N in line): why`.
+
+As built:
+- **Queued state:** no new task state. A ready task that waits stays `pending`, with its reason as the note the Runs page now shows.
+- **Start vector:** memory only. CPU and disk enter as "no saturated gauge"; the commands an agent runs are the gate's (phase 4).
+- **Agent start cost:** the mean private memory of that agent's running sessions (an estimate that errs high), or 400 MiB.
+- **Automatic limit:** the memory beyond the system's share at 400 MiB an agent, from 2 to 32 (17 on this 8 GB machine).
+- **Background automations:** they wait a minute at a time, for at most 30 minutes, then are recorded as skipped with the busy
+  resource.
+
 ## Context
 
 `check_caps` counts only sub-sessions, using a count cap of 2 on an 8 GB machine. Run tasks start all at once (`runs.rs`, which has no concurrency limit). Automations start on their schedule regardless of load. A person's own new session is never refused, and must not be.

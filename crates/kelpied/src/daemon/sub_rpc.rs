@@ -353,6 +353,7 @@ impl Daemon {
         let caller_spec = caller.spec();
         // Refused before the user is asked about something that cannot happen.
         drop(self.reserve_slot(&caller_id, &caller_spec)?);
+        self.admit_sub_session(&caller_id, &caller_spec, None)?;
         let installed = agents::installed_presets();
         let known: Vec<&str> = agents::all_presets().into_iter().map(|p| p.id).collect();
         let plan = self.parse_spawn(params, &caller_spec, &known, &installed)?;
@@ -365,6 +366,7 @@ impl Daemon {
         let caller = self.by_id(caller_id).ok_or_else(|| anyhow!("the calling session no longer exists"))?;
         let caller_spec = caller.spec();
         drop(self.reserve_slot(caller_id, &caller_spec)?);
+        self.admit_sub_session(caller_id, &caller_spec, None)?;
         let installed = agents::installed_presets();
         let known: Vec<&str> = agents::all_presets().into_iter().map(|p| p.id).collect();
         let plan = self.parse_create(params, &caller_spec, &known, &installed)?;
@@ -430,6 +432,8 @@ impl Daemon {
         let caller = self.by_id(caller_id).ok_or_else(|| anyhow!("the calling session was closed"))?;
         let caller_spec = caller.spec();
         let _slot = self.reserve_slot(caller_id, &caller_spec)?;
+        // The machine again, now that the agent is known: the world moved while the user decided.
+        self.admit_sub_session(caller_id, &caller_spec, Some(&plan.agent))?;
         let name = plan.name.clone().or_else(|| (!plan.task.is_empty()).then(|| name_from_task(&plan.task)));
         let worktree = if plan.worktree {
             let slug = branch_slug(name.as_deref().unwrap_or("task"));

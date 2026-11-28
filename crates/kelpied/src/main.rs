@@ -16,6 +16,7 @@
 //!   kelpied browser tabs|snapshot|click|type|press|navigate|wait|screenshot|console|network|eval …   the browser panes (`kelpied browser --help`)
 //!   kelpied mcp                              the same as an MCP server on stdio (Kelpie injects it into Claude and Codex)
 
+mod admission;
 mod agents;
 mod askpass;
 mod auth;

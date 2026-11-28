@@ -29,6 +29,7 @@ use crate::scheduled_input::{ScheduledInputs, CONTINUE_TEXT};
 use crate::session::{json_out, now_millis, Answer, AnswerError, By, ClientTx, Session, SessionInfo, SessionSpec};
 use crate::status::{hook_event_failed, hook_event_limited, hook_event_status, turn_event};
 
+mod admission_gate;
 mod automation;
 mod browser_rpc;
 mod owed_rpc;
@@ -868,7 +869,16 @@ impl Daemon {
                 SessionView { alive: i.alive, working: i.status == Status::Working, idle: i.status == Status::Idle, exit_code: i.exit_code, last_activity: i.last_activity, interrupted: i.interrupted }
             })
         };
-        let (actions, changed) = self.runs.lock().step_gated(now_millis(), view, |creator, finished| self.run_gate(creator, finished));
+        // The admission queue's answer for every ready task, worked out before the run list is locked for the step.
+        let admission = self.admission_for_tasks();
+        let gate = |ready: runs::Ready<'_>, finished: &HashSet<String>| match admission.get(&format!("{}/{}", ready.run, ready.task)) {
+            Some(Err(why)) => runs::Gate::Wait(why.clone()),
+            _ => match ready.creator {
+                Some(creator) => self.run_gate(creator, finished),
+                None => runs::Gate::Open,
+            },
+        };
+        let (actions, changed) = self.runs.lock().step_gated(now_millis(), view, gate);
         self.runs_changed(&changed);
         for a in actions {
             // Said to the session that made the run, once; quick enough for the ticker.

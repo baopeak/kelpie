@@ -61,6 +61,8 @@ function TaskCard(props: { run: Run; task: RunTask }) {
         <Show when={tk().brought}><span title={broughtText(tk().brought!).full}>{broughtText(tk().brought!).short}</span></Show>
       </div>
       <Show when={tk().error}><div class="run-task-summary error">{tk().error}</div></Show>
+      {/* Ready but held back: why, and its place in the queue (the computer’s limits, or the sub-session limits). */}
+      <Show when={tk().status === "pending" && tk().note}><div class="run-task-summary queued">{tk().note}</div></Show>
       <Show when={tk().summary}>
         <div class="run-task-summary" onClick={() => setOpen(!open())} title={t("Click to expand")}>
           {open() ? tk().summary : tk().summary!.split("\n")[0]}

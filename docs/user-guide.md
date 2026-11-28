@@ -242,9 +242,9 @@ Settings → Usage & Resources.
 
 ### Priorities
 
-Rank your work so that Kelpie knows what matters most. Today the ranking orders the sessions waiting for you;
-Kelpie's sharing out of CPU, memory and disk between sessions is built on it as that arrives. Open **Priorities**
-from the palette, or with **Priority & reservation…** on a project's or a session's right-click menu.
+Rank your work so that Kelpie knows what matters most. The ranking orders the sessions waiting for you and the agents
+Kelpie starts on its own: the tasks of a run, sub-sessions and automations. Open **Priorities** from the palette, or with
+**Priority & reservation…** on a project's or a session's right-click menu.
 
 - **Projects** sit in three tiers: **Critical**, **Normal** (the default) and **Background**.
   - Drag a project to rank it inside its tier, or drop it on another tier to move it there.
@@ -266,6 +266,19 @@ from the palette, or with **Priority & reservation…** on a project's or a sess
 
 The ranking is kept by the daemon (`resource-policy.json`), so it holds with the window closed. Only you set it:
 an agent can neither raise itself nor lower another.
+
+**When the computer is full**, the agents Kelpie starts on its own wait their turn instead of crowding the machine:
+- **Run tasks:** a run's task that is ready shows *queued (N in line)* and why, for example memory kept free for the
+  system, a saturated disk, or the limit of running agents.
+- **Sub-sessions:** an agent asking for a sub-session is told the same.
+- **Order:** the higher ranked go first, and anything that has waited a long time moves up a tier every 15 minutes, so
+  background work is never starved.
+- **Critical and boosted work** may start even when memory is tight.
+- **Background automations:** a background project's clock automation waits while the computer is busy, for up to half
+  an hour.
+- **Your own sessions:** a session you open yourself is never held back.
+
+The limit on running agents is worked out from the computer's memory (about 17 on 8 GB), and can be set lower.
 
 ### Context, tokens and cost
 

@@ -148,6 +148,10 @@ fn describe_plan(plan: &ShellPlan) -> String {
     format!("would run {:?} {} in {}", plan.program, args.join(" "), plan.cwd)
 }
 
+/// A background project's clock automation waits this long at a time while the computer is busy, and this long at most.
+const AUTOMATION_DEFER_STEP: Duration = Duration::from_secs(60);
+const AUTOMATION_DEFER_AT_MOST: Duration = Duration::from_secs(30 * 60);
+
 impl Daemon {
     // ---------- who is the app ----------
 
@@ -407,6 +411,20 @@ impl Daemon {
         self.broadcast("automation.changed", json!({}));
     }
 
+    /// Which resource is busy, when work of a background project should wait for it (`None`: go ahead).
+    pub(super) fn busy_for_background(&self, project: Option<&str>) -> Option<&'static str> {
+        if crate::resource_policy::Tier::Background != project.map_or(crate::resource_policy::Tier::Normal, |p| {
+            self.priorities.lock().file.projects.get(p).map_or(crate::resource_policy::Tier::Normal, |q| q.tier)
+        }) {
+            return None;
+        }
+        let gauges = self.resources.snapshot(false, Some(""))["gauges"].clone();
+        [("cpu", "the CPU"), ("ram", "memory"), ("disk", "the disk"), ("space", "disk space")]
+            .into_iter()
+            .find(|(k, _)| matches!(gauges[*k].as_str(), Some("busy" | "saturated")))
+            .map(|(_, name)| name)
+    }
+
     /// Starts every clock automation that is due, each on its own thread so none waits for another and
     /// the ticker does not wait for any.
     pub(super) fn run_due_automations(self: &Arc<Self>) {
@@ -422,6 +440,19 @@ impl Daemon {
             for id in due {
                 let me = me.clone();
                 let _ = std::thread::Builder::new().name("kelpie-automation".into()).spawn(move || {
+                    // A background project's automation waits while the computer is busy, a minute at a time, for half an
+                    // hour at most; then this run is skipped, and the history says why.
+                    let project = me.automations.lock().list.iter().find(|a| a.id == id).and_then(|a| a.project_id.clone());
+                    let began = std::time::Instant::now();
+                    while let Some(busy) = me.busy_for_background(project.as_deref()) {
+                        if began.elapsed() >= AUTOMATION_DEFER_AT_MOST {
+                            let why = format!("skipped: {busy} stayed busy for 30 minutes, and this is a background project");
+                            me.automations.lock().record(&id, now_millis(), None, Some(why), None);
+                            return;
+                        }
+                        tracing::info!(automation = %id, busy, "background automation deferred");
+                        std::thread::sleep(AUTOMATION_DEFER_STEP);
+                    }
                     if let Err(e) = me.run_automation(&id, false, false) {
                         tracing::warn!("automation {id}: {e:#}");
                     }
