@@ -2425,12 +2425,13 @@ async fn link_socket(State(daemon): State<Arc<Daemon>>, axum::Extension(generati
 }
 
 fn sessions(daemon: &Daemon) -> Value {
+    let priorities = daemon.effective_map();
     json!(daemon
         .list()
         .into_iter()
         .map(|s| {
             // The person's boost of it: until when (null: until its turn ends), so the phone shows and ends it.
-            let boost = daemon.effective_priority(&s.spec.id).filter(|e| e.boosted);
+            let boost = priorities.get(&s.spec.id).filter(|e| e.boosted);
             json!({
                 "id": s.spec.id, "name": s.spec.name, "kind": s.spec.kind, "title": s.title,
                 "status": s.status, "unread": s.unread, "alive": s.alive, "chat": s.chat,
@@ -4010,7 +4011,8 @@ impl Translator {
             Some(kelpie_proto::KIND_JSON) => {
                 let body = &frame[5..];
                 let is = |event: &str| body.starts_with(format!(r#"{{"event":"{event}""#).as_bytes());
-                if is("session.updated") || is("session.closed") {
+                // A boost set, ended or run out changes the rows too (`boosted`, `boost_until`).
+                if is("session.updated") || is("session.closed") || is("policy.resources.changed") {
                     dirty.notify_one();
                     return Vec::new();
                 }
@@ -4941,7 +4943,8 @@ mod tests {
         let dirty = Notify::new();
         let mut t = Translator::default();
         let event = |name: &str, params: Value| crate::session::json_out(&json!({"event": name, "params": params})).data;
-        for name in ["session.updated", "session.closed"] {
+        // A boost set, ended or run out changes the rows as well.
+        for name in ["session.updated", "session.closed", "policy.resources.changed"] {
             assert!(t.translate(&r.daemon, &event(name, json!({})), &dirty).is_empty());
             tokio::time::timeout(Duration::from_millis(50), dirty.notified()).await.unwrap_or_else(|_| panic!("{name} did not wake the list"));
         }

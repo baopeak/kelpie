@@ -24,7 +24,7 @@
   "Drag to rank": "Kéo để xếp hạng",
   "Tier of {name}": "Hạng của {name}",
   "Priorities": "Ưu tiên",
-  "When the computer is short of CPU, memory or disk, the top gets the most. Sessions waiting for you still come first.": "Khi máy thiếu CPU, bộ nhớ hay ổ đĩa, mục đứng trên được chia nhiều nhất. Các phiên đang chờ bạn vẫn luôn đứng đầu.",
+  "Rank your work: what is higher is served first as Kelpie shares out the computer. Sessions waiting for you still come first.": "Xếp hạng công việc: mục đứng trên được phục vụ trước khi Kelpie chia tài nguyên của máy. Các phiên đang chờ bạn vẫn luôn đứng đầu.",
   "This daemon is older than the priorities: update Kelpie to rank your work.": "Daemon này cũ hơn tính năng ưu tiên: hãy cập nhật Kelpie để xếp hạng công việc.",
   "Boosted: {n} of {max}": "Đang ưu tiên tạm thời: {n}/{max}",
   "Reserved: {cores} of {maxCores} cores, {ram} of {maxRam}": "Đã giữ chỗ: {cores}/{maxCores} nhân, {ram}/{maxRam}",
@@ -38,5 +38,7 @@
   "Priority & reservation…": "Ưu tiên và giữ chỗ…",
   "Priorities…": "Ưu tiên…",
   "Two sessions are boosted already: {a} and {b}. End the boost of {a} and boost {name} instead?": "Đã có hai phiên được ưu tiên tạm thời: {a} và {b}. Dừng ưu tiên của {a} để ưu tiên {name} thay vào?",
-  "Not boosted.": "Chưa ưu tiên được."
+  "Not boosted.": "Chưa ưu tiên được.",
+  "<1 min": "<1 phút",
+  "{h} h {m} min": "{h} giờ {m} phút"
 }

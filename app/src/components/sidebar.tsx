@@ -178,7 +178,8 @@ function sessionMenu(s: SessionInfo): MenuItem[] {
     s.unread ? { label: t("Mark as read"), run: () => void store.markUnread(s.id, false) } : { label: t("Mark as unread"), run: () => void store.markUnread(s.id, true) },
   ];
   // Its priority: a boost, or the Priorities page on its line (a daemon before API 52 has none).
-  if (s.alive && store.daemonApi() >= PRIORITY_API) {
+  // A session on another computer has nothing here to share out: no priority for it.
+  if (s.alive && !s.remote && store.daemonApi() >= PRIORITY_API) {
     const eff = priorities()?.effective[s.id];
     items.push(null);
     if (eff?.boosted) {
