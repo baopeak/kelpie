@@ -268,8 +268,8 @@ The ranking is kept by the daemon (`resource-policy.json`), so it holds with the
 an agent can neither raise itself nor lower another.
 
 **When the computer is full**, the agents Kelpie starts on its own wait their turn instead of crowding the machine:
-- **Run tasks:** a run's task that is ready shows *queued (N in line)* and why, for example memory kept free for the
-  system, a saturated disk, or the limit of running agents.
+- **Run tasks:** a run's task that is ready shows *Queued* with why and its place in line, for example memory kept
+  free for the system, a saturated disk, or the limit of running agents.
 - **Sub-sessions:** an agent asking for a sub-session is told the same.
 - **Order:** the higher ranked go first, and anything that has waited a long time moves up a tier every 15 minutes, so
   background work is never starved.

@@ -1,7 +1,8 @@
 # Phase 3: One admission queue for every agent session
 
-Status: **implemented** on branch `feat/admission-queue`, stacked on phase 2. No API level: no new methods; tasks carry
-`waiting_since`, and their existing `note` says `queued (N in line): why`.
+Status: **implemented** on branch `feat/admission-queue`, stacked on phase 2. Reviewed, and every finding fixed (see
+[review](../reports/code-reviewer-261128-1648-admission-queue-phase3.md)). No API level: no new methods; tasks carry
+`waiting_since`, and their existing `note` says `Queued: why (in line: N)`.
 
 As built:
 - **Queued state:** no new task state. A ready task that waits stays `pending`, with its reason as the note the Runs page now shows.

@@ -5,7 +5,7 @@ import { For, Index, Show, createMemo, createResource, createSignal, lazy, onCle
 import { store } from "../lib/store";
 import { kindInfo, launchableAgents } from "../lib/agents";
 import { relTimeShort } from "../lib/platform";
-import { formatRelative, t } from "../lib/i18n";
+import { errorText, formatRelative, t } from "../lib/i18n";
 import { LoadBar } from "./load-bar";
 import { STATUS_LABEL, broughtText, cancelRun, createRun, deleteRun, finishedTask, lanes, planTasks, runList, runsById, taskAction, type Run, type RunTask, type TaskDraft } from "../lib/runs";
 import { Icon, KindGlyph } from "./icons";
@@ -62,7 +62,7 @@ function TaskCard(props: { run: Run; task: RunTask }) {
       </div>
       <Show when={tk().error}><div class="run-task-summary error">{tk().error}</div></Show>
       {/* Ready but held back: why, and its place in the queue (the computer’s limits, or the sub-session limits). */}
-      <Show when={tk().status === "pending" && tk().note}><div class="run-task-summary queued">{tk().note}</div></Show>
+      <Show when={tk().status === "pending" && tk().note}><div class="run-task-summary queued">{errorText(tk().note)}</div></Show>
       <Show when={tk().summary}>
         <div class="run-task-summary" onClick={() => setOpen(!open())} title={t("Click to expand")}>
           {open() ? tk().summary : tk().summary!.split("\n")[0]}

@@ -411,6 +411,51 @@ impl Daemon {
         self.broadcast("automation.changed", json!({}));
     }
 
+    /// Runs a due clock automation of a background project once the computer is not busy, looking a minute at a time for
+    /// half an hour at most; then that run is skipped and the history says why. One wait per automation: a firing that comes
+    /// while it waits is folded into it, so a frequent automation never stacks waits that would all run together. The wait
+    /// holds the daemon only while it looks, and an automation turned off or removed meanwhile does not run.
+    fn defer_background(self: &Arc<Self>, id: String, project: Option<String>) {
+        static WAITING: std::sync::LazyLock<Mutex<HashSet<String>>> = std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+        if !WAITING.lock().insert(id.clone()) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let key = id.clone();
+        let spawned = std::thread::Builder::new().name("kelpie-automation-wait".into()).spawn(move || {
+            let began = std::time::Instant::now();
+            let outcome = loop {
+                std::thread::sleep(AUTOMATION_DEFER_STEP);
+                let Some(me) = weak.upgrade() else { break None };
+                let enabled = me.automations.lock().list.iter().any(|a| a.id == id && a.enabled);
+                if !enabled {
+                    break None;
+                }
+                match me.busy_for_background(project.as_deref()) {
+                    None => break Some((me, None)),
+                    Some(busy) if began.elapsed() >= AUTOMATION_DEFER_AT_MOST => break Some((me, Some(busy))),
+                    Some(_) => {}
+                }
+            };
+            WAITING.lock().remove(&id);
+            match outcome {
+                Some((me, None)) => {
+                    if let Err(e) = me.run_automation(&id, false, false) {
+                        tracing::warn!("automation {id}: {e:#}");
+                    }
+                }
+                Some((me, Some(busy))) => {
+                    let why = format!("Skipped: {busy} stayed busy for 30 minutes, and this is a background project.");
+                    me.automations.lock().record(&id, now_millis(), None, Some(why), None);
+                }
+                None => {}
+            }
+        });
+        if spawned.is_err() {
+            WAITING.lock().remove(&key);
+        }
+    }
+
     /// Which resource is busy, when work of a background project should wait for it (`None`: go ahead).
     pub(super) fn busy_for_background(&self, project: Option<&str>) -> Option<&'static str> {
         if crate::resource_policy::Tier::Background != project.map_or(crate::resource_policy::Tier::Normal, |p| {
@@ -438,21 +483,14 @@ impl Daemon {
         let _ = std::thread::Builder::new().name("kelpie-automation".into()).spawn(move || {
             let due = me.automations.lock().due(now_millis());
             for id in due {
+                // A background project's automation waits while the computer is busy (see `defer_background`).
+                let project = me.automations.lock().list.iter().find(|a| a.id == id).and_then(|a| a.project_id.clone());
+                if me.busy_for_background(project.as_deref()).is_some() {
+                    me.defer_background(id, project);
+                    continue;
+                }
                 let me = me.clone();
                 let _ = std::thread::Builder::new().name("kelpie-automation".into()).spawn(move || {
-                    // A background project's automation waits while the computer is busy, a minute at a time, for half an
-                    // hour at most; then this run is skipped, and the history says why.
-                    let project = me.automations.lock().list.iter().find(|a| a.id == id).and_then(|a| a.project_id.clone());
-                    let began = std::time::Instant::now();
-                    while let Some(busy) = me.busy_for_background(project.as_deref()) {
-                        if began.elapsed() >= AUTOMATION_DEFER_AT_MOST {
-                            let why = format!("skipped: {busy} stayed busy for 30 minutes, and this is a background project");
-                            me.automations.lock().record(&id, now_millis(), None, Some(why), None);
-                            return;
-                        }
-                        tracing::info!(automation = %id, busy, "background automation deferred");
-                        std::thread::sleep(AUTOMATION_DEFER_STEP);
-                    }
                     if let Err(e) = me.run_automation(&id, false, false) {
                         tracing::warn!("automation {id}: {e:#}");
                     }

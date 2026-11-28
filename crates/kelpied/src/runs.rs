@@ -234,6 +234,8 @@ pub struct ReadyTask {
     pub kind: String,
     /// When it was first held back (0: not yet).
     pub waiting_since: u64,
+    /// It runs on another computer (an SSH host): this one's resources are not its to wait for.
+    pub remote: bool,
 }
 
 /// Whether a task may start now.
@@ -242,6 +244,8 @@ pub enum Gate {
     Open,
     /// No room yet (the sub-session limits, or the admission queue): it waits, ready, and the reason is shown on the task.
     Wait(String),
+    /// Not asked about yet (it became ready while the step ran): it stays ready, silently, for the next step.
+    Later,
     /// It never can (sub-sessions were turned off, or the session that made the run is gone).
     Fail(String),
 }
@@ -530,6 +534,7 @@ impl Runs {
                         cwd: run.cwd.clone(),
                         kind: t.kind.clone(),
                         waiting_since: t.waiting_since,
+                        remote: t.host.is_some(),
                     });
                 }
             }
@@ -617,9 +622,9 @@ impl Runs {
                             }
                         } else {
                             match gate(Ready { run: &run.id, task: &t.id, creator: run.creator.as_deref() }, &finished) {
+                                Gate::Later => {}
                                 Gate::Open => {
                                     t.note = None;
-                                    t.waiting_since = 0;
                                     t.status = TaskStatus::Starting;
                                     actions.push(Action::Start { run: run.id.clone(), task: t.id.clone() });
                                     moved = true;
@@ -750,7 +755,7 @@ mod tests {
         assert_eq!(actions, vec![Action::Start { run: "r1".into(), task: "a".into() }]);
         assert_eq!(runs.list[0].tasks[0].status, TaskStatus::Starting);
         assert_eq!(runs.list[0].tasks[0].note, None, "the reason goes when it starts");
-        assert_eq!(runs.list[0].tasks[0].waiting_since, 0);
+        assert_eq!(runs.list[0].tasks[0].waiting_since, 1, "kept: a start that fails puts it back in line where it was");
         // Never: the task fails and what depends on it is skipped.
         runs.list[0].tasks[0].status = TaskStatus::Pending;
         let (actions, _) = runs.step_gated(4, none, |_, _| Gate::Fail("turned off".into()));
