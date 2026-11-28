@@ -189,7 +189,8 @@ pub fn authorize(d: &Daemon, role: &Role, method: &str, params: &mut Value) -> R
     // `sub.*` speak for the caller's own session too: a program cannot report as, read the mail of, close
     // the sub-sessions of, or message as another session. `sub.answer` and `sub.pending` are the user's. A page is opened in the
     // caller's own project, and browser panes are used as the caller.
-    if matches!(method, "hook.report" | "run.report" | "owed.open" | "owed.list" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open" | "browser.call" | "window.call") {
+    // The command gate is asked for the caller's own commands only.
+    if matches!(method, "hook.report" | "run.report" | "owed.open" | "owed.list" | "sub.spawn" | "sub.message" | "sub.report" | "sub.inbox" | "sub.close" | "page.open" | "browser.call" | "window.call" | "gate.acquire") {
         if let Some(obj) = params.as_object_mut() {
             obj.insert("session_id".into(), Value::String(id.clone()));
             // Whether the caller proved it is that session (a claimed id proves nothing).

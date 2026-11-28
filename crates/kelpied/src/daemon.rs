@@ -2565,7 +2565,9 @@ impl Daemon {
             "gate.acquire" => {
                 let (me, tx, id) = (self.clone(), tx.clone(), id.clone());
                 std::thread::Builder::new().name("kelpie-gate".into()).spawn(move || {
-                    let reply = match me.gate_acquire(&params) {
+                    // A hook that went (killed, timed out) is not waited for, and its command takes no share.
+                    let gone = || tx.is_closed();
+                    let reply = match me.gate_acquire(&params, &gone) {
                         Ok(v) => json!({"id": id, "result": v}),
                         Err(e) => json!({"id": id, "error": {"message": format!("{e:#}")}}),
                     };

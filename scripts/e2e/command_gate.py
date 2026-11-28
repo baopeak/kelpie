@@ -7,8 +7,8 @@ writes for a `Bash` tool call into the hook, inside its own session (so the hook
 does), and keeps what the hook prints. It checks:
 - a light command gets no output (it runs as written, and nothing is ever approved);
 - B's heavy build runs as written and is kept as running;
-- A's build, on a computer shared with B's by priority, is rewritten to fewer jobs, with a note for the agent and every
-  other field of the tool call kept;
+- A's build, on a computer shared with B's by priority, is rewritten to fewer jobs (the command keeps its first words,
+  so a person's allow rule for it still matches), with a note for the agent and every other field kept;
 - once B reports its build ended, A's next build runs as written.
 Never touches the user's daemon.
 """
@@ -91,9 +91,9 @@ try:
     hs = (out or {}).get("hookSpecificOutput", {})
     new = hs.get("updatedInput", {})
     print("  A was told:", json.dumps(hs)[:400], flush=True)
-    check("the background session's build is given fewer jobs", new.get("command", "").startswith("CARGO_BUILD_JOBS=1 cargo build"), new.get("command"))
+    check("the background session's build is given fewer jobs", new.get("command", "") == "cargo build -j 1", new.get("command"))
     check("…with every other field of the call kept", new.get("description") == "build it" and new.get("timeout") == 600000, new)
-    check("…with a note for the agent", "fit this session's share" in hs.get("additionalContext", ""), hs.get("additionalContext"))
+    check("…with a note for the agent", "this session's share of the computer" in hs.get("additionalContext", ""), hs.get("additionalContext"))
     check("…and never an approval", "permissionDecision" not in hs, hs)
     # B's build ends (Claude's PostToolUse), and A's turn begins again: A's next build has the computer to itself.
     c.call("hook.report", {"session_id": b["id"], "agent": "claude", "payload": {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "b1"}})

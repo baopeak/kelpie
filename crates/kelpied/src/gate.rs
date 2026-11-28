@@ -19,9 +19,9 @@ use crate::resources::ledger::{Entry, Fingerprint};
 /// How a command's parallelism is set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Knob {
-    /// `CARGO_BUILD_JOBS=N` before it, or its own `-j N` changed.
+    /// `-j N` after the subcommand (before any `--`), or its own `-j` changed.
     Cargo,
-    /// `-jN` after the program (make, ninja).
+    /// `-jN` at the end of the make or ninja command, or its own `-j` changed.
     MakeJobs,
     /// `-p N` after the subcommand (go).
     GoP,
@@ -177,12 +177,14 @@ pub fn decide(ask: &Ask, running: &[Running], m: &Machine) -> Verdict {
     // The memory it may take: what is available beyond what is kept free and what recent starts will still take.
     let free = m.avail_mb.map(|a| a - m.pending_mb - if ask.critical { m.floor_mb / 2.0 } else { m.floor_mb + m.reserved_others_mb });
     let fits = |e: &Estimate| free.is_none_or(|f| e.ram_mb <= f);
-    let cores_fit = |e: &Estimate| e.jobs <= core_share || p.knob.is_none() || running.is_empty();
+    // The cores are shared by lowering the parallelism: a command that cannot be lowered is never held for cores alone.
+    let can_lower = ask.may_rewrite && p.knob.is_some();
+    let cores_fit = |e: &Estimate| !can_lower || e.jobs <= core_share || running.is_empty();
     if fits(&as_written) && cores_fit(&as_written) {
         return Verdict::Run(as_written);
     }
     // Fewer jobs, when the command has a knob and the person allows it: the most that fits both shares.
-    if ask.may_rewrite && p.knob.is_some() {
+    if can_lower {
         let by_memory = |jobs: u32| fits(&estimate(p, jobs, None));
         let mut jobs = written.min(core_share);
         while jobs > 1 && !by_memory(jobs) {
@@ -197,102 +199,160 @@ pub fn decide(ask: &Ask, running: &[Running], m: &Machine) -> Verdict {
     if running.is_empty() {
         return Verdict::Run(as_written);
     }
-    let need = if p.knob.is_some() && ask.may_rewrite { estimate(p, 1, None).ram_mb } else { as_written.ram_mb };
+    let need = if can_lower { estimate(p, 1, None).ram_mb } else { as_written.ram_mb };
     Verdict::Hold(match free {
         Some(f) => format!("it needs about {need:.0} MiB and {:.0} MiB is free beyond what is kept for the system and others", f.max(0.0)),
         None => "the cores are shared with the heavy commands running".to_string(),
     })
 }
 
-/// `command` with `jobs` set by `knob` in the segment that does the work (`f`'s program); none when the segment is not found.
+/// A word of a command line: where it is (quotes included) and what it says (quotes taken off).
+#[derive(Debug)]
+struct Tok {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+/// The words of `line` (one segment, no separators), quote-aware; none when a quote is left open.
+fn tokens(line: &str, base: usize) -> Option<Vec<Tok>> {
+    let mut out = Vec::new();
+    let (mut start, mut text, mut quote, mut open) = (0, String::new(), None::<char>, false);
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => text.push(c),
+            (None, '"' | '\'') => {
+                if !open {
+                    (start, open) = (i, true);
+                }
+                quote = Some(c);
+            }
+            (None, c) if c.is_whitespace() => {
+                if open {
+                    out.push(Tok { start: base + start, end: base + i, text: std::mem::take(&mut text) });
+                    open = false;
+                }
+            }
+            (None, c) => {
+                if !open {
+                    (start, open) = (i, true);
+                }
+                text.push(c);
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if open {
+        out.push(Tok { start: base + start, end: base + line.len(), text });
+    }
+    Some(out)
+}
+
+/// The byte ranges of `command`'s segments, split at `&&`, `||`, `;` and `|` outside quotes; none for a command of
+/// several lines or with a quote left open (it is not changed then).
+fn segment_ranges(command: &str) -> Option<Vec<(usize, usize)>> {
+    let mut out = Vec::new();
+    let (mut start, mut quote) = (0, None::<char>);
+    let bytes = command.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '\n' | '\r') => return None,
+            (None, '&' | '|') if bytes.get(i + 1) == Some(&bytes[i]) => {
+                out.push((start, i));
+                i += 1;
+                start = i + 1;
+            }
+            (None, ';' | '|') => {
+                out.push((start, i));
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    out.push((start, command.len()));
+    Some(out)
+}
+
+/// `C:/tools/cargo.exe` → `cargo`.
+fn stem(word: &str) -> String {
+    let name = word.rsplit(['/', '\\']).next().unwrap_or(word).to_ascii_lowercase();
+    [".exe", ".cmd", ".bat"].iter().find_map(|e| name.strip_suffix(e).map(str::to_string)).unwrap_or(name)
+}
+
+/// Runners whose next word is the program (`npx playwright`, `pnpm exec vitest`).
+fn is_runner(words: &[&str]) -> bool {
+    matches!(words, ["npx"] | ["pnpx"] | ["bunx"]) || matches!(words, [pm, "exec" | "dlx" | "x"] if matches!(*pm, "pnpm" | "yarn" | "npm" | "bun"))
+}
+
+/// `command` with its parallelism set to `jobs` by `knob`, in the one segment that does the work (`f`), so that the command
+/// still starts with the same words (a person's allow rule such as `Bash(cargo build:*)` still matches it). None, and the
+/// command is left as it is, whenever that cannot be done for sure: several lines, a wrapper before the program (`timeout`,
+/// `nice`, `env`), the program not where the fingerprint says, or a flag only after `--` (the program's own arguments).
 pub fn rewrite(command: &str, f: &Fingerprint, knob: Knob, jobs: u32) -> Option<String> {
-    let mut words = f.key.split_whitespace();
-    let program = words.next()?;
-    let sub = words.next();
-    // The program's word in the command (as written: `cargo`, `C:/…/cargo.exe`, `npx playwright`).
-    let at = find_word(command, program)?;
-    let after_program = at + word_len(command, at);
-    let after_sub = sub.and_then(|s| find_word(&command[after_program..], s).map(|i| after_program + i + s.len())).unwrap_or(after_program);
-    let insert = |pos: usize, text: &str| format!("{}{}{}", &command[..pos], text, &command[pos..]);
-    match knob {
-        Knob::Cargo => {
-            let segment_end = segment_end(command, at);
-            if let Some(re) = flag_value(&command[at..segment_end], &["-j", "--jobs"]) {
-                return Some(format!("{}{}{}", &command[..at + re.0], jobs, &command[at + re.1..]));
-            }
-            // Before the program: `CARGO_BUILD_JOBS=2 cargo build`, so arguments after `--` stay the tests'.
-            Some(insert(at, &format!("CARGO_BUILD_JOBS={jobs} ")))
+    let mut want = f.key.split_whitespace();
+    let program = want.next()?;
+    let sub = want.next().filter(|w| !w.starts_with('-'));
+    for (s, e) in segment_ranges(command)? {
+        let seg = &command[s..e];
+        if crate::resources::ledger::fingerprint(seg).as_ref().map(|g| &g.key) != Some(&f.key) {
+            continue;
         }
-        Knob::MakeJobs => {
-            let segment_end = segment_end(command, at);
-            if let Some(re) = flag_value(&command[at..segment_end], &["-j", "--jobs"]) {
-                return Some(format!("{}{}{}", &command[..at + re.0], jobs, &command[at + re.1..]));
-            }
-            Some(insert(after_program, &format!(" -j{jobs}")))
+        let toks = tokens(seg, s)?;
+        // Leading `VAR=value` assignments are kept; any other wrapper means the command is not changed.
+        let first = toks.iter().position(|t| !(t.text.contains('=') && t.text.split('=').next().is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))))?;
+        // The program, right away or after a runner (`npx`, `pnpm exec`).
+        let p = (first..toks.len().min(first + 3)).find(|i| stem(&toks[*i].text) == program)?;
+        let before: Vec<String> = toks[first..p].iter().map(|t| stem(&t.text)).collect();
+        if p > first && !is_runner(&before.iter().map(String::as_str).collect::<Vec<_>>()) {
+            return None;
         }
-        Knob::GoP => Some(insert(after_sub, &format!(" -p {jobs}"))),
-        Knob::Workers | Knob::MaxWorkers => {
-            let flag = if knob == Knob::Workers { "--workers" } else { "--maxWorkers" };
-            let segment_end = segment_end(command, at);
-            if let Some(re) = flag_value(&command[at..segment_end], &[flag]) {
-                return Some(format!("{}{}{}", &command[..at + re.0], jobs, &command[at + re.1..]));
+        let dash = toks.iter().position(|t| t.text == "--").unwrap_or(toks.len());
+        let at_sub = match sub {
+            Some(sub) => (p + 1..dash).find(|i| toks[*i].text.eq_ignore_ascii_case(sub))?,
+            None => p,
+        };
+        let flags: &[&str] = match knob {
+            Knob::Cargo | Knob::MakeJobs => &["-j", "--jobs"],
+            Knob::GoP => &["-p"],
+            Knob::Workers => &["--workers"],
+            Knob::MaxWorkers => &["--maxWorkers", "--max-workers"],
+        };
+        // A parallelism the command already sets (before `--`) is changed in place.
+        for i in p + 1..dash {
+            let t = &toks[i];
+            for flag in flags {
+                let attached = t.text.strip_prefix(flag).and_then(|r| r.strip_prefix('=').or((!r.is_empty() && flag.len() == 2).then_some(r)));
+                if let Some(n) = attached.filter(|n| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty()) {
+                    let at = t.end - n.len();
+                    return Some(format!("{}{}{}", &command[..at], jobs, &command[t.end..]));
+                }
+                if t.text == *flag {
+                    if let Some(next) = toks.get(i + 1).filter(|n| i + 1 < dash && n.text.chars().all(|c| c.is_ascii_digit()) && !n.text.is_empty()) {
+                        return Some(format!("{}{}{}", &command[..next.start], jobs, &command[next.end..]));
+                    }
+                }
             }
-            Some(insert(after_sub, &format!(" {flag}={jobs}")))
         }
-    }
-}
-
-/// Where `word` starts as a whole word in `s` (or as the stem of a path to it: `C:/…/cargo.exe`).
-fn find_word(s: &str, word: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut from = 0;
-    while let Some(i) = s[from..].to_ascii_lowercase().find(word).map(|i| i + from) {
-        let before_ok = i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'/' | b'\\' | b'"' | b'\'' | b';' | b'&' | b'|' | b'(');
-        let end = i + word.len();
-        let after_ok = end == s.len() || matches!(bytes[end], b' ' | b'\t' | b'.' | b'"' | b'\'' | b';' | b'&' | b'|' | b')');
-        if before_ok && after_ok {
-            // Back to the start of a path or quote, so an inserted prefix goes before the whole program word.
-            let mut start = i;
-            while start > 0 && !matches!(bytes[start - 1], b' ' | b'\t' | b';' | b'&' | b'|' | b'(') {
-                start -= 1;
-            }
-            return Some(start);
-        }
-        from = i + 1;
-    }
-    None
-}
-
-/// The length of the word starting at `at` (through a quoted path).
-fn word_len(s: &str, at: usize) -> usize {
-    let rest = &s[at..];
-    if let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
-        return rest[1..].find(q).map_or(rest.len(), |i| i + 2);
-    }
-    rest.find([' ', '\t', ';', '&', '|', ')']).unwrap_or(rest.len())
-}
-
-/// Where the command segment that starts at `at` ends (the next `&&`, `||`, `;`, `|`).
-fn segment_end(s: &str, at: usize) -> usize {
-    s[at..].find(['&', '|', ';']).map_or(s.len(), |i| at + i)
-}
-
-/// The byte range of the number after one of `flags` in `s` (`-j 4`, `-j4`, `--jobs=4`).
-fn flag_value(s: &str, flags: &[&str]) -> Option<(usize, usize)> {
-    for flag in flags {
-        let mut from = 0;
-        while let Some(i) = s[from..].find(flag).map(|i| i + from) {
-            let mut j = i + flag.len();
-            if s[j..].starts_with('=') || s[j..].starts_with(' ') {
-                j += 1;
-            }
-            let digits = s[j..].bytes().take_while(u8::is_ascii_digit).count();
-            let boundary = i == 0 || s.as_bytes()[i - 1] == b' ';
-            if digits > 0 && boundary {
-                return Some((j, j + digits));
-            }
-            from = i + 1;
-        }
+        let (at, flag) = match knob {
+            Knob::Cargo => (toks[at_sub].end, format!(" -j {jobs}")),
+            Knob::MakeJobs => (toks[dash - 1].end, format!(" -j{jobs}")),
+            Knob::GoP => (toks[at_sub].end, format!(" -p {jobs}")),
+            Knob::Workers => (toks[at_sub].end, format!(" --workers={jobs}")),
+            Knob::MaxWorkers => (toks[at_sub].end, format!(" --maxWorkers={jobs}")),
+        };
+        return Some(format!("{}{}{}", &command[..at], flag, &command[at..]));
     }
     None
 }
@@ -375,17 +435,33 @@ mod tests {
     }
 
     #[test]
-    fn the_parallelism_is_set_where_the_tool_reads_it() {
-        let rw = |c: &str, jobs| rewrite(c, &fp(c), profile(&fp(c)).knob.unwrap(), jobs).unwrap();
-        assert_eq!(rw("cargo build --release", 2), "CARGO_BUILD_JOBS=2 cargo build --release");
-        assert_eq!(rw("cd crates && cargo test -p kelpied -- --nocapture", 1), "cd crates && CARGO_BUILD_JOBS=1 cargo test -p kelpied -- --nocapture");
-        assert_eq!(rw("cargo build -j 8 && echo ok", 2), "cargo build -j 2 && echo ok");
-        assert_eq!(rw("\"C:/Users/x/.cargo/bin/cargo.exe\" check", 3), "CARGO_BUILD_JOBS=3 \"C:/Users/x/.cargo/bin/cargo.exe\" check");
-        assert_eq!(rw("make -j8 all", 2), "make -j2 all");
-        assert_eq!(rw("make all", 2), "make -j2 all");
-        assert_eq!(rw("go test ./...", 2), "go test -p 2 ./...");
-        assert_eq!(rw("npx playwright test e2e/", 1), "npx playwright test --workers=1 e2e/");
-        assert_eq!(rw("npx playwright test --workers=4", 2), "npx playwright test --workers=2");
-        assert_eq!(rw("pnpm exec vitest run", 2), "pnpm exec vitest run --maxWorkers=2");
+    fn the_parallelism_is_set_where_the_tool_reads_it_and_the_command_keeps_its_first_words() {
+        let rw = |c: &str, jobs| rewrite(c, &fp(c), profile(&fp(c)).knob.unwrap(), jobs);
+        let ok = |c: &str, jobs| rw(c, jobs).unwrap();
+        assert_eq!(ok("cargo build --release", 2), "cargo build -j 2 --release");
+        assert_eq!(ok("cd crates && cargo test -p kelpied -- --nocapture", 1), "cd crates && cargo test -j 1 -p kelpied -- --nocapture");
+        assert_eq!(ok("cargo build -j 8 && echo ok", 2), "cargo build -j 2 && echo ok");
+        assert_eq!(ok("cargo build -j8", 2), "cargo build -j2");
+        assert_eq!(ok("cargo build --jobs=8", 2), "cargo build --jobs=2");
+        assert_eq!(ok("\"C:/Program Files/x/cargo.exe\" check", 3), "\"C:/Program Files/x/cargo.exe\" check -j 3", "a quoted path with a space stays whole");
+        assert_eq!(ok("cargo +nightly build", 2), "cargo +nightly build -j 2");
+        assert_eq!(ok("RUST_LOG=info cargo test", 2), "RUST_LOG=info cargo test -j 2");
+        assert_eq!(ok("make -j8 all", 2), "make -j2 all");
+        assert_eq!(ok("make all", 2), "make all -j2");
+        assert_eq!(ok("go test ./...", 2), "go test -p 2 ./...");
+        assert_eq!(ok("go test -p 8 ./...", 2), "go test -p 2 ./...");
+        assert_eq!(ok("npx playwright test e2e/", 1), "npx playwright test --workers=1 e2e/");
+        assert_eq!(ok("npx playwright test --workers=4", 2), "npx playwright test --workers=2");
+        assert_eq!(ok("pnpm exec vitest run", 2), "pnpm exec vitest run --maxWorkers=2");
+        // The work's own segment, never an earlier mention of the program.
+        assert_eq!(ok("cd vendor/cargo && cargo build", 2), "cd vendor/cargo && cargo build -j 2");
+        assert_eq!(ok("echo 'cargo build now' && cargo build", 2), "echo 'cargo build now' && cargo build -j 2");
+        // A flag after `--` is the program's own; none set before it: one is added before `--`.
+        assert_eq!(ok("cargo run -- -j 16", 2), "cargo run -j 2 -- -j 16");
+        // Left alone when it cannot be done for sure.
+        assert_eq!(rw("timeout 900 cargo test", 2), None, "a wrapper");
+        assert_eq!(rw("nice cargo build", 2), None);
+        assert_eq!(rw("cargo build\ncargo test", 2), None, "several lines");
+        assert_eq!(rw("cargo build 'unclosed", 2), None);
     }
 }
