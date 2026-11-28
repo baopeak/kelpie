@@ -24,8 +24,9 @@ describe("priorities", () => {
     expect(projects[0]).toEqual({ id: "a" });
   });
 
-  it("puts a dropped project before the one it was dropped on, or last", () => {
+  it("puts a dropped project in the place of the one it was dropped on, or last", () => {
     expect(reorder(["a", "b", "c"], "c", "a")).toEqual(["c", "a", "b"]);
+    expect(reorder(["a", "b", "c"], "a", "b")).toEqual(["b", "a", "c"]);
     expect(reorder(["a", "b", "c"], "a", null)).toEqual(["b", "c", "a"]);
     // A project from another tier joins this one.
     expect(reorder(["a", "b"], "x", "b")).toEqual(["a", "x", "b"]);

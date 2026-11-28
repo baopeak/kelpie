@@ -4,7 +4,7 @@ import { createSignal } from "solid-js";
 import { store, sessionLabel } from "./store";
 import { confirmDialog } from "./confirm-dialog";
 import { t } from "./i18n";
-import { applyPriorities, priorities, setSessionPriority, type BoostLength, type Reserve, type Tier } from "./priorities";
+import { applyPriorities, priorities, setSessionPriority, type BoostLength, type Priorities, type Reserve, type Tier } from "./priorities";
 import type { SessionInfo } from "./types";
 
 /** What the Priorities page opens on (a project or session id), set by the menus that open it. */
@@ -35,10 +35,20 @@ export async function boostSession(s: SessionInfo, length: BoostLength) {
   }
 }
 
-export const endBoost = (s: SessionInfo) => setSessionPriority(s.id, { boost: "off" }).then(applyPriorities, (e) => store.notify(String(e)));
+/** Applies the daemon's answer; a refusal is shown. True when the change was made. */
+export async function applied(answer: Promise<Priorities>): Promise<boolean> {
+  try {
+    applyPriorities(await answer);
+    return true;
+  } catch (e) {
+    store.notify(String(e));
+    return false;
+  }
+}
+
+export const endBoost = (s: SessionInfo) => applied(setSessionPriority(s.id, { boost: "off" }));
 
 /** A session's own tier, or back to its project's (`project`). */
-export const setSessionTier = (s: SessionInfo, tier: Tier | "project") => setSessionPriority(s.id, { tier }).then(applyPriorities, (e) => store.notify(String(e)));
+export const setSessionTier = (s: SessionInfo, tier: Tier | "project") => applied(setSessionPriority(s.id, { tier }));
 
-export const setSessionReserve = (s: SessionInfo, reserve: Reserve | null) =>
-  setSessionPriority(s.id, { reserve }).then(applyPriorities, (e) => store.notify(String(e)));
+export const setSessionReserve = (s: SessionInfo, reserve: Reserve | null) => applied(setSessionPriority(s.id, { reserve }));

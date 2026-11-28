@@ -23,6 +23,11 @@ use serde_json::{json, Value};
 
 /// Boosts at once.
 pub const MAX_BOOSTS: usize = 2;
+/// A boost "until this turn ends" ends after this long all the same: a shell, or an agent left at its prompt, may never end a turn.
+pub const TURN_AT_MOST_MS: u64 = 2 * 60 * 60 * 1000;
+/// The most a reservation may name (anything larger is a typing slip, and sums of it must not overflow).
+const MAX_RESERVE_MB: u64 = 1 << 30;
+const MAX_RESERVE_CORES: f64 = 4096.0;
 /// Projects and sessions with a policy of their own.
 const MAX_ENTRIES: usize = 1000;
 
@@ -74,8 +79,19 @@ impl Reserve {
 
     fn add(&mut self, other: &Reserve) {
         self.cores += other.cores;
-        self.ram_mb += other.ram_mb;
-        self.vram_mb += other.vram_mb;
+        self.ram_mb = self.ram_mb.saturating_add(other.ram_mb);
+        self.vram_mb = self.vram_mb.saturating_add(other.vram_mb);
+    }
+
+    /// Whether the figures are ones a person could mean.
+    pub fn check(&self) -> Result<(), String> {
+        if !self.cores.is_finite() || self.cores < 0.0 || self.cores > MAX_RESERVE_CORES {
+            return Err("cores must be a number from 0".into());
+        }
+        if self.ram_mb > MAX_RESERVE_MB || self.vram_mb > MAX_RESERVE_MB {
+            return Err("that is more memory than any computer has".into());
+        }
+        Ok(())
     }
 }
 
@@ -94,8 +110,17 @@ pub struct ProjectPolicy {
 pub enum Boost {
     /// Until this time (ms since the epoch).
     Until(u64),
-    /// Until the session's current (or next) turn ends.
-    Turn,
+    /// Until the session's current (or next) turn ends, and this time at the latest.
+    Turn(u64),
+}
+
+impl Boost {
+    /// When it ends at the latest.
+    fn deadline(self) -> u64 {
+        match self {
+            Boost::Until(t) | Boost::Turn(t) => t,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -207,13 +232,17 @@ pub struct Policy {
     pub file: File,
     /// The file is there but could not be read: nothing is written over it.
     unreadable: bool,
+    /// Counts changes, so a client keeps the newest of two answers that crossed.
+    pub seq: u64,
+    /// The sessions the last change notice knew of: a session that starts or closes is announced with its priority.
+    pub known: std::collections::BTreeSet<String>,
 }
 
 /// `30m`, `1h`, `2h` → ms; `turn` → until the turn ends.
 pub fn parse_boost(s: &str, now: u64) -> Result<Option<Boost>, String> {
     let minutes = match s {
         "off" => return Ok(None),
-        "turn" => return Ok(Some(Boost::Turn)),
+        "turn" => return Ok(Some(Boost::Turn(now + TURN_AT_MOST_MS))),
         "30m" => 30,
         "1h" => 60,
         "2h" => 120,
@@ -226,7 +255,7 @@ impl Policy {
     /// The policy in `path` (from its previous version when damaged). One that can be read neither way is left alone:
     /// the policy starts from the defaults and writes nothing over the file.
     pub fn open(path: Option<PathBuf>) -> Policy {
-        let (file, unreadable) = match path.as_deref().map(crate::persist::load_state::<File>) {
+        let (mut file, unreadable) = match path.as_deref().map(crate::persist::load_state::<File>) {
             Some(Ok(Some(f))) => (f, false),
             Some(Err(e)) => {
                 tracing::warn!("resource policy not read ({e}); the defaults hold until the daemon restarts and nothing is saved over it");
@@ -234,14 +263,26 @@ impl Policy {
             }
             _ => (File::default(), false),
         };
-        Policy { path, file, unreadable }
+        // A turn that was running when the daemon stopped never reports its end to this one.
+        for s in file.sessions.values_mut() {
+            if matches!(s.boost, Some(Boost::Turn(_))) {
+                s.boost = None;
+            }
+        }
+        file.sessions.retain(|_, s| !s.is_empty());
+        Policy { path, file, unreadable, seq: 0, known: Default::default() }
     }
 
+    /// What to write and where (none when there is no file, or it could not be read and is left alone): the caller
+    /// writes it with [`save_file`] after letting go of the policy.
+    pub fn to_save(&self) -> Option<(PathBuf, File)> {
+        self.path.clone().filter(|_| !self.unreadable).map(|p| (p, self.file.clone()))
+    }
+
+    #[cfg(test)]
     pub fn save(&self) {
-        let Some(path) = self.path.as_deref().filter(|_| !self.unreadable) else { return };
-        match serde_json::to_vec_pretty(&self.file).map_err(anyhow::Error::from).and_then(|b| crate::persist::save_state(path, &b)) {
-            Ok(()) => {}
-            Err(e) => tracing::warn!("resource policy not saved: {e:#}"),
+        if let Some((path, file)) = self.to_save() {
+            save_file(&path, &file);
         }
     }
 
@@ -258,10 +299,7 @@ impl Policy {
 
     /// A boost still running at `now`.
     fn live_boost(&self, id: &str, now: u64) -> Option<Boost> {
-        self.file.sessions.get(id)?.boost.filter(|b| match b {
-            Boost::Until(t) => *t > now,
-            Boost::Turn => true,
-        })
+        self.file.sessions.get(id)?.boost.filter(|b| b.deadline() > now)
     }
 
     /// `who`'s priority at `now`; `parent` gives the priority of the session that opened it (its ceiling).
@@ -276,7 +314,7 @@ impl Policy {
                 boosted: true,
                 boost_until: match boost {
                     Boost::Until(t) => Some(t),
-                    Boost::Turn => None,
+                    Boost::Turn(_) => None,
                 },
                 source: "boost",
                 reserve,
@@ -289,7 +327,9 @@ impl Policy {
         };
         if let Some(p) = parent {
             if (e.weight, e.tier) > (p.weight, p.tier) {
-                e = Effective { source: "parent", reserve: e.reserve, ..p.clone() };
+                // Capped by the session that opened it. Its own boost still shows (and holds one of the two places),
+                // so the person sees it and can end it.
+                e = Effective { source: "parent", reserve: e.reserve, boosted: e.boosted, boost_until: e.boost_until, ..p.clone() };
             }
         }
         e
@@ -346,6 +386,13 @@ impl Policy {
         if !self.file.projects.contains_key(id) && self.file.sessions.len() + self.file.projects.len() >= MAX_ENTRIES {
             return Err("too many sessions and projects have a priority of their own".into());
         }
+        // A project moved to another tier without a place in it goes to that tier's bottom.
+        let bottom = |tier: Tier| self.file.projects.iter().filter(|(k, q)| q.tier == tier && k.as_str() != id).map(|(_, q)| q.rank + 1).max().unwrap_or(0);
+        let rank = match (tier, rank) {
+            (Some(t), None) if self.file.projects.get(id).is_none_or(|p| p.tier != t) => Some(bottom(t)),
+            _ => rank,
+        };
+        // Kept even when it equals the defaults: rank 0 is the top of its tier, which a removal would lose.
         let p = self.file.projects.entry(id.to_string()).or_default();
         if let Some(t) = tier {
             p.tier = t;
@@ -355,9 +402,6 @@ impl Policy {
         }
         if let Some(r) = reserve {
             p.reserve = r.filter(|r| !r.is_empty());
-        }
-        if *p == ProjectPolicy::default() {
-            self.file.projects.remove(id);
         }
         Ok(())
     }
@@ -402,22 +446,23 @@ impl Policy {
         }
     }
 
-    /// Drops what has ended: boosts past their time, the policies of sessions that are gone. True when anything changed.
-    pub fn sweep(&mut self, live: &dyn Fn(&str) -> bool, now: u64) -> bool {
+    /// Drops what has ended: boosts past their time or on a session whose process ended (no menu offers to end those, and
+    /// they would hold a place), and the policies of sessions that are gone. True when anything changed.
+    pub fn sweep(&mut self, exists: &dyn Fn(&str) -> bool, alive: &dyn Fn(&str) -> bool, now: u64) -> bool {
         let before = self.file.sessions.clone();
-        for s in self.file.sessions.values_mut() {
-            if matches!(s.boost, Some(Boost::Until(t)) if t <= now) {
+        for (id, s) in self.file.sessions.iter_mut() {
+            if s.boost.is_some_and(|b| b.deadline() <= now) || (s.boost.is_some() && !alive(id)) {
                 s.boost = None;
             }
         }
-        self.file.sessions.retain(|id, s| live(id) && !s.is_empty());
+        self.file.sessions.retain(|id, s| exists(id) && !s.is_empty());
         self.file.sessions != before
     }
 
     /// The session's turn ended: a boost "until the turn ends" ends with it. True when one did.
     pub fn turn_ended(&mut self, id: &str) -> bool {
         let Some(s) = self.file.sessions.get_mut(id) else { return false };
-        if s.boost != Some(Boost::Turn) {
+        if !matches!(s.boost, Some(Boost::Turn(_))) {
             return false;
         }
         s.boost = None;
@@ -429,6 +474,13 @@ impl Policy {
 
     pub fn json(&self) -> Value {
         json!(self.file)
+    }
+}
+
+/// Writes the policy (see [`Policy::to_save`]).
+pub fn save_file(path: &std::path::Path, file: &File) {
+    if let Err(e) = serde_json::to_vec_pretty(file).map_err(anyhow::Error::from).and_then(|b| crate::persist::save_state(path, &b)) {
+        tracing::warn!("resource policy not saved: {e:#}");
     }
 }
 
@@ -466,6 +518,14 @@ mod tests {
         assert_eq!((w("a"), w("b"), w("c")), (6.0, 5.0, 4.0));
         p.order(Tier::Normal, &["d".into()]);
         assert_eq!(p.effective(&who("s", "d"), 0, None).weight, 2.0, "alone in its tier");
+        // The top of normal keeps its place when its reservation goes, and one moved to another tier goes to its bottom.
+        p.order(Tier::Normal, &["d".into(), "e".into()]);
+        p.set_project("d", None, None, Some(Some(Reserve { ram_mb: 512, ..Reserve::default() }))).unwrap();
+        p.set_project("d", None, None, Some(None)).unwrap();
+        assert_eq!(p.effective(&who("s", "d"), 0, None).weight, 3.0);
+        p.set_project("a", Some(Tier::Normal), None, None).unwrap();
+        assert_eq!(p.file.projects["a"].rank, 2, "below d and e");
+        assert!(Reserve { ram_mb: u64::MAX, ..Reserve::default() }.check().is_err());
     }
 
     #[test]
@@ -476,6 +536,10 @@ mod tests {
         let parent = p.effective(&who("parent", "web"), 0, None);
         let child = p.effective(&who("child", "web"), 0, Some(&parent));
         assert_eq!((child.tier, child.weight, child.source), (Tier::Background, 1.0, "parent"));
+        // A child's own boost is capped too, but still shows: it holds one of the two places, and must be endable.
+        p.set_session("child", None, Some(parse_boost("1h", 0).unwrap()), None, None, 0).unwrap();
+        let child = p.effective(&who("child", "web"), 1, Some(&parent));
+        assert_eq!((child.weight, child.boosted, child.source), (1.0, true, "parent"));
         // A child set lower than its parent stays lower.
         p.set_session("low", Some(Some(Tier::Background)), None, None, None, 0).unwrap();
         let normal = p.effective(&who("p2", "other"), 0, None);
@@ -485,12 +549,13 @@ mod tests {
     #[test]
     fn at_most_two_boosts_and_a_third_names_them() {
         let mut p = Policy::open(None);
+        let turn = parse_boost("turn", 0).unwrap();
         for (i, id) in ["a", "b"].iter().enumerate() {
-            p.set_session(id, None, Some(Some(Boost::Turn)), None, None, i as u64).unwrap();
+            p.set_session(id, None, Some(turn), None, None, i as u64).unwrap();
         }
-        let err = p.set_session("c", None, Some(Some(Boost::Turn)), None, None, 5).unwrap_err();
+        let err = p.set_session("c", None, Some(turn), None, None, 5).unwrap_err();
         assert!(err.contains("a, b"), "{err}");
-        p.set_session("c", None, Some(Some(Boost::Turn)), Some("a"), None, 5).unwrap();
+        p.set_session("c", None, Some(turn), Some("a"), None, 5).unwrap();
         assert_eq!(p.boosted(6), ["b", "c"]);
         // Boosting one already boosted again is not a third.
         p.set_session("b", None, Some(parse_boost("1h", 7).unwrap()), None, None, 7).unwrap();
@@ -500,15 +565,23 @@ mod tests {
     #[test]
     fn a_turn_boost_ends_with_the_turn_and_gone_sessions_are_forgotten() {
         let mut p = Policy::open(None);
-        p.set_session("a", None, Some(Some(Boost::Turn)), None, None, 0).unwrap();
+        p.set_session("a", None, Some(parse_boost("turn", 0).unwrap()), None, None, 0).unwrap();
         p.set_session("b", Some(Some(Tier::Critical)), Some(parse_boost("30m", 0).unwrap()), None, None, 0).unwrap();
         assert!(p.turn_ended("a"));
         assert!(!p.turn_ended("a"));
         assert!(p.file.sessions.get("a").is_none(), "nothing left of it");
-        assert!(p.sweep(&|_| true, 31 * 60_000), "b's boost ran out");
+        let all = |_: &str| true;
+        assert!(p.sweep(&all, &all, 31 * 60_000), "b's boost ran out");
         assert_eq!(p.file.sessions["b"].tier, Some(Tier::Critical), "its own tier stays");
-        assert!(p.sweep(&|id| id != "b", 31 * 60_000));
+        assert!(p.sweep(&|id| id != "b", &all, 31 * 60_000));
         assert!(p.file.sessions.is_empty());
+        // A turn boost ends after two hours at the latest; a boost on a session whose process ended goes at once.
+        p.set_session("c", None, Some(parse_boost("turn", 0).unwrap()), None, None, 0).unwrap();
+        assert!(!p.sweep(&all, &all, TURN_AT_MOST_MS - 1));
+        assert!(p.sweep(&all, &all, TURN_AT_MOST_MS));
+        p.set_session("d", Some(Some(Tier::Critical)), Some(parse_boost("2h", 0).unwrap()), None, None, 0).unwrap();
+        assert!(p.sweep(&all, &|id| id != "d", 1));
+        assert_eq!((p.file.sessions["d"].boost, p.file.sessions["d"].tier), (None, Some(Tier::Critical)));
     }
 
     #[test]
@@ -541,9 +614,18 @@ mod tests {
         let again = Policy::open(Some(path.clone()));
         assert_eq!(again.file.projects["web"].tier, Tier::Critical);
         assert_eq!(again.file.switches, TierSwitches::default());
-        // Older or newer files: missing keys take their defaults, unknown ones are ignored.
-        std::fs::write(&path, br#"{"projects":{"a":{"tier":"background"}},"future":1}"#).unwrap();
-        assert_eq!(Policy::open(Some(path.clone())).file.projects["a"].tier, Tier::Background);
+        // Older or newer files: missing keys take their defaults, unknown ones are ignored. A turn boost does not
+        // outlive the daemon that saw the turn start.
+        std::fs::write(&path, br#"{"projects":{"a":{"tier":"background"}},"sessions":{"s":{"boost":{"turn":99999999999999}}},"future":1}"#).unwrap();
+        let loaded = Policy::open(Some(path.clone()));
+        assert_eq!(loaded.file.projects["a"].tier, Tier::Background);
+        assert!(loaded.file.sessions.is_empty());
+        // A file that cannot be read at all (here a folder in its place) is never written over.
+        let blocked = dir.join("blocked.json");
+        std::fs::create_dir_all(&blocked).unwrap();
+        let p = Policy::open(Some(blocked.clone()));
+        assert!(p.to_save().is_none());
+        assert!(blocked.is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

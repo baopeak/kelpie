@@ -242,8 +242,9 @@ Settings → Usage & Resources.
 
 ### Priorities
 
-When the computer is short of CPU, memory or disk, Kelpie gives the most to the work you rank highest. Open
-**Priorities** from the palette, or with **Priority & reservation…** on a project's or a session's right-click menu.
+Rank your work so that Kelpie knows what matters most. Today the ranking orders the sessions waiting for you;
+Kelpie's sharing out of CPU, memory and disk between sessions is built on it as that arrives. Open **Priorities**
+from the palette, or with **Priority & reservation…** on a project's or a session's right-click menu.
 
 - **Projects** sit in three tiers: **Critical**, **Normal** (the default) and **Background**.
   - Drag a project to rank it inside its tier, or drop it on another tier to move it there.
@@ -252,10 +253,12 @@ When the computer is short of CPU, memory or disk, Kelpie gives the most to the 
 - **A session** follows its project unless you give it a tier of its own. A sub-session or a run's task never
   ranks above the session that opened it.
 - **Boost** (a session's right-click menu, the Priorities page, or ⚡ on a phone) puts a session at the top of
-  critical for 30 min, 1 h, 2 h or until its current turn ends.
-  - A boost ends on its own, and the session's row shows ⚡ while it lasts.
-  - At most two sessions are boosted at once; boosting a third asks which boost to end.
-- **Reserve…** keeps cores and memory free for a project or a session while it has a live session.
+  critical for 30 min, 1 h, 2 h or until its current turn ends (two hours at most).
+  - A boost ends on its own, and also when the session's program ends. The session's row shows ⚡ while it lasts.
+  - At most two sessions are boosted at once; boosting a third asks whether to end the older boost.
+  - A sub-session's boost never lifts it above the session that opened it.
+- **Reserve…** records cores and memory to keep free for a project or a session while it has a live session.
+  GPU memory cannot be reserved yet, because Kelpie does not read how much the GPU has.
   - Kelpie refuses reservations that together would leave the system and the window too little: on an 8 GB
     computer about 4.7 GB and all cores but one.
 - Sessions waiting for you still come first in Activity and when jumping to the next waiting session.

@@ -3,6 +3,7 @@
 // window keeps a copy, read when it connects and replaced on every `policy.resources.changed`.
 import { createSignal } from "solid-js";
 import { daemon } from "./ipc";
+import { t } from "./i18n";
 
 /** Daemon API level with `policy.resources.get|set`, `session.priority.set` and the `policy.resources.changed` event. */
 export const PRIORITY_API = 52;
@@ -43,6 +44,8 @@ export interface Effective {
 }
 
 export interface Priorities {
+  /** Counts the daemon's changes: an answer older than the copy held is dropped. */
+  seq?: number;
   policy: {
     projects: Record<string, ProjectPolicy>;
     sessions: Record<string, SessionPolicy>;
@@ -59,8 +62,11 @@ export interface Priorities {
 const [priorities, setPriorities] = createSignal<Priorities | null>(null);
 export { priorities };
 
-/** The window's copy, from `policy.resources.get` or a `policy.resources.changed` event (null: an older daemon). */
+/** The window's copy, from `policy.resources.get` or a `policy.resources.changed` event (null: an older daemon). An answer
+ *  and an event can cross: the one the daemon wrote later wins. */
 export function applyPriorities(p: Priorities | null) {
+  const held = priorities();
+  if (p && held && (p.seq ?? 0) < (held.seq ?? 0)) return;
   setPriorities(p);
 }
 
@@ -85,9 +91,9 @@ export function projectTier(p: Priorities | null, projectId: string): Tier {
 /** "1 h 5 min", "12 min", "<1 min": what is left of a boost ending at `until`. */
 export function boostLeft(until: number, now: number): string {
   const min = Math.max(0, Math.floor((until - now) / 60_000));
-  if (until - now < 60_000) return "<1 min";
+  if (until - now < 60_000) return t("<1 min");
   const h = Math.floor(min / 60);
-  return h ? (min % 60 ? `${h} h ${min % 60} min` : `${h} h`) : `${min} min`;
+  return h ? (min % 60 ? t("{h} h {m} min", { h, m: min % 60 }) : t("{n} h", { n: h })) : t("{n} min", { n: min });
 }
 
 /** Projects grouped by tier, each tier in its rank order (projects without a policy are normal, after the ranked ones, in
@@ -101,10 +107,15 @@ export function projectsByTier<P extends { id: string }>(p: Priorities | null, p
   return out;
 }
 
-/** `ids` with `moved` placed before `before` (or at the end): the order a drop in a tier's list makes. */
-export function reorder(ids: string[], moved: string, before: string | null): string[] {
+/** The order a drop in a tier's list makes: `moved` takes the place of the project it was dropped on (`onto`), so one dragged
+ *  down lands after it and one dragged up before it; dropped on the tier itself (null), or from another tier, it goes last
+ *  or before `onto`. */
+export function reorder(ids: string[], moved: string, onto: string | null): string[] {
+  const from = ids.indexOf(moved);
   const rest = ids.filter((id) => id !== moved);
-  const at = before === null ? rest.length : rest.indexOf(before);
-  rest.splice(at < 0 ? rest.length : at, 0, moved);
+  if (onto === null) return [...rest, moved];
+  const at = rest.indexOf(onto);
+  if (at < 0) return [...rest, moved];
+  rest.splice(from >= 0 && from <= at ? at + 1 : at, 0, moved);
   return rest;
 }

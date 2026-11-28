@@ -2402,15 +2402,26 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
   - **Projects:** a tier (critical, normal, background; weights 4, 2, 1) and a rank inside it. The top of a tier weighs 1.5 times
     its bottom.
   - **Sessions:** an optional tier of their own.
-  - **Boosts:** 30 min, 1 h, 2 h or `turn` (until the ticker sees the session's turn end), weight 8. At most two; a third is refused
-    naming both unless `replace` names one. They expire on the 1 s ticker, which also drops the policies of closed sessions.
-  - **Reservations** (cores, MiB, GPU MiB) per project or session. All together must stay within memory minus the larger of
-    3 GiB and 40 %, cores minus one, and three quarters of a known GPU memory; a change that breaks that is refused and undone.
-  - `Daemon::effective_priority` walks the session's parents, and a child is capped at its parent's priority. Admission, the
-    command gate, the contention ladder and the token router read it.
+  - **Boosts:** 30 min, 1 h, 2 h or `turn` (until the ticker sees the session's turn end, two hours at most), weight 8. At most
+    two; a third is refused naming both unless `replace` names one.
+    - The 1 s ticker ends boosts past their time and boosts of sessions whose process ended, and drops the policies of closed
+      sessions.
+    - A sub-session capped by its parent still reports `boosted`, so the boost can be seen and ended.
+    - `turn` boosts are dropped when the file is loaded.
+  - **Reservations** (cores, MiB, GPU MiB) per project or session.
+    - All together must stay within memory minus the larger of 3 GiB and 40 %, and within cores minus one; a change that breaks
+      that is refused and undone.
+    - GPU memory is refused while the monitor reads no GPU capacity.
+  - `Daemon::effective_map` computes every session's priority in one pass, capping each child at its parent's.
+  - Today only Activity's waiting order and "next waiting session" read it. Admission, the command gate, the contention ladder and
+    the token router are planned to read it.
   - The file is read with its `.prev` fallback; an unreadable one is never written over.
-  - `policy.resources.changed` follows every change. The phone's `boost` verb (write permission) sets a boost the same way, and its
-    session list carries `boosted` and `boost_until`.
+  - `policy.resources.changed` (with a `seq`, so a client keeps the newest) follows every change and every session that starts or
+    closes.
+    - The file is written off the ticker, after the policy is released.
+    - A `switches` update changes only the switches it names.
+  - The phone's `boost` verb (write permission) sets a boost the same way. Its session list carries `boosted` and `boost_until`,
+    and is sent again on each change.
   - Activity's waiting list and "next waiting session" order sessions of the same kind by this weight.
 - **Automations** (`automations.rs`, `automation.*`, `automations.json`): hourly / daily /
   weekdays / weekly in local time (chrono). The ticker checks every 10 s and starts each due run on its own

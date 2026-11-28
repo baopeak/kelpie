@@ -5,8 +5,8 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { store, sessionLabel } from "../lib/store";
 import { t } from "../lib/i18n";
-import { boostLeft, orderTier, priorities, projectsByTier, applyPriorities, setProjectPolicy, reorder, TIERS, type Reserve, type Tier } from "../lib/priorities";
-import { boostSession, endBoost, priorityFocus, setSessionReserve, setSessionTier } from "../lib/priority-actions";
+import { boostLeft, orderTier, priorities, projectsByTier, setProjectPolicy, reorder, TIERS, type Reserve, type Tier } from "../lib/priorities";
+import { applied, boostSession, endBoost, priorityFocus, setSessionReserve, setSessionTier } from "../lib/priority-actions";
 import { Icon } from "./icons";
 import type { Project, SessionInfo } from "../lib/types";
 import "./priorities-page.css";
@@ -21,7 +21,7 @@ function readReserve(cores: string, ramGb: string): Reserve | null {
   return c > 0 || r > 0 ? { cores: c, ram_mb: r, vram_mb: 0 } : null;
 }
 
-function ReserveEditor(props: { value: Reserve | null | undefined; onSave: (r: Reserve | null) => Promise<unknown> }) {
+function ReserveEditor(props: { value: Reserve | null | undefined; onSave: (r: Reserve | null) => Promise<boolean> }) {
   const [open, setOpen] = createSignal(false);
   const [cores, setCores] = createSignal("");
   const [ram, setRam] = createSignal("");
@@ -39,8 +39,9 @@ function ReserveEditor(props: { value: Reserve | null | undefined; onSave: (r: R
       <span class="reserve-edit">
         <input type="number" min="0" step="0.5" placeholder={t("cores")} value={cores()} onInput={(e) => setCores(e.currentTarget.value)} aria-label={t("Cores")} />
         <input type="number" min="0" step="0.5" placeholder={t("GB")} value={ram()} onInput={(e) => setRam(e.currentTarget.value)} aria-label={t("Memory (GB)")} />
-        <button class="btn small" onClick={() => void props.onSave(readReserve(cores(), ram())).then(() => setOpen(false))}>{t("Save")}</button>
-        <Show when={props.value}><button class="btn small" onClick={() => void props.onSave(null).then(() => setOpen(false))}>{t("Remove")}</button></Show>
+        {/* A refused reservation (more than the computer can keep free) leaves the fields open to correct. */}
+        <button class="btn small" onClick={() => void props.onSave(readReserve(cores(), ram())).then((ok) => ok && setOpen(false))}>{t("Save")}</button>
+        <Show when={props.value}><button class="btn small" onClick={() => void props.onSave(null).then((ok) => ok && setOpen(false))}>{t("Remove")}</button></Show>
         <button class="btn small" onClick={() => setOpen(false)}>{t("Cancel")}</button>
       </span>
     </Show>
@@ -53,7 +54,11 @@ function SessionLine(props: { s: SessionInfo; now: number }) {
   return (
     <div class={`prio-session${priorityFocus() === props.s.id ? " focused" : ""}`} data-prio-session={props.s.id}>
       <span class="name" title={props.s.cwd}>{sessionLabel(props.s)}</span>
-      <select value={own()?.tier ?? "project"} onChange={(e) => void setSessionTier(props.s, e.currentTarget.value as Tier | "project")} aria-label={t("Priority of {name}", { name: sessionLabel(props.s) })}>
+      <select value={own()?.tier ?? "project"} aria-label={t("Priority of {name}", { name: sessionLabel(props.s) })}
+        onChange={(e) => {
+          const el = e.currentTarget;
+          void setSessionTier(props.s, el.value as Tier | "project").then((ok) => { if (!ok) el.value = own()?.tier ?? "project"; });
+        }}>
         <option value="project">{t("As its project")}</option>
         <For each={TIERS}>{(tier) => <option value={tier}>{tierName(tier)}</option>}</For>
       </select>
@@ -80,28 +85,34 @@ function SessionLine(props: { s: SessionInfo; now: number }) {
 function ProjectCard(props: { p: Project; tier: Tier; ids: string[]; now: number; dragging: () => string | null; setDragging: (id: string | null) => void }) {
   const sessions = createMemo(() => Object.values(store.sessions).filter((s) => s.project_id === props.p.id && s.alive));
   const policy = () => priorities()?.policy.projects[props.p.id];
-  const save = (change: Parameters<typeof setProjectPolicy>[1]) => setProjectPolicy(props.p.id, change).then(applyPriorities, (e) => store.notify(String(e)));
+  const save = (change: Parameters<typeof setProjectPolicy>[1]) => applied(setProjectPolicy(props.p.id, change));
   return (
     <div
       class={`prio-project${priorityFocus() === props.p.id ? " focused" : ""}${props.dragging() === props.p.id ? " dragging" : ""}`}
       data-prio-project={props.p.id}
-      draggable={true}
-      onDragStart={(e) => { e.dataTransfer?.setData("text/plain", props.p.id); props.setDragging(props.p.id); }}
-      onDragEnd={() => props.setDragging(null)}
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
         e.stopPropagation();
         const moved = props.dragging();
         props.setDragging(null);
-        if (moved && moved !== props.p.id) void orderTier(props.tier, reorder(props.ids, moved, props.p.id)).then(applyPriorities, (err) => store.notify(String(err)));
+        if (moved && moved !== props.p.id) void applied(orderTier(props.tier, reorder(props.ids, moved, props.p.id)));
       }}
     >
       <div class="prio-project-head">
-        <span class="grip" title={t("Drag to rank")}><Icon name="grid" size={11} /></span>
+        {/* Only the handle drags: the fields and selects in the card stay usable. */}
+        <span class="grip" title={t("Drag to rank")} draggable={true}
+          onDragStart={(e) => { e.dataTransfer?.setData("text/plain", props.p.id); props.setDragging(props.p.id); }}
+          onDragEnd={() => props.setDragging(null)}>
+          <Icon name="grid" size={11} />
+        </span>
         <span class="swatch" style={{ background: props.p.color }} />
         <span class="name">{props.p.name}</span>
-        <select value={props.tier} onChange={(e) => void save({ tier: e.currentTarget.value as Tier })} aria-label={t("Tier of {name}", { name: props.p.name })}>
+        <select value={props.tier} aria-label={t("Tier of {name}", { name: props.p.name })}
+          onChange={(e) => {
+            const el = e.currentTarget;
+            void save({ tier: el.value as Tier }).then((ok) => { if (!ok) el.value = props.tier; });
+          }}>
           <For each={TIERS}>{(tier) => <option value={tier}>{tierName(tier)}</option>}</For>
         </select>
         <span style={{ flex: 1 }} />
@@ -132,7 +143,7 @@ export default function PrioritiesPage() {
       <div class="board-head">
         <button class="settings-back" onClick={close} title={t("Back (Esc)")}><Icon name="back" size={14} /></button>
         <h2>{t("Priorities")}</h2>
-        <span class="muted-inline">{t("When the computer is short of CPU, memory or disk, the top gets the most. Sessions waiting for you still come first.")}</span>
+        <span class="muted-inline">{t("Rank your work: what is higher is served first as Kelpie shares out the computer. Sessions waiting for you still come first.")}</span>
       </div>
       <Show when={p()} fallback={<div class="muted prio-empty">{t("This daemon is older than the priorities: update Kelpie to rank your work.")}</div>}>
         {(pr) => (
@@ -154,7 +165,7 @@ export default function PrioritiesPage() {
                       e.preventDefault();
                       const moved = dragging();
                       setDragging(null);
-                      if (moved) void orderTier(tier, reorder(ids(), moved, null)).then(applyPriorities, (err) => store.notify(String(err)));
+                      if (moved) void applied(orderTier(tier, reorder(ids(), moved, null)));
                     }}
                   >
                     <h3>{tierName(tier)}</h3>
