@@ -2460,10 +2460,13 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
   jobs, when the computer has no room for it as written.
   - **Hook:** Claude's settings carry a second `PreToolUse` entry (matcher `Bash`, timeout 120 s) that pipes the tool call to
     `kelpied hook claude-gate`.
-    - The hook asks `gate.acquire {session_id, call, command, permission_mode, timeout_ms}`. A session may ask for itself only.
+    - A light command is known in the hook and asks nothing.
+    - A heavy one asks `gate.acquire {call, command, permission_mode, timeout_ms}`. `auth` sets `session_id` to the caller's own,
+      so a session asks for itself only.
     - It prints nothing (the command runs as written), or `hookSpecificOutput` with `updatedInput` (the changed command, every
       other field kept) and/or `additionalContext` (a note for the model).
-    - It never prints a `permissionDecision`: the person's permission rules and prompts apply as always.
+    - It never prints a `permissionDecision`. Claude checks the person's rules against the command as changed, and a change keeps
+      the command's first words (`cargo build` → `cargo build -j 2`), so a prefix rule such as `Bash(cargo build:*)` still matches.
     - Any failure prints nothing.
   - **Heavy commands:** a profile per tool (cargo, make/ninja, go, package installs and builds, next/vite/webpack/turbo, tsc,
     playwright, vitest/jest, pytest, gradle/mvn/dotnet/xcodebuild, docker, ffmpeg, image tools). Each has a base and a per-job memory
@@ -2472,14 +2475,26 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
     - Cores and memory are shared by effective-priority weight with the heavy commands the gate let through and that have not ended.
     - Memory is what is available, minus 12 % for the system, others' live reservations, and the estimates of commands started in
       the last 30 s. Critical work keeps only half the system's share and ignores others' reservations.
-    - A command runs as written when its share holds it. Otherwise it runs with the most jobs that fit, set by `CARGO_BUILD_JOBS=N`,
-      `-jN`, `-p N`, `--workers=N` or `--maxWorkers=N`. This needs the tier's `rewrite` switch, and is never in Claude's auto mode,
-      which refuses changed calls.
-    - Otherwise it waits.
+    - A command runs as written when its share holds it.
+    - Otherwise it runs with the most jobs that fit. The parallelism goes right after the subcommand (cargo `-j N`, before any
+      `--`; go `-p N`; playwright `--workers=N`; vitest and jest `--maxWorkers=N`) or at the end (make, ninja `-jN`), or the
+      command's own value is changed.
+      - This needs the tier's `rewrite` switch and Claude's default, acceptEdits or bypassPermissions mode. Auto mode refuses
+        changed calls, and dontAsk denies what no rule covers.
+      - It is only done in the very segment that does the work, and never for a command of several lines, behind a wrapper
+        (`timeout`, `nice`, `env`), or with an unclosed quote.
+      - The ledger learns such a run at the parallelism it really had.
+    - Otherwise it waits. A command that cannot be lowered is never held for cores alone, only for memory, the disk or the GPU.
     - Two disk writers on a busy disk, or two GPU jobs, take turns. A command alone always runs.
-  - **Waiting:** a held command is looked at every second for at most 90 s (and half the tool's timeout), then runs with one job.
-    The note says how long it waited and why.
-  - **Release:** a command is released at its `PostToolUse`, at a turn boundary, or when its session goes.
+  - **Waiting:**
+    - A held command is looked at every 2 s for at most 90 s (and half the tool's timeout). Then it runs with one job where it
+      may be lowered, as written otherwise.
+    - A hold ends at once when the hook that asked has gone.
+    - The decision and the grant are made under one lock.
+    - Past 16 holds on the computer, or 8 grants in one session, a command runs as written.
+    - The note says how long it waited and why.
+  - **Release:** a command is released at its `PostToolUse`, at a turn boundary, when its session goes, or after the tool's
+    timeout and a minute (ten minutes without one), so a call stuck at a permission prompt or denied holds no share.
   - **Off switch:** `KELPIE_COMMAND_GATE=0` turns the gate off.
   - **Scope:** Codex, Gemini, Devin and chat sessions are not gated yet.
 - **Automations** (`automations.rs`, `automation.*`, `automations.json`): hourly / daily /

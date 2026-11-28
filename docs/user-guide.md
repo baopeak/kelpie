@@ -283,13 +283,14 @@ The limit on running agents is worked out from the computer's memory (about 17 o
 **Heavy commands an agent runs** (Claude Code sessions on this computer) pass a gate before they start. Examples
 are a Rust or web build, a test suite, a package install, a Docker build, video or image rendering.
 - When the computer has room, the command runs as written.
-- When it does not, Kelpie gives the command fewer parallel jobs (`cargo build` becomes
-  `CARGO_BUILD_JOBS=2 cargo build`). The share of CPU and memory follows the ranking: a boosted session's build gets
-  more than a background one's.
-- If even one job does not fit, the command waits up to 90 seconds and then runs with one job.
+- When it does not, Kelpie gives the command fewer parallel jobs (`cargo build` becomes `cargo build -j 2`).
+  - The command keeps its first words, so your allow rules still match it.
+  - Kelpie does not change commands in Claude's auto or dontAsk mode, nor a command it cannot change for sure.
+  - The share of CPU and memory follows the ranking: a boosted session's build gets more than a background one's.
+- If even one job does not fit, the command waits up to 90 seconds, then runs anyway (with one job where it can).
 - Two heavy disk writers, or two GPU jobs, take turns.
 - The agent is told what changed and why. Kelpie never approves a command for you: your permission prompts and rules
-  apply as always.
+  apply to the command as it runs.
 - Kelpie learns what each command takes in each project, so the second run of a build is judged on what the first
   really used.
 

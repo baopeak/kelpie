@@ -302,6 +302,8 @@ struct Inner {
     io_seen: HashMap<(u32, u64), u64>,
     /// Who uses each contended resource most, by gauge.
     users: HashMap<&'static str, Vec<Value>>,
+    /// The parallelism the command gate gave a run whose start report has not come yet, by `session/call`.
+    jobs_given: HashMap<String, u32>,
     at: u64,
     samples: u64,
 }
@@ -430,10 +432,28 @@ impl Resources {
         }
     }
 
+    /// The command gate gave run `call` of session `id` this parallelism: it is learned as that (the agent's own report
+    /// names the command as it was written). Either may come first.
+    pub fn command_jobs(&self, id: &str, call: &str, jobs: u32) {
+        let mut g = self.inner.lock();
+        match g.tracks.get_mut(id).and_then(|t| t.open.get_mut(call)) {
+            Some(o) => o.fingerprint.jobs = Some(jobs),
+            None => {
+                if g.jobs_given.len() >= 256 {
+                    g.jobs_given.clear();
+                }
+                g.jobs_given.insert(format!("{id}/{call}"), jobs);
+            }
+        }
+    }
+
     /// An agent in session `id` is about to run `command` (`call` names this run, as the agent's end report will).
     pub fn command_started(&self, id: &str, call: &str, command: &str, project: &str, now: u64) {
-        let Some(fingerprint) = ledger::fingerprint(command) else { return };
+        let Some(mut fingerprint) = ledger::fingerprint(command) else { return };
         let mut g = self.inner.lock();
+        if let Some(jobs) = g.jobs_given.remove(&format!("{id}/{call}")) {
+            fingerprint.jobs = Some(jobs);
+        }
         let t = g.tracks.entry(id.to_string()).or_default();
         if t.open.len() >= MAX_OPEN {
             return;

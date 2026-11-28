@@ -1,13 +1,18 @@
 # Phase 4: Command gate and parallelism optimizer
 
 Status: **4a implemented** on branch `feat/command-gate`: the gate (`gate.rs`, `daemon/gate_rpc.rs`) and Claude's blocking hook,
-proven by `scripts/e2e/command_gate.py` (8/8). On this 8 GB machine a background build was held 30 s for memory, then given one
+reviewed and fixed ([review](../reports/code-reviewer-261128-1737-command-gate-phase4a.md)), proven by
+`scripts/e2e/command_gate.py` (8/8). On this 8 GB machine a background build was held 30 s for memory, then given one
 job while a critical build ran.
 
 As built, differing from below:
 - **No permission decision:** the hook never sends one. It changes the command (`updatedInput`) or adds a note
-  (`additionalContext`), so the person's permission flow is untouched. Claude's auto mode gets no rewrites, because it refuses
-  changed calls.
+  (`additionalContext`).
+  - A change keeps the command's first words (flags go after the subcommand, never an env prefix), so prefix allow rules still
+    match.
+  - There are no rewrites in Claude's auto mode (it refuses changed calls) or dontAsk mode.
+- **Open:** whether Claude applies `updatedInput` with no decision in default mode is implied by its docs but not stated; it
+  needs a check with a real Claude session.
 - **Shares:** they use the effective weight without the rank factor of waiting commands; the gate does not queue holds by priority
   among themselves (each re-checks every second).
 - **Next (4b):**

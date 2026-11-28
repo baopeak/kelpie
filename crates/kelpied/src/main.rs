@@ -335,8 +335,6 @@ pub(crate) fn log_filter(mut filter: tracing_subscriber::EnvFilter) -> tracing_s
     filter
 }
 
-/// Called by agents' hook machinery. Must be fast, print nothing to stdout (Claude feeds
-/// SessionStart stdout into the model context) and never fail the agent.
 /// Claude Code's pre-tool hook for `Bash` (`kelpied hook claude-gate`): asks the command gate whether the command runs now
 /// (`gate.acquire`), waiting while it is held, and tells Claude through its hook output. Nothing printed means "as it is":
 /// never an approval, so the person's permission rules and prompts apply as always. A changed command (`updatedInput`)
@@ -348,6 +346,10 @@ fn gate_hook(session_id: &str) {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(&buf) else { return };
     let (Some(command), Some(call)) = (payload.pointer("/tool_input/command").and_then(|v| v.as_str()), payload.get("tool_use_id").and_then(|v| v.as_str())) else { return };
     if payload.get("tool_name").and_then(|v| v.as_str()) != Some("Bash") || payload.pointer("/tool_input/run_in_background").and_then(|v| v.as_bool()) == Some(true) {
+        return;
+    }
+    // A light command (most of them) is known here: no question to the daemon.
+    if !resources::ledger::fingerprint(command).is_some_and(|f| gate::profile(&f).heavy) {
         return;
     }
     let params = serde_json::json!({
@@ -385,6 +387,8 @@ fn gate_hook_output(payload: &serde_json::Value, a: &serde_json::Value) -> Optio
     Some(serde_json::json!({"hookSpecificOutput": out}))
 }
 
+/// Called by agents' hook machinery. Must be fast, print nothing to stdout (Claude feeds
+/// SessionStart stdout into the model context) and never fail the agent.
 fn hook(args: &[String]) {
     let agent = args.first().cloned().unwrap_or_default();
     let Ok(session_id) = std::env::var("KELPIE_SESSION_ID") else { return };
