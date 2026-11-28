@@ -66,8 +66,8 @@ pub struct Candidate {
     pub tier: Tier,
     pub weight: f64,
     pub boosted: bool,
-    /// The project or session whose reservation it may use first, if it has one.
-    pub owner: Option<String>,
+    /// The projects and sessions whose reservations it may use (its own project's, the session that opens it).
+    pub owners: Vec<String>,
     /// When it began to wait (ms since the epoch; `now` for one asking for the first time).
     pub waiting_since: u64,
     /// What its agent takes when it starts, MiB.
@@ -86,15 +86,6 @@ impl Candidate {
         }
         let steps = (now.saturating_sub(self.waiting_since) / AGING_MS).min(8) as i32;
         (self.weight * 2f64.powi(steps)).min(BOOST_WEIGHT - 0.01).max(self.weight)
-    }
-}
-
-fn ordinal(n: usize) -> String {
-    match n {
-        1 => "1st".into(),
-        2 => "2nd".into(),
-        3 => "3rd".into(),
-        n => format!("{n}th"),
     }
 }
 
@@ -119,7 +110,9 @@ pub fn plan(mut candidates: Vec<Candidate>, cap: &Capacity, now: u64) -> Vec<(Ca
             }
             Some(why) => {
                 waiting += 1;
-                out.push((c, Err(format!("queued ({} in line): {why}", ordinal(waiting)))));
+                // Fixed words around the numbers, so the window can translate them; no live figure, so a waiting task's
+                // note changes only when its place or its reason does.
+                out.push((c, Err(format!("Queued: {why} (in line: {waiting})"))));
             }
         }
     }
@@ -134,7 +127,7 @@ fn check(c: &Candidate, cap: &Capacity, running: usize, per_project: &HashMap<St
     if let (Some(max), Some(p)) = (cap.max_per_project, &c.project) {
         let n = per_project.get(p).copied().unwrap_or(0);
         if n >= max {
-            return Some(format!("{n} agents of this project are running, its limit"));
+            return Some(format!("{n} agents of this project are running, its own limit"));
         }
     }
     if !c.critical() {
@@ -151,19 +144,14 @@ fn check(c: &Candidate, cap: &Capacity, running: usize, per_project: &HashMap<St
     // A computer that cannot tell its memory is checked on the counts alone.
     let avail = avail?;
     if c.critical() {
-        return (avail - c.cost_mb < CRITICAL_MARGIN_MB).then(|| format!("only {avail:.0} MiB of memory is available, and an agent takes about {:.0} MiB", c.cost_mb));
+        return (avail - c.cost_mb < CRITICAL_MARGIN_MB).then(|| "too little memory is available, even for critical work".to_string());
     }
-    // Others' live reservations stay free; its own owner's reservation is its to use.
-    let others: f64 = cap.reserved.iter().filter(|(owner, _)| Some(owner) != c.owner.as_ref()).map(|(_, mb)| mb).sum();
+    // Others' live reservations stay free; its own project's and its opener's are its to use.
+    let others: f64 = cap.reserved.iter().filter(|(owner, _)| !c.owners.contains(owner)).map(|(_, mb)| mb).sum();
     let free = avail - cap.floor_mb - others;
     (c.cost_mb > free).then(|| {
-        format!(
-            "memory: {:.0} MiB is free beyond the {:.0} MiB kept for the system{}, and an agent takes about {:.0} MiB",
-            free.max(0.0),
-            cap.floor_mb,
-            if others > 0.0 { format!(" and {others:.0} MiB reserved for others") } else { String::new() },
-            c.cost_mb
-        )
+        if others > 0.0 { "not enough memory is free beyond what is kept for the system and reserved for others" } else { "not enough memory is free beyond what is kept for the system" }
+            .to_string()
     })
 }
 
@@ -172,7 +160,7 @@ mod tests {
     use super::*;
 
     fn cand(key: &str, tier: Tier, weight: f64, since: u64) -> Candidate {
-        Candidate { key: key.into(), project: Some("p".into()), tier, weight, boosted: false, owner: None, waiting_since: since, cost_mb: 400.0 }
+        Candidate { key: key.into(), project: Some("p".into()), tier, weight, boosted: false, owners: vec!["p".into()], waiting_since: since, cost_mb: 400.0 }
     }
 
     fn roomy() -> Capacity {
@@ -188,7 +176,7 @@ mod tests {
         let cap = Capacity { max_agents: 2, ..roomy() };
         let p = plan(vec![cand("bg", Tier::Background, 1.0, 0), cand("late", Tier::Normal, 2.0, 50), cand("early", Tier::Normal, 2.0, 10)], &cap, 100);
         assert_eq!(keys(&p), [("early", true), ("late", true), ("bg", false)]);
-        assert_eq!(p[2].1.as_ref().unwrap_err(), "queued (1st in line): 2 agents are running, the limit on this computer");
+        assert_eq!(p[2].1.as_ref().unwrap_err(), "Queued: 2 agents are running, the limit on this computer (in line: 1)");
     }
 
     #[test]
@@ -208,9 +196,9 @@ mod tests {
         // 2000 available, 1000 kept for the system, 700 reserved for another project: 300 free, an agent needs 400.
         let cap = Capacity { avail_mb: Some(2000.0), reserved: vec![("other".into(), 700.0)], ..roomy() };
         let p = plan(vec![cand("a", Tier::Normal, 2.0, 0)], &cap, 0);
-        assert!(p[0].1.as_ref().unwrap_err().contains("300 MiB is free beyond the 1000 MiB kept for the system and 700 MiB reserved for others"), "{:?}", p[0].1);
+        assert!(p[0].1.as_ref().unwrap_err().contains("kept for the system and reserved for others"), "{:?}", p[0].1);
         // Its own project's reservation is its to use.
-        let own = Candidate { owner: Some("other".into()), ..cand("a", Tier::Normal, 2.0, 0) };
+        let own = Candidate { owners: vec!["other".into()], ..cand("a", Tier::Normal, 2.0, 0) };
         assert!(plan(vec![own], &cap, 0)[0].1.is_ok());
         // Critical work may use what is kept free, but leaves a margin.
         assert!(plan(vec![cand("c", Tier::Critical, 4.0, 0)], &cap, 0)[0].1.is_ok());
@@ -230,9 +218,9 @@ mod tests {
         let cap = Capacity { saturated: vec!["disk"], ..roomy() };
         let p = plan(vec![cand("n", Tier::Normal, 2.0, 0), cand("c", Tier::Critical, 4.0, 0)], &cap, 0);
         assert_eq!(keys(&p), [("c", true), ("n", false)]);
-        assert!(p[1].1.as_ref().unwrap_err().ends_with("the disk is saturated"));
+        assert!(p[1].1.as_ref().unwrap_err().contains("the disk is saturated"));
         let cap = Capacity { max_per_project: Some(1), per_project: HashMap::from([("p".into(), 1)]), ..roomy() };
-        assert!(plan(vec![cand("n", Tier::Normal, 2.0, 0)], &cap, 0)[0].1.as_ref().unwrap_err().contains("this project"));
+        assert!(plan(vec![cand("n", Tier::Normal, 2.0, 0)], &cap, 0)[0].1.as_ref().unwrap_err().contains("of this project"));
         // A computer that cannot tell its memory checks only the counts.
         let blind = Capacity { avail_mb: None, saturated: vec![], ..roomy() };
         assert!(plan(vec![cand("n", Tier::Normal, 2.0, 0)], &blind, 0)[0].1.is_ok());

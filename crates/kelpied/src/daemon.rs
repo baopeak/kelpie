@@ -871,13 +871,8 @@ impl Daemon {
         };
         // The admission queue's answer for every ready task, worked out before the run list is locked for the step.
         let admission = self.admission_for_tasks();
-        let gate = |ready: runs::Ready<'_>, finished: &HashSet<String>| match admission.get(&format!("{}/{}", ready.run, ready.task)) {
-            Some(Err(why)) => runs::Gate::Wait(why.clone()),
-            _ => match ready.creator {
-                Some(creator) => self.run_gate(creator, finished),
-                None => runs::Gate::Open,
-            },
-        };
+        // A task that became ready inside this step (its dependency just finished) was not asked about: it waits for the next.
+        let gate = |ready: runs::Ready<'_>, _: &HashSet<String>| admission.get(&format!("{}/{}", ready.run, ready.task)).cloned().unwrap_or(runs::Gate::Later);
         let (actions, changed) = self.runs.lock().step_gated(now_millis(), view, gate);
         self.runs_changed(&changed);
         for a in actions {
@@ -910,7 +905,7 @@ impl Daemon {
                     if let Ok((t, _)) = self.runs.lock().task_mut(run_id, task_id) {
                         match gate {
                             // Ready again: the engine asks at the next step.
-                            runs::Gate::Open | runs::Gate::Wait(_) => t.status = TaskStatus::Pending,
+                            runs::Gate::Open | runs::Gate::Wait(_) | runs::Gate::Later => t.status = TaskStatus::Pending,
                             runs::Gate::Fail(why) => {
                                 t.status = TaskStatus::Failed;
                                 t.error = Some(why);

@@ -241,7 +241,7 @@ impl Daemon {
     // ---------- spawn ----------
 
     /// The sessions of tasks that ended, as the run list says.
-    fn finished_task_sessions(&self) -> HashSet<String> {
+    pub(super) fn finished_task_sessions(&self) -> HashSet<String> {
         self.runs.lock().finished_sessions()
     }
 
@@ -431,9 +431,10 @@ impl Daemon {
     fn spawn_child(&self, caller_id: &str, plan: SpawnPlan) -> Result<Value> {
         let caller = self.by_id(caller_id).ok_or_else(|| anyhow!("the calling session was closed"))?;
         let caller_spec = caller.spec();
-        let _slot = self.reserve_slot(caller_id, &caller_spec)?;
-        // The machine again, now that the agent is known: the world moved while the user decided.
+        // The machine again, now that the agent is known: the world moved while the user decided. Asked before this spawn
+        // claims its place, which would count it twice.
         self.admit_sub_session(caller_id, &caller_spec, Some(&plan.agent))?;
+        let _slot = self.reserve_slot(caller_id, &caller_spec)?;
         let name = plan.name.clone().or_else(|| (!plan.task.is_empty()).then(|| name_from_task(&plan.task)));
         let worktree = if plan.worktree {
             let slug = branch_slug(name.as_deref().unwrap_or("task"));

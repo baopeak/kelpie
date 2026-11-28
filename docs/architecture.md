@@ -2423,27 +2423,39 @@ counts as the user's consent. Rules live in `crates/kelpied/src/subs.rs` (pure, 
   - The phone's `boost` verb (write permission) sets a boost the same way. Its session list carries `boosted` and `boost_until`,
     and is sent again on each change.
   - Activity's waiting list and "next waiting session" order sessions of the same kind by this weight.
-- **Admission queue** (`admission.rs`, `daemon/admission_gate.rs`): one queue for the agents Kelpie starts on its own. A session a
-  person opens is never held back, but it counts.
-  - **Run tasks:** every ready task of every run is a candidate each tick (`Runs::ready`); a run a program made also passes the
-    sub-session limits as before.
-  - **Sub-sessions:** `sub.spawn` and `session.create` from a session are checked before the person is asked and again before the
-    agent starts.
+- **Admission queue** (`admission.rs`, `daemon/admission_gate.rs`): one queue for the run tasks and sub-sessions Kelpie starts.
+  A session a person opens is never held back, but it counts.
+  - **Run tasks:** the queue's answers are worked out before the step locks the run list.
+    - Every ready task of every run is a candidate each tick (`Runs::ready`).
+    - A run a program made must first pass the sub-session limits; a task the limits refuse takes no place.
+    - A task on an SSH host is not held for this computer's resources.
+    - A task that becomes ready inside a step (its dependency just finished) gets `Gate::Later` and is asked about at the next tick.
+  - **Sub-sessions:** `sub.spawn` and `session.create` from a session are checked in the same line as the waiting tasks, before
+    the person is asked and again before the agent starts (before its place is claimed).
   - **Order:** by effective priority (`Daemon::effective_priority` of the parent, or the project's), doubled per 15 minutes of waiting
     (never past a boost), then by who waited longest (`Task::waiting_since`).
   - **Admission conditions:** a candidate starts while all of these hold:
-    - running agent sessions (tasks still starting included) are under `max_agents`, where 0 means the memory beyond the system's
-      share at 400 MiB per agent, from 2 to 32;
+    - running agent sessions are under `max_agents`, where 0 means the memory beyond the system's share at 400 MiB per agent,
+      from 2 to 32. The system's own figure is used before the first sample or with the monitor off;
+      - agents of finished run tasks are not counted;
+      - tasks starting without a session yet and spawns under way are counted (the larger of the two);
     - its project is under `max_agents_per_project`;
     - no CPU, memory, disk or disk-space gauge is saturated;
-    - available memory, minus 12 % of memory (at least 1 GiB) and the live reservations of others, covers its agent's start: the
-      mean private memory of that agent's running sessions, or 400 MiB.
+    - available memory covers its agent's start: the mean private memory of that agent's running sessions, or 400 MiB.
+      - Available memory is reduced by 12 % of memory (at least 1 GiB) and the live reservations of others.
+      - Its project's reservation and its opener's are its own to use.
+      - What tasks starting and sessions under a minute old will still take is counted as already taken.
   - **Critical or boosted work** skips the last two conditions and keeps only 256 MiB free.
   - **Each start** takes its share before the next candidate is looked at.
-  - **Waiting:** a task that waits shows `queued (N in line): <why>` as its note in the Runs page. A refused sub-session is told why,
-    and to wait with `kelpie_wait`.
-  - **Background automations:** a clock automation of a background-tier project waits a minute at a time while a CPU, memory, disk or
-    disk-space gauge is busy or saturated, and is recorded as skipped after 30 minutes.
+  - **Waiting:** a task that waits shows `Queued: <why> (in line: N)` as its note in the Runs page.
+    - The note holds no live figure, so it changes only with its place or reason.
+    - The app translates its fixed words (`locales/vi/backend.json`).
+    - A refused sub-session is told why, and to wait with `kelpie_wait`.
+  - **Background automations:** these are not in the queue. A clock automation of a background-tier project waits while a CPU, memory,
+    disk or disk-space gauge is busy or saturated.
+    - It looks a minute at a time, on one waiting thread per automation; a firing during the wait is folded into it.
+    - It does not run if it was turned off meanwhile, and is recorded as skipped after 30 minutes.
+    - Automations of other tiers start as before.
 - **Automations** (`automations.rs`, `automation.*`, `automations.json`): hourly / daily /
   weekdays / weekly in local time (chrono). The ticker checks every 10 s and starts each due run on its own
   thread (never awaited: ten due runs cost the ticker about 2 ms); a run creates an ordinary session with

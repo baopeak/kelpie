@@ -975,6 +975,11 @@ impl Subs {
         self.granted.lock().contains(session)
     }
 
+    /// Places claimed and not yet given back: spawns under way (and run tasks starting) whose session does not exist yet.
+    pub fn in_flight(&self) -> usize {
+        self.slots.lock().values().sum()
+    }
+
     /// Checks the caps and claims a place in them in one step. `count` is called with the slot table
     /// locked and returns (the caller's live children, all live sub-sessions) from the session list.
     pub fn reserve(&self, caller: &str, mut input: CapsInput, count: impl FnOnce() -> (usize, usize)) -> Result<Slot<'_>, String> {

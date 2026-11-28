@@ -28,7 +28,7 @@
   "Turn on the relay or Tailscale: nothing else reaches this computer": "Hãy bật relay hoặc Tailscale: không còn gì khác kết nối được tới máy tính này",
   "this network's listeners are off, so a phone cannot pair over this network: turn them on in Settings → Mobile": "việc lắng nghe trong mạng này đang tắt, nên điện thoại không thể ghép đôi qua mạng này: hãy bật lại trong Cài đặt → Di động",
   "a phone using the hosted app can read and type; taking control needs Tailscale or this computer's own HTTPS address": "điện thoại dùng ứng dụng trên relay được đọc và gõ; muốn điều khiển cần Tailscale hoặc địa chỉ HTTPS riêng của máy tính này",
-  "Jira is not connected (Settings → Integrations)":"Chưa kết nối Jira (Cài đặt → Tích hợp)",
+  "Jira is not connected (Settings → Integrations)": "Chưa kết nối Jira (Cài đặt → Tích hợp)",
   "Linear is not connected (Settings → Integrations)": "Chưa kết nối Linear (Cài đặt → Tích hợp)",
   "Linear did not update the issue": "Linear không cập nhật issue",
   "a merge request for this branch already exists": "nhánh này đã có merge request",
@@ -230,5 +230,18 @@
   "Telegram could not be reached": "Không kết nối được Telegram",
   "Buttons sent meanwhile expire; alerts still go out when it can be.": "Các nút gửi trong lúc này sẽ hết hạn; cảnh báo vẫn được gửi khi kết nối lại được.",
   "The binding could not be saved: turn approvals on again.": "Không lưu được liên kết: hãy bật lại duyệt yêu cầu.",
-  "known_hosts changed since it was listed: refresh the list and try again": "known_hosts đã thay đổi kể từ khi danh sách được đọc: hãy làm mới danh sách rồi thử lại"
+  "known_hosts changed since it was listed: refresh the list and try again": "known_hosts đã thay đổi kể từ khi danh sách được đọc: hãy làm mới danh sách rồi thử lại",
+  "Queued: ": "Đang xếp hàng: ",
+  " (in line: ": " (thứ tự: ",
+  " agents are running, the limit on this computer": " agent đang chạy, mức tối đa của máy này",
+  " agents of this project are running, its own limit": " agent của dự án này đang chạy, mức tối đa của dự án",
+  "the CPU is saturated": "CPU đang quá tải",
+  "memory is saturated": "bộ nhớ đang quá tải",
+  "the disk is saturated": "ổ đĩa đang quá tải",
+  "disk space is saturated": "ổ đĩa sắp đầy",
+  "not enough memory is free beyond what is kept for the system and reserved for others": "không đủ bộ nhớ trống ngoài phần giữ cho hệ thống và phần đã giữ chỗ cho việc khác",
+  "not enough memory is free beyond what is kept for the system": "không đủ bộ nhớ trống ngoài phần giữ cho hệ thống",
+  "too little memory is available, even for critical work": "bộ nhớ còn quá ít, kể cả cho việc quan trọng",
+  "Skipped: ": "Đã bỏ qua: ",
+  " stayed busy for 30 minutes, and this is a background project.": " bận suốt 30 phút, mà đây là dự án hạng nền."
 }
