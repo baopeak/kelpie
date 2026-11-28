@@ -34,6 +34,7 @@ import type { Flag } from "./merge-line";
 import { withAcceptances } from "./merge-review";
 import { NOTES_API, mergeNotes, migrateNotes, notesForKey, pendingNotes } from "./review-notes";
 import { OWED_API, applyOwedChanged, replaceOwed } from "./owed";
+import { PRIORITY_API, applyPriorities, loadPriorities, priorities, weightOf, type Priorities } from "./priorities";
 
 export { defaultSettings };
 
@@ -75,7 +76,7 @@ function chime() {
   }
 }
 
-export type Overlay = null | "cost" | "palette" | "quickopen" | "jump" | "dashboard" | "settings" | "newsession" | "board" | "worktree" | "runs" | "remote" | "hosts" | "update" | "answer" | "finish" | "review" | "try";
+export type Overlay = null | "cost" | "priorities" | "palette" | "quickopen" | "jump" | "dashboard" | "settings" | "newsession" | "board" | "worktree" | "runs" | "remote" | "hosts" | "update" | "answer" | "finish" | "review" | "try";
 
 /** A pane of a tab (an empty pane a new session takes the place of). */
 export type PaneTarget = { tabId: string; paneId: string };
@@ -270,7 +271,7 @@ function createAppStore() {
 
   /** Shows the session that has waited longest on the user, then the next one on each call. */
   function revealNextWaiting() {
-    const next = nextWaiting(Object.values(sessions), lastWaitingShown);
+    const next = nextWaiting(Object.values(sessions), lastWaitingShown, (id) => weightOf(priorities(), id));
     if (!next) return notify(t("No session is waiting for you"));
     lastWaitingShown = next.id;
     revealSession(next.id);
@@ -407,6 +408,13 @@ function createAppStore() {
     for (const r of list) announceRequest(r, true);
     // Requests the list left out are over (timed out, or the daemon restarted): their Activity entries are read.
     for (const id of [...requestInbox.keys()]) if (!subRequests().some((r) => r.id === id)) requestGone(id);
+  }
+
+  /** The ranking of work, read when the window connects (an older daemon has none). */
+  async function loadPriorityState() {
+    if (daemonApi() < PRIORITY_API) return applyPriorities(null);
+    const p = await loadPriorities().catch(() => null);
+    if (p) applyPriorities(p);
   }
 
   /** The checks still owed, read when the window connects (an older daemon has none). */
@@ -617,6 +625,9 @@ function createAppStore() {
         break;
       case "owed.changed":
         if (typeof p.project === "string") applyOwedChanged(p.project, p.owed);
+        break;
+      case "policy.resources.changed":
+        applyPriorities(p as Priorities);
         break;
       case "automation.ran": {
         if (legacyNotify()) {
@@ -1972,6 +1983,7 @@ function createAppStore() {
     void ipc.daemon("daemon.set_policy", { agents_control_others: state.settings.agentsScripting ?? true, auto_continue: state.settings.autoContinue ?? true }).catch(() => {});
     void loadSubState();
     void loadOwed();
+    void loadPriorityState();
     void loadPhoneStarts(phoneStartsSeen);
     resumeInterrupted();
   }

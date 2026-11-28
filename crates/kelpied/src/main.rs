@@ -46,6 +46,7 @@ mod persist;
 mod ports;
 mod proc_tree;
 mod procs;
+mod resource_policy;
 mod resources;
 mod provider;
 mod pulls;

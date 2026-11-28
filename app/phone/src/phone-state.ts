@@ -92,6 +92,16 @@ export const [daemonApi, setDaemonApi] = createSignal(0);
 export const canTakeOver = () => device()?.permission === "control" && daemonApi() >= TAKEOVER_API;
 /** "+" in the inbox: this connection may type and the computer starts sessions for phones. */
 export const canStartSessions = () => canType() && daemonApi() >= NEW_SESSION_API;
+/** Daemon API level with the `boost` verb. */
+const BOOST_API = 52;
+export const canBoost = () => canType() && daemonApi() >= BOOST_API;
+
+/** Boosts the session for an hour, or ends its boost; a refusal (two boosted already) is shown on it. */
+export async function toggleBoost(id: string) {
+  const row = sessions().find((s) => s.id === id);
+  const o = await link.boost(id, row?.boosted ? "off" : "1h");
+  if (o.t === "error") showNotice(id, o.message || t("Not boosted."));
+}
 /** A pane taken over, or being picked (null: none). */
 export const [takeover, setTakeover] = createSignal<TakeoverState | null>(null);
 /** This phone may see the computer's screen (the same rule as a pane's takeover, at a computer that has it). */
