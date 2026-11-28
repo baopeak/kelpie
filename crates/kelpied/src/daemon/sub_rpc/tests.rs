@@ -1186,7 +1186,7 @@ fn only_busy_children_count_and_a_run_of_three_tasks_finishes_under_a_cap_of_two
     d.runs.lock().list.insert(0, run);
     assert_eq!(d.live_sub_counts("p", &Default::default()), (2, 2), "counted as running, the two places are taken");
     assert_eq!(d.live_sub_counts("p", &d.finished_task_sessions()), (0, 0), "a finished task's agent holds no place");
-    let (actions, _) = d.runs.lock().step_gated(1, |_| None, |creator, finished| d.run_gate(creator, finished));
+    let (actions, _) = d.runs.lock().step_gated(1, |_| None, |ready, finished| d.run_gate(ready.creator.unwrap(), finished));
     assert_eq!(actions, vec![Action::Start { run: "r1".into(), task: "c".into() }], "the third task starts");
     // The agent that reported itself done holds no place either.
     d.runs.lock().list[0].tasks[2].status = TaskStatus::Pending;
@@ -1216,7 +1216,7 @@ fn a_task_that_waits_for_room_says_why_once_and_tells_its_session_once() {
     let mut run = runs::build_run(new_run(&folder, json!([{"id": "c", "title": "the third", "prompt": "p", "kind": "codex"}])), "r1".into(), 0).unwrap();
     run.creator = Some("p".into());
     d.runs.lock().list.insert(0, run);
-    let step = |now: u64| d.runs.lock().step_gated(now, |_| None, |creator, finished| d.run_gate(creator, finished)).0;
+    let step = |now: u64| d.runs.lock().step_gated(now, |_| None, |ready, finished| d.run_gate(ready.creator.unwrap(), finished)).0;
     let actions = step(1);
     let [Action::Waiting { run, task, reason }] = actions.as_slice() else { panic!("{actions:?}") };
     assert_eq!(reason, "waiting for a free sub-session slot (2 of 2 busy)");

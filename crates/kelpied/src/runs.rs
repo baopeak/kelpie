@@ -80,6 +80,9 @@ pub struct Task {
     pub approved: bool,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// When the task, ready, was first held back for room (0: never): its wait counts toward its place in the queue.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub waiting_since: u64,
     /// Folder the task ran in (its worktree, or the run folder).
     #[serde(default)]
     pub cwd: Option<String>,
@@ -207,11 +210,37 @@ pub enum Action {
     Waiting { run: String, task: String, reason: String },
 }
 
-/// Whether a task of a run made by a program in a session may start now.
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// A task that is ready to start, as the gate is asked about it.
+#[derive(Debug, Clone, Copy)]
+pub struct Ready<'a> {
+    pub run: &'a str,
+    pub task: &'a str,
+    /// The session whose program made the run, if one did.
+    pub creator: Option<&'a str>,
+}
+
+/// A task that is ready, for the daemon's admission queue (what it runs, where, and since when it waits).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadyTask {
+    pub run: String,
+    pub task: String,
+    pub creator: Option<String>,
+    pub project: Option<String>,
+    pub cwd: String,
+    pub kind: String,
+    /// When it was first held back (0: not yet).
+    pub waiting_since: u64,
+}
+
+/// Whether a task may start now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gate {
     Open,
-    /// The sub-session limits are full: it waits, ready, and the reason is shown on the task.
+    /// No room yet (the sub-session limits, or the admission queue): it waits, ready, and the reason is shown on the task.
     Wait(String),
     /// It never can (sub-sessions were turned off, or the session that made the run is gone).
     Fail(String),
@@ -314,6 +343,7 @@ pub fn build_run(new: NewRun, id: String, now: u64) -> Result<Run> {
             host: t.host,
             status: TaskStatus::Pending,
             approved: false,
+            waiting_since: 0,
             session_id: None,
             cwd: None,
             branch: None,
@@ -485,9 +515,31 @@ impl Runs {
         self.step_gated(now, view, |_, _| Gate::Open)
     }
 
-    /// [`Self::step`], where a task of a run made by a program in a session (`Run::creator`, given to `gate`) starts only when
-    /// the gate is open. A task that must wait stays ready and is looked at again by the next step.
-    pub fn step_gated(&mut self, now: u64, view: impl Fn(&str) -> Option<SessionView>, gate: impl Fn(&str, &HashSet<String>) -> Gate) -> (Vec<Action>, Vec<String>) {
+    /// The tasks that are ready to start (their dependencies done, approved where asked), for the admission queue.
+    pub fn ready(&self) -> Vec<ReadyTask> {
+        let mut out = Vec::new();
+        for run in self.list.iter().filter(|r| r.status == RunStatus::Running) {
+            let status_of: HashMap<&str, TaskStatus> = run.tasks.iter().map(|t| (t.id.as_str(), t.status)).collect();
+            for t in run.tasks.iter().filter(|t| t.status == TaskStatus::Pending && (!t.approve || t.approved)) {
+                if t.deps.iter().all(|d| status_of.get(d.as_str()) == Some(&TaskStatus::Done)) {
+                    out.push(ReadyTask {
+                        run: run.id.clone(),
+                        task: t.id.clone(),
+                        creator: run.creator.clone(),
+                        project: run.project_id.clone(),
+                        cwd: run.cwd.clone(),
+                        kind: t.kind.clone(),
+                        waiting_since: t.waiting_since,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// [`Self::step`], where a ready task starts only when the gate is open (for a run a program in a session made, the
+    /// sub-session limits too). A task that must wait stays ready and is looked at again by the next step.
+    pub fn step_gated(&mut self, now: u64, view: impl Fn(&str) -> Option<SessionView>, gate: impl Fn(Ready<'_>, &HashSet<String>) -> Gate) -> (Vec<Action>, Vec<String>) {
         let mut actions = Vec::new();
         // Sessions of tasks that ended (their agents may idle on): the sub-session limits count busy sessions only.
         let finished = self.finished_sessions();
@@ -564,15 +616,19 @@ impl Runs {
                                 moved = true;
                             }
                         } else {
-                            match run.creator.as_deref().map_or(Gate::Open, |creator| gate(creator, &finished)) {
+                            match gate(Ready { run: &run.id, task: &t.id, creator: run.creator.as_deref() }, &finished) {
                                 Gate::Open => {
                                     t.note = None;
+                                    t.waiting_since = 0;
                                     t.status = TaskStatus::Starting;
                                     actions.push(Action::Start { run: run.id.clone(), task: t.id.clone() });
                                     moved = true;
                                 }
                                 // Ready, and asked again at the next step; the reason is on the task, and said once.
                                 Gate::Wait(reason) => {
+                                    if t.waiting_since == 0 {
+                                        t.waiting_since = now;
+                                    }
                                     if t.note.as_deref() != Some(reason.as_str()) {
                                         if t.note.is_none() {
                                             actions.push(Action::Waiting { run: run.id.clone(), task: t.id.clone(), reason: reason.clone() });
@@ -679,9 +735,11 @@ mod tests {
         let none = |_: &str| None;
         // Full: ready, not started, not failed; asked again at the next step.
         let wait = || Gate::Wait("full".into());
-        let (actions, _) = runs.step_gated(1, none, |creator, _| if creator == "p" { wait() } else { Gate::Open });
+        let (actions, _) = runs.step_gated(1, none, |ready, _| if ready.creator == Some("p") { wait() } else { Gate::Open });
         assert_eq!(actions, vec![Action::Waiting { run: "r1".into(), task: "a".into(), reason: "full".into() }], "said once");
         assert_eq!(runs.list[0].tasks[0].status, TaskStatus::Pending);
+        assert_eq!(runs.list[0].tasks[0].waiting_since, 1, "its wait counts from here");
+        assert_eq!(runs.ready().iter().map(|t| (t.task.as_str(), t.creator.as_deref())).collect::<Vec<_>>(), [("a", Some("p"))], "b waits on a");
         // Said once, shown on the task; a changed reason is shown without another notice.
         assert_eq!(runs.list[0].tasks[0].note.as_deref(), Some("full"));
         let (actions, _) = runs.step_gated(2, none, |_, _| Gate::Wait("still full".into()));
@@ -692,16 +750,17 @@ mod tests {
         assert_eq!(actions, vec![Action::Start { run: "r1".into(), task: "a".into() }]);
         assert_eq!(runs.list[0].tasks[0].status, TaskStatus::Starting);
         assert_eq!(runs.list[0].tasks[0].note, None, "the reason goes when it starts");
+        assert_eq!(runs.list[0].tasks[0].waiting_since, 0);
         // Never: the task fails and what depends on it is skipped.
         runs.list[0].tasks[0].status = TaskStatus::Pending;
         let (actions, _) = runs.step_gated(4, none, |_, _| Gate::Fail("turned off".into()));
         assert!(actions.is_empty());
         assert_eq!((runs.list[0].tasks[0].status, runs.list[0].tasks[0].error.as_deref()), (TaskStatus::Failed, Some("turned off")));
         assert_eq!(runs.list[0].tasks[1].status, TaskStatus::Skipped);
-        // A run nobody's program made is never held back, and `step` is that.
+        // A run a person made is asked about too (the admission queue), with no creator; `step` opens every gate.
         let mut plain = Runs { path: std::env::temp_dir().join("kelpie-gate-runs2.json"), list: vec![run_of(vec![new_task("a", &[])])] };
-        let (actions, _) = plain.step_gated(1, none, |_, _| Gate::Wait("full".into()));
-        assert_eq!(actions.len(), 1);
+        let (actions, _) = plain.step_gated(1, none, |ready, _| if ready.creator.is_none() { Gate::Wait("queued".into()) } else { Gate::Open });
+        assert_eq!(actions, vec![Action::Waiting { run: "r1".into(), task: "a".into(), reason: "queued".into() }]);
         let (actions, _) = Runs { path: plain.path.clone(), list: vec![run_of(vec![new_task("a", &[])])] }.step(1, none);
         assert_eq!(actions.len(), 1);
     }

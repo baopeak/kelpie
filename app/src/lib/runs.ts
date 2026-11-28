@@ -65,6 +65,8 @@ export interface RunTask {
   finished_at: number;
   summary: string | null;
   error: string | null;
+  /** Why a ready task has not started yet, with its place in the queue (set by the daemon, gone when it starts). */
+  note?: string | null;
   worked: boolean;
   /** What its worktree was given from the repository's ignored files (copies, links, what was left out). */
   brought?: Brought;
